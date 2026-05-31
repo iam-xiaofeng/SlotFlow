@@ -3,6 +3,55 @@
 SlotFlow keeps the DeerFlow harness capabilities, but removes the old product
 and LangGraph Platform compatibility layers from the first learning milestone.
 
+## Learning Goal
+
+SlotFlow is not only a smaller implementation. It is also a guided full-stack
+learning project.
+
+Every module should make the complete path easier to understand:
+
+```txt
+frontend input
+-> backend API
+-> run config
+-> harness / agent
+-> SSE events
+-> frontend stream state
+-> UI rendering
+```
+
+For each module, explain four things before moving on:
+
+```txt
+what problem it solves
+what input it receives
+what output it produces
+where it sits in the frontend -> backend -> agent -> frontend loop
+```
+
+Development should advance in small verified modules:
+
+```txt
+1. backend health/API skeleton
+2. run config builder
+3. fake agent stream -> business SSE
+4. thread/message persistence
+5. real harness agent builder + checkpointer
+6. frontend SSE parser
+7. frontend use-chat-stream hook
+8. chat UI for messages/tools/state
+9. real agent streaming
+```
+
+`make verify` is the project health gate, not the chat feature itself. It
+currently verifies backend tests, frontend type checking, and frontend
+production build. As real modules are added, this command should cover more of
+the actual chat stream.
+
+When something fails, first look for a simpler boundary or a smaller test. Do
+not add compatibility layers, global state, or old protocol adapters just to
+hide the failure.
+
 ## Keep
 
 ```txt
