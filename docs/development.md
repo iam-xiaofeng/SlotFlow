@@ -65,8 +65,12 @@ extensions
 
 SlotFlow 已经把模块四改成这个方向：真实 graph 通过
 `await graph.astream_events(..., version="v3")` 拿到 run stream。FastAPI 使用的是异步
-路径，本地实测的 `AsyncGraphRunStream` 当前没有 `ainterleave(...)`，所以代码直接消费
-主事件日志里的 `method` 和 `params.data`，再映射成自己的 `AgentEvent`。
+路径，本地实测的 `AsyncGraphRunStream` 当前没有 `ainterleave(...)`，所以代码当前采用：
+
+```txt
+优先消费 typed projections（messages / values / tool_calls）
+projection lane 不足时，再回退到 raw protocol event
+```
 
 这样做比旧式 `astream(stream_mode=[...])` 更贴近官方新接口，也更适合前端消费。
 
@@ -79,6 +83,21 @@ SlotFlow 已经把模块四改成这个方向：真实 graph 通过
 4. 只有在真实 harness agent 明确不支持 v3 时，才回退到 astream(stream_mode=[...])。
 5. 任何回退都必须写清楚具体版本、具体 API、具体失败原因。
 ```
+
+## Runtime 边界
+
+当前真实模型路径不再直接写死在 `main.py` 或某个单独的 DeepSeek helper 里，而是统一走
+SlotFlow 本地 runtime 装配层：
+
+```txt
+runtime.py
+-> RuntimeBackedAgentAdapter
+-> create_langgraph_agent_graph(...)
+-> optional checkpointer
+```
+
+这层的目标不是引入 DeerFlow 包，而是本地重写一个更小的运行时边界，让后面继续吸收
+DeerFlow 的有价值能力时，不需要回头拆现有 FastAPI / SSE / AgentEvent 主干。
 
 ## Live Smoke Test 原则
 

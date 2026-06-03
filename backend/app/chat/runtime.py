@@ -23,6 +23,7 @@ from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.chat.agent_adapter import (
+    AgentEvent,
     AgentAdapter,
     LangGraphEventAgentAdapter,
     StaticProjectionAgentAdapter,

@@ -23,9 +23,10 @@ import os
 
 import pytest
 
-from app.chat.agent_adapter import collect_agent_events, create_deepseek_agent_adapter
+from app.chat.agent_adapter import collect_agent_events
 from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
+from app.chat.runtime import RuntimeBackedAgentAdapter, SlotFlowRuntimeConfig
 
 
 pytestmark = pytest.mark.skipif(
@@ -52,7 +53,13 @@ async def test_deepseek_agent_adapter_streams_v3_events() -> None:
         run_id="run_live_deepseek",
         request=request,
     )
-    adapter = create_deepseek_agent_adapter(model_name=model_name)
+    adapter = RuntimeBackedAgentAdapter(
+        SlotFlowRuntimeConfig(
+            adapter_mode="deepseek",
+            model_name=model_name,
+            checkpointer_backend="memory",
+        )
+    )
 
     events = await collect_agent_events(adapter.stream_events(request=request, bundle=bundle))
     event_names = [event.event for event in events]

@@ -136,7 +136,7 @@ FastAPI TestClient HTTP 链路测试
 6. FastAPI 聊天路由
 7. 用 TestClient 模拟完整后端链路
 8. DeepSeek / LangGraph live smoke test
-9. 真实 harness agent 构建器 + checkpointer
+9. SlotFlow 本地 runtime / harness 装配层 + checkpointer
 10. 前端 SSE 解析器
 11. 前端 use-chat-stream hook
 12. 聊天 UI 展示 message / tool / state
@@ -192,7 +192,8 @@ SSE 事件契约
 ```txt
 HTTP endpoint
 -> graph.astream_events(..., version="v3")
--> raw event method / params.data
+-> 优先 typed projections
+-> 必要时 raw event method / params.data fallback
 -> AgentEvent
 -> 业务 SSE 事件
 ```

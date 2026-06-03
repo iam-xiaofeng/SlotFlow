@@ -242,8 +242,8 @@ graph = create_agent(..., context_schema=RunContext)
 await graph.astream_events(..., context=...)
 ```
 
-而不是把这些业务字段混进 `configurable`。当前 `create_deepseek_agent_adapter`
-已经把 `context_schema=RunContext` 补上，和这条方向保持一致。
+而不是把这些业务字段混进 `configurable`。当前 SlotFlow 本地 runtime 创建真实 graph
+时也会把 `context_schema=RunContext` 补上，和这条方向保持一致。
 
 不过要注意：目前模块四测试里的 fake graph 还没有真正读取这些字段，所以在当前学习
 阶段，`RunContext` 主要仍是 adapter 外层的业务上下文，而不是 graph state 本身。

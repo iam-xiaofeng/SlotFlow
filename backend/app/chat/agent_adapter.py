@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import os
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
+from app.chat.models import ChatStreamRequest, RunConfigBundle
 
 
 AgentEventName = Literal[
@@ -217,39 +216,6 @@ class LangGraphEventAgentAdapter:
                 yield event
 
         yield make_finished_event(bundle=bundle)
-
-
-def create_deepseek_agent_adapter(*, model_name: str) -> LangGraphEventAgentAdapter:
-    """创建使用 DeepSeek OpenAI-compatible API 的 LangGraph agent adapter。
-
-    这个函数只读取环境变量，不负责加载 `.env` 文件。学习阶段的 live smoke test 会在
-    命令里临时 source key；后端应用本身不偷偷读取旧项目的配置。
-    """
-
-    from langchain.agents import create_agent
-    from langchain_openai import ChatOpenAI
-
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY is required for DeepSeek smoke test")
-
-    model = ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url="https://api.deepseek.com",
-        streaming=True,
-        timeout=30,
-        max_retries=0,
-    )
-    graph = create_agent(
-        model=model,
-        tools=[],
-        system_prompt="你是 SlotFlow 的学习版助手，回答要简洁、具体。",
-        context_schema=RunContext,
-    )
-    return LangGraphEventAgentAdapter(graph)
-
-
 @dataclass(slots=True)
 class ProjectionEnvelope:
     """记录一条 projection item 来自哪个 v3 projection。"""
