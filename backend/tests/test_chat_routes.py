@@ -1,0 +1,181 @@
+"""模块六测试：FastAPI 聊天路由完整后端链路。
+
+这组测试第一次把前面几个模块串起来：
+
+HTTP 请求
+-> 内存仓库
+-> run 配置
+-> agent adapter
+-> SSE frame
+-> 仓库最终状态
+
+仍然不调用真实模型。真实 DeepSeek 会放在单独 smoke test 里，避免日常测试受网络影响。
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+
+from fastapi.testclient import TestClient
+
+from app.chat.agent_adapter import AgentEvent, StaticProjectionAgentAdapter
+from app.chat.models import ChatStreamRequest, RunConfigBundle
+from app.chat.repository import InMemoryChatRepository
+from app.main import create_app
+
+
+class BrokenAgentAdapter:
+    """测试用 adapter：先流出一段文本，再模拟 agent 崩溃。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": f"{bundle.context.run_id}:assistant",
+                "role": "assistant",
+                "delta": "出错前的片段",
+                "index": 0,
+            },
+        )
+        raise RuntimeError("boom from test adapter")
+
+
+def _client(repo: InMemoryChatRepository, adapter=None) -> TestClient:
+    """创建带测试仓库和测试 adapter 的 TestClient。"""
+
+    return TestClient(
+        create_app(
+            chat_repo=repo,
+            agent_adapter=adapter or StaticProjectionAgentAdapter(),
+        )
+    )
+
+
+def _parse_sse(text: str) -> list[dict]:
+    """把 TestClient 收到的 SSE 文本解析成事件列表。"""
+
+    events: list[dict] = []
+    for block in text.strip().split("\n\n"):
+        item: dict = {}
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                item["event"] = line.removeprefix("event: ")
+            if line.startswith("data: "):
+                item["data"] = json.loads(line.removeprefix("data: "))
+        if item:
+            events.append(item)
+    return events
+
+
+def test_thread_routes_create_list_get_and_list_messages() -> None:
+    """thread 的基础 HTTP 接口应该能创建、读取、列出消息。"""
+
+    repo = InMemoryChatRepository()
+    client = _client(repo)
+
+    create_response = client.post("/api/chat/threads", json={"title": "  学习会话  "})
+    thread = create_response.json()
+
+    assert create_response.status_code == 200
+    assert thread["title"] == "学习会话"
+
+    list_response = client.get("/api/chat/threads")
+    get_response = client.get(f"/api/chat/threads/{thread['id']}")
+    messages_response = client.get(f"/api/chat/threads/{thread['id']}/messages")
+
+    assert list_response.status_code == 200
+    assert [item["id"] for item in list_response.json()] == [thread["id"]]
+    assert get_response.status_code == 200
+    assert get_response.json()["id"] == thread["id"]
+    assert messages_response.status_code == 200
+    assert messages_response.json() == []
+
+
+def test_missing_thread_routes_return_404() -> None:
+    """不存在的 thread 要返回 404，而不是在仓库里悄悄创建。"""
+
+    repo = InMemoryChatRepository()
+    client = _client(repo)
+
+    assert client.get("/api/chat/threads/thread_missing").status_code == 404
+    assert client.get("/api/chat/threads/thread_missing/messages").status_code == 404
+    assert (
+        client.post(
+            "/api/chat/threads/thread_missing/runs/stream",
+            json={"message": "hello"},
+        ).status_code
+        == 404
+    )
+
+
+def test_stream_run_emits_sse_and_persists_messages_and_completed_run() -> None:
+    """前端发送 stream 请求后，后端应该返回 SSE，并保存用户和 assistant 消息。"""
+
+    repo = InMemoryChatRepository()
+    client = _client(repo)
+    thread = client.post("/api/chat/threads", json={"title": "链路测试"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={
+            "message": "解释完整链路",
+            "model_name": "deepseek-v4-flash",
+            "mode": "pro",
+            "files": ["upload_1"],
+        },
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert events[0]["event"] == "run.prepared"
+    assert "message.delta" in [event["event"] for event in events]
+    assert events[-2]["event"] == "state.snapshot"
+    assert events[-1]["event"] == "run.finished"
+
+    messages = repo.list_messages(thread["id"])
+    runs = repo.list_runs(thread["id"])
+
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[0].content == "解释完整链路"
+    assert messages[0].metadata == {
+        "files": ["upload_1"],
+        "request_metadata": {},
+    }
+    assert "解释完整链路" in messages[1].content
+    assert messages[1].run_id == runs[0].id
+    assert runs[0].status == "completed"
+    assert runs[0].model_name == "deepseek-v4-flash"
+    assert runs[0].mode == "pro"
+
+
+def test_stream_run_error_event_marks_run_failed() -> None:
+    """agent adapter 崩溃时，SSE 要返回 run.error，仓库里的 run 要变成 failed。"""
+
+    repo = InMemoryChatRepository()
+    client = _client(repo, adapter=BrokenAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "失败链路"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "触发错误"},
+    )
+    events = _parse_sse(response.text)
+    runs = repo.list_runs(thread["id"])
+    messages = repo.list_messages(thread["id"])
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == ["message.delta", "run.error"]
+    assert events[-1]["data"] == {
+        "name": "RuntimeError",
+        "message": "boom from test adapter",
+    }
+    assert runs[0].status == "failed"
+    assert runs[0].error == "boom from test adapter"
+    assert [message.role for message in messages] == ["user"]

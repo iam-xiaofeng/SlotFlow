@@ -1,0 +1,128 @@
+"""模块三测试：把前端请求整理成 agent 运行配置。
+
+这个测试文件只盯一个边界：字段到底应该放进 `config` 还是 `context`。
+
+后面接真实 harness 时，如果 `thread_id` 放错位置，多轮记忆可能会静默失效。
+所以这里提前把规则写成测试，而不是等真实 agent 接上以后再靠肉眼排查。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from app.chat.models import ChatStreamRequest
+from app.chat.run_config import build_run_config, mode_to_feature_flags
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (
+            "flash",
+            {
+                "thinking_enabled": False,
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+            },
+        ),
+        (
+            "pro",
+            {
+                "thinking_enabled": True,
+                "is_plan_mode": True,
+                "subagent_enabled": False,
+            },
+        ),
+        (
+            "ultra",
+            {
+                "thinking_enabled": True,
+                "is_plan_mode": True,
+                "subagent_enabled": True,
+            },
+        ),
+    ],
+)
+def test_mode_to_feature_flags(mode, expected) -> None:
+    """三档模式要稳定翻译成后端功能开关。"""
+
+    assert mode_to_feature_flags(mode) == expected
+
+
+def test_build_run_config_puts_thread_id_in_configurable() -> None:
+    """thread_id 必须在 configurable 里，后续 checkpointer 会靠它找多轮状态。"""
+
+    request = ChatStreamRequest(message="解释 thread_id")
+
+    bundle = build_run_config(
+        thread_id="thread_abc",
+        run_id="run_abc",
+        request=request,
+    )
+
+    assert bundle.config == {
+        "configurable": {
+            "thread_id": "thread_abc",
+        },
+    }
+
+
+def test_build_run_config_puts_business_fields_in_context() -> None:
+    """业务字段进入 context，而不是混进 config 里。"""
+
+    request = ChatStreamRequest(
+        message="开始研究",
+        model_name="gpt-learning",
+        mode="ultra",
+        agent_name="researcher",
+        files=["upload_1", "upload_2"],
+    )
+
+    bundle = build_run_config(
+        thread_id="thread_123",
+        run_id="run_456",
+        request=request,
+    )
+
+    assert bundle.context.thread_id == "thread_123"
+    assert bundle.context.run_id == "run_456"
+    assert bundle.context.model_name == "gpt-learning"
+    assert bundle.context.mode == "ultra"
+    assert bundle.context.agent_name == "researcher"
+    assert bundle.context.files == ["upload_1", "upload_2"]
+    assert bundle.context.thinking_enabled is True
+    assert bundle.context.is_plan_mode is True
+    assert bundle.context.subagent_enabled is True
+    assert "run_id" not in bundle.config["configurable"]
+    assert "model_name" not in bundle.config["configurable"]
+
+
+def test_build_run_config_copies_files_from_request() -> None:
+    """files 进入 context 时要复制一份，避免后续修改请求对象影响运行上下文。"""
+
+    request = ChatStreamRequest(message="分析文件", files=["upload_1"])
+
+    bundle = build_run_config(
+        thread_id="thread_abc",
+        run_id="run_abc",
+        request=request,
+    )
+    request.files.append("upload_2")
+
+    assert bundle.context.files == ["upload_1"]
+
+
+def test_build_run_config_uses_flash_as_lightweight_mode() -> None:
+    """flash 模式是轻量模式，不启用思考、规划和子 agent。"""
+
+    request = ChatStreamRequest(message="快速回答", mode="flash")
+
+    bundle = build_run_config(
+        thread_id="thread_fast",
+        run_id="run_fast",
+        request=request,
+    )
+
+    assert bundle.context.thinking_enabled is False
+    assert bundle.context.is_plan_mode is False
+    assert bundle.context.subagent_enabled is False
