@@ -570,6 +570,67 @@ SlotFlow 当前 fake stream 是教学版形状，不追求完全复刻 LangGraph
 
 ## 测试命令
 
+## 模块 8：前端流式验证页
+
+相关文件：
+
+```txt
+frontend/src/lib/chat-stream.ts
+frontend/src/app/page.tsx
+frontend/next.config.ts
+docs/module-08-frontend-stream-smoke.md
+```
+
+当前模块 8 先做最小浏览器闭环，不做正式前端架构和最终视觉设计。
+
+核心链路：
+
+```txt
+Next 页面
+-> createThread()
+-> POST /api/chat/threads/{thread_id}/runs/stream
+-> 读取 ReadableStream
+-> 按 SSE frame 解析 event/data
+-> message.delta 更新 assistant 文本
+-> state.snapshot 校准最终 assistant 文本
+-> 右侧显示最近业务事件日志
+```
+
+`next.config.ts` 现在把本地前端请求代理到 FastAPI：
+
+```txt
+/api/:path* -> http://localhost:8000/api/:path*
+/health     -> http://localhost:8000/health
+```
+
+这样第一版页面只调用相对路径，不需要先处理浏览器跨端口 CORS。
+
+页面默认发送 `model_name="deepseek-v4-flash"`，不要用 `fake-model`。原因是 static runtime
+不会真正调用模型，DeepSeek runtime 则需要真实支持的模型名；这个默认值可以同时覆盖两种
+验证模式。
+
+验证方式：
+
+```bash
+cd /home/dell/code/SlotFlow/backend
+uv run uvicorn app.main:app --reload --port 8000
+
+cd /home/dell/code/SlotFlow/frontend
+pnpm dev
+```
+
+打开 `http://localhost:3000`，点击 Send 后应看到左侧 assistant 流式文本，右侧出现
+`run.prepared / message.delta / state.snapshot / run.finished`。
+
+下一步如果继续前端，应把模块 8 的临时代码拆成：
+
+```txt
+正式 SSE parser 测试
+useChatStream hook
+消息 reducer
+正式聊天 UI
+```
+
 后端测试：
 
 ```bash

@@ -84,7 +84,7 @@ class ChatStreamRequest(BaseModel):
     """
 
     message: str = Field(min_length=1)
-    model_name: str = "fake-model"
+    model_name: str = "deepseek-v4-flash"
     mode: ChatMode = "pro"
     agent_name: str = "default"
     files: list[str] = Field(default_factory=list)

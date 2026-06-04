@@ -2,12 +2,13 @@
 
 :root {
   color-scheme: light;
-  --background: #f7f7f4;
-  --foreground: #18181b;
-  --muted: #e8e8e3;
-  --muted-foreground: #666a73;
-  --border: #d7d7d0;
-  --primary: #1d4ed8;
+  --background: #efeee7;
+  --foreground: #171914;
+  --surface: #fffdf6;
+  --muted: #e5e0d4;
+  --muted-foreground: #696b61;
+  --border: #d4cdbc;
+  --primary: #2457c5;
   --primary-foreground: #ffffff;
 }
 
@@ -19,5 +20,12 @@ body {
   margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family:
+    "Aptos",
+    "Segoe UI",
+    sans-serif;
+}
+
+::selection {
+  background: rgba(36, 87, 197, 0.18);
 }

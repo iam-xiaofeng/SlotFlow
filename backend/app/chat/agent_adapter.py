@@ -216,12 +216,15 @@ class LangGraphEventAgentAdapter:
                 yield event
 
         yield make_finished_event(bundle=bundle)
+
 @dataclass(slots=True)
 class ProjectionEnvelope:
     """记录一条 projection item 来自哪个 v3 projection。"""
 
     projection: str
     item: Any
+
+
 async def iter_projection_agent_events(
     run_stream: Any,
     *,
