@@ -631,6 +631,37 @@ useChatStream hook
 正式聊天 UI
 ```
 
+## 模块 9：前端 SSE parser
+
+相关文件：
+
+```txt
+frontend/src/lib/sse-parser.ts
+frontend/src/lib/chat-stream.ts
+docs/module-09-frontend-sse-parser.md
+```
+
+模块 9 把模块 8 里的 SSE 文本解析抽成纯函数层：
+
+```txt
+SSE 文本 buffer
+-> drainSseBuffer()
+-> parseSseFrame()
+-> ChatStreamEvent[]
+```
+
+边界现在是：
+
+```txt
+chat-stream.ts = I/O 层，负责 fetch / ReadableStream / TextDecoder
+sse-parser.ts = 纯解析层，负责 event/data frame -> ChatStreamEvent
+page.tsx       = 临时 UI 层，负责展示 messages 和 Event Log
+```
+
+`ReadableStream` 的 chunk 不保证刚好等于一条 SSE 事件，所以 parser 会把未结束的半条
+frame 留在 `rest`，等下一次 chunk 继续拼。后续做 `useChatStream` hook 时，应复用
+`drainSseBuffer()`，不要在 hook 里重新手写 SSE frame 解析。
+
 后端测试：
 
 ```bash

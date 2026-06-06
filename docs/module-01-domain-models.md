@@ -67,7 +67,7 @@ backend/tests/test_chat_models.py
 ```json
 {
   "message": "解释一下 SlotFlow",
-  "model_name": "fake-model",
+  "model_name": "deepseek-v4-flash",
   "mode": "pro",
   "agent_name": "default",
   "files": [],
