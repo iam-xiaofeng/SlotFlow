@@ -19,7 +19,6 @@ from collections.abc import Callable, AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.chat.agent_adapter import (
@@ -29,6 +28,7 @@ from app.chat.agent_adapter import (
     StaticProjectionAgentAdapter,
 )
 from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
+from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -89,6 +89,7 @@ class RuntimeBackedAgentAdapter:
             graph = create_langgraph_agent_graph(
                 model=self._model_factory(model_name),
                 runtime_config=self._runtime_config,
+                run_context=bundle.context,
                 checkpointer=self._checkpointer,
             )
             adapter = LangGraphEventAgentAdapter(
@@ -174,22 +175,21 @@ def create_langgraph_agent_graph(
     *,
     model: str | BaseChatModel,
     runtime_config: SlotFlowRuntimeConfig,
+    run_context: RunContext,
     checkpointer: Checkpointer | None = None,
 ):
     """创建 SlotFlow 本地的真实 LangGraph agent graph。
 
-    这里故意只保留 SlotFlow 当前已经讲清楚的边界：
-
-    - `context_schema=RunContext`
-    - 可选 checkpointer
-    - 暂时不引入 DeerFlow 的工具/中间件/全局配置装配
+    `chat.runtime` 只负责选择运行模式和模型。真实 graph 的组装委托给 `app.harness`，
+    这样 tools / skills / MCP / middleware 后续都能收敛到 harness 边界里。
     """
 
-    return create_agent(
+    return build_slotflow_harness_graph(
         model=model,
-        tools=[],
-        system_prompt=runtime_config.system_prompt,
-        context_schema=RunContext,
+        run_context=run_context,
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt=runtime_config.system_prompt,
+        ),
         checkpointer=checkpointer,
     )
 

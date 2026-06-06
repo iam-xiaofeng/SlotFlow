@@ -662,6 +662,39 @@ page.tsx       = 临时 UI 层，负责展示 messages 和 Event Log
 frame 留在 `rest`，等下一次 chunk 继续拼。后续做 `useChatStream` hook 时，应复用
 `drainSseBuffer()`，不要在 hook 里重新手写 SSE frame 解析。
 
+## 模块 10：SlotFlow harness builder 骨架
+
+相关文件：
+
+```txt
+backend/app/harness/__init__.py
+backend/app/harness/builder.py
+backend/app/harness/config.py
+backend/app/harness/features.py
+backend/app/harness/state.py
+backend/tests/test_harness_builder.py
+docs/module-10-slotflow-harness-builder.md
+```
+
+模块 10 把真实 LangGraph agent graph 的组装边界从 `chat/runtime.py` 迁到 `app/harness/`。
+`runtime.py` 现在只负责选择运行模式、模型和 checkpointer，然后委托：
+
+```txt
+create_langgraph_agent_graph()
+-> build_slotflow_harness_graph()
+-> langchain.agents.create_agent(...)
+```
+
+新的依赖方向必须保持：
+
+```txt
+chat.routes -> chat.runtime -> harness.builder -> LangGraph create_agent
+```
+
+不要让 `harness` 反向依赖 FastAPI route、ChatRepository、SSE encoder 或 frontend。
+后续 tools / skills / MCP / middleware 都应该进入 `app/harness/`，而不是塞回
+`chat/runtime.py`。
+
 后端测试：
 
 ```bash
