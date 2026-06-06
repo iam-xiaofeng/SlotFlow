@@ -695,6 +695,36 @@ chat.routes -> chat.runtime -> harness.builder -> LangGraph create_agent
 后续 tools / skills / MCP / middleware 都应该进入 `app/harness/`，而不是塞回
 `chat/runtime.py`。
 
+## 模块 11：Harness 安全内置工具
+
+相关文件：
+
+```txt
+backend/app/harness/tools/__init__.py
+backend/app/harness/tools/builtins.py
+backend/app/harness/tools/registry.py
+backend/tests/test_harness_tools.py
+docs/module-11-harness-tools.md
+```
+
+模块 11 加入第一批安全内置工具：
+
+```txt
+slotflow_context
+```
+
+这个工具只返回 thread_id / run_id / mode / source 的 JSON 摘要，不读文件、不写文件、
+不访问网络、不执行 shell、不依赖 sandbox。它的目标是证明 harness tool calling 链路，
+不是提供复杂业务能力。
+
+`build_harness_tools(features=..., extra_tools=...)` 是后续 builtin tools、MCP tools、
+subagent tools、skills allowed-tools 策略的统一入口。当前 registry 会按 tool.name 去重，
+保留更早出现的工具。
+
+重要边界：真实 DeepSeek/OpenAI chat model 支持 `bind_tools()`，但 LangChain 的部分 fake
+model 不支持。`harness.builder` 会在模型没有 tool binding 能力时跳过 tools，避免普通 fake
+model 测试失败；tool calling 的测试使用专门支持 `bind_tools()` 的 fake model。
+
 后端测试：
 
 ```bash

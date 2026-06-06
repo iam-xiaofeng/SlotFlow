@@ -9,11 +9,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.chat.models import RunContext
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 from app.harness.state import SlotFlowAgentState
+from app.harness.tools import build_harness_tools
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import AgentMiddleware
@@ -38,7 +40,14 @@ def build_slotflow_harness_graph(
     """
 
     features = features_from_run_context(run_context)
-    selected_tools = list(tools or [])
+    selected_tools = maybe_disable_tools_for_model(
+        model=model,
+        tools=build_harness_tools(
+            features=features,
+            extra_tools=tools,
+        ),
+    )
+
     selected_middleware = list(middleware or [])
 
     return _create_agent_graph(
@@ -51,6 +60,26 @@ def build_slotflow_harness_graph(
         ),
         checkpointer=checkpointer,
     )
+
+
+def maybe_disable_tools_for_model(
+    *,
+    model: str | BaseChatModel,
+    tools: list[BaseTool],
+) -> list[BaseTool]:
+    """如果模型不支持 tool binding，就不要把工具传给 `create_agent`。
+
+    真实 DeepSeek/OpenAI chat model 支持 `bind_tools()`。LangChain 的部分 fake model 只用于
+    普通文本测试，没有实现 tool binding；对这些模型强行传工具会在 graph 执行时失败。
+    """
+
+    if not tools:
+        return []
+    if isinstance(model, str):
+        return tools
+    if type(model).bind_tools is BaseChatModel.bind_tools:
+        return []
+    return tools
 
 
 def build_system_prompt(

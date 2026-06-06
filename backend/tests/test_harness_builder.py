@@ -15,6 +15,13 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 
 
+class ToolAwareFakeListChatModel(FakeListChatModel):
+    """测试用 fake model：普通 fake 文本能力 + 支持 bind_tools 边界。"""
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
+
+
 def _run_context(mode: str = "ultra"):
     request = ChatStreamRequest(message="解释 harness", mode=mode)
     return build_run_config(
@@ -48,7 +55,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
 
     monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
 
-    model = FakeListChatModel(responses=["ok"])
+    model = ToolAwareFakeListChatModel(responses=["ok"])
     checkpointer = object()
     graph = builder_module.build_slotflow_harness_graph(
         model=model,
@@ -59,13 +66,33 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
 
     assert graph is fake_graph
     assert captured["model"] is model
-    assert captured["tools"] == []
+    assert [tool.name for tool in captured["tools"]] == ["slotflow_context"]
     assert captured["middleware"] == []
     assert captured["checkpointer"] is checkpointer
     assert "base prompt" in captured["system_prompt"]
     assert "thinking_enabled=True" in captured["system_prompt"]
     assert "plan_enabled=True" in captured["system_prompt"]
     assert "subagent_enabled=False" in captured["system_prompt"]
+
+
+def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) -> None:
+    """普通 fake model 没有 tool binding 能力，builder 不应强行传工具导致运行失败。"""
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_agent_graph(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+
+    builder_module.build_slotflow_harness_graph(
+        model=FakeListChatModel(responses=["ok"]),
+        run_context=_run_context(mode="pro"),
+        harness_config=SlotFlowHarnessConfig(system_prompt="base prompt"),
+    )
+
+    assert captured["tools"] == []
 
 
 def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None:
