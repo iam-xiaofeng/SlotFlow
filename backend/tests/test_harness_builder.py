@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.tools import tool
 
 import app.chat.runtime as runtime_module
 import app.harness.builder as builder_module
@@ -13,6 +14,7 @@ from app.chat.run_config import build_run_config
 from app.chat.runtime import DEFAULT_DEEPSEEK_SYSTEM_PROMPT, SlotFlowRuntimeConfig
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
+from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
 
 
 class ToolAwareFakeListChatModel(FakeListChatModel):
@@ -93,6 +95,44 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
     )
 
     assert captured["tools"] == []
+
+
+def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None:
+    """MCP tools stay inside the harness tools registry boundary."""
+
+    @tool("mcp_fake")
+    def mcp_fake_tool() -> str:
+        """Fake MCP tool for graph-boundary tests."""
+
+        return "ok"
+
+    class FakeMcpToolProvider:
+        def load_tools(self, config: SlotFlowMcpConfig):
+            assert config.servers == (SlotFlowMcpServerConfig(name="filesystem"),)
+            return [mcp_fake_tool]
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_agent_graph(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+
+    builder_module.build_slotflow_harness_graph(
+        model=ToolAwareFakeListChatModel(responses=["ok"]),
+        run_context=_run_context(mode="pro"),
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="base prompt",
+            mcp_config=SlotFlowMcpConfig(
+                enabled=True,
+                servers=(SlotFlowMcpServerConfig(name="filesystem"),),
+            ),
+            mcp_tool_provider=FakeMcpToolProvider(),
+        ),
+    )
+
+    assert [tool.name for tool in captured["tools"]] == ["slotflow_context", "mcp_fake"]
 
 
 def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None:

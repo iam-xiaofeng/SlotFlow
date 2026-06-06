@@ -46,6 +46,8 @@ def build_slotflow_harness_graph(
         tools=build_harness_tools(
             features=features,
             extra_tools=tools,
+            mcp_config=harness_config.mcp_config,
+            mcp_tool_provider=harness_config.mcp_tool_provider,
         ),
     )
 

@@ -761,6 +761,58 @@ skills 不是工具本身，也不是 sandbox 执行器。当前语义是“能�
 和 `SLOTFLOW_ENABLED_SKILLS` 由 `chat.runtime` 读取，但 skill 内容扫描和 prompt 构建属于
 `app/harness/skills`。
 
+## 模块 13：Harness MCP tools 边界
+
+相关文件：
+
+```txt
+backend/app/harness/mcp/__init__.py
+backend/app/harness/mcp/config.py
+backend/app/harness/mcp/loader.py
+backend/app/harness/config.py
+backend/app/harness/tools/registry.py
+backend/app/harness/builder.py
+backend/app/chat/runtime.py
+backend/tests/test_harness_mcp.py
+docs/module-13-harness-mcp.md
+```
+
+模块 13 只落 MCP tools 的入口边界，不连接真实 MCP server：
+
+```txt
+SLOTFLOW_MCP_ENABLED / SLOTFLOW_MCP_SERVERS
+-> SlotFlowMcpConfig
+-> McpToolProvider
+-> load_mcp_tools()
+-> build_harness_tools()
+-> LangGraph create_agent(tools=...)
+```
+
+当前默认 provider 是 `EmptyMcpToolProvider`，不会启动进程、不会访问网络、不会连接 MCP。
+真实 `MultiServerMCPClient` 以后只需要实现 `McpToolProvider`，再传给 tools registry。
+
+重要边界：
+
+```txt
+chat.runtime 只读取 MCP 配置
+harness.tools.registry 才加载 MCP tools
+harness.builder 负责把 mcp_config / mcp_tool_provider 传下去
+FastAPI route / SSE 层不关心 MCP
+```
+
+测试保护：
+
+```txt
+disabled 时不调用 provider
+只把 enabled servers 传给 provider
+MCP tools 会接到 slotflow_context 后面
+runtime env 会生成 SlotFlowMcpConfig
+builder 会把 MCP 配置传进 tools registry
+```
+
+模块 13 暂不做真实 stdio/HTTP MCP 连接、复杂 JSON server 配置、工具权限过滤，也不执行
+skills allowed-tools 策略。
+
 后端测试：
 
 ```bash

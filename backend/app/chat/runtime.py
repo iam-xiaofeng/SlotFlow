@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -30,6 +30,7 @@ from app.chat.agent_adapter import (
 )
 from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
+from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -56,6 +57,8 @@ class SlotFlowRuntimeConfig:
     prefer_projection_stream: bool = True
     skills_root: Path | None = None
     enabled_skills: set[str] | None = None
+    mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
+    mcp_tool_provider: McpToolProvider | None = None
 
 
 class RuntimeBackedAgentAdapter:
@@ -133,7 +136,34 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         system_prompt=os.environ.get("SLOTFLOW_SYSTEM_PROMPT", DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
         skills_root=load_optional_path_from_env("SLOTFLOW_SKILLS_ROOT"),
         enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
+        mcp_config=load_mcp_config_from_env(),
     )
+
+
+def load_mcp_config_from_env() -> SlotFlowMcpConfig:
+    """Read the first SlotFlow MCP config shape from environment variables."""
+
+    enabled = load_bool_from_env("SLOTFLOW_MCP_ENABLED", default=False)
+    server_names = load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
+    return SlotFlowMcpConfig(
+        enabled=enabled,
+        servers=tuple(SlotFlowMcpServerConfig(name=name) for name in server_names),
+    )
+
+
+def load_bool_from_env(name: str, *, default: bool) -> bool:
+    """Read a small boolean environment flag."""
+
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean flag, got {value!r}")
 
 
 def load_optional_path_from_env(name: str) -> Path | None:
@@ -152,6 +182,16 @@ def load_optional_csv_set_from_env(name: str) -> set[str] | None:
     if not value:
         return None
     names = {item.strip() for item in value.split(",") if item.strip()}
+    return names or None
+
+
+def load_optional_csv_list_from_env(name: str) -> list[str] | None:
+    """Read a comma-separated list while preserving item order."""
+
+    value = os.environ.get(name)
+    if not value:
+        return None
+    names = [item.strip() for item in value.split(",") if item.strip()]
     return names or None
 
 
@@ -215,6 +255,8 @@ def create_langgraph_agent_graph(
             system_prompt=runtime_config.system_prompt,
             skills_root=runtime_config.skills_root,
             enabled_skills=runtime_config.enabled_skills,
+            mcp_config=runtime_config.mcp_config,
+            mcp_tool_provider=runtime_config.mcp_tool_provider,
         ),
         checkpointer=checkpointer,
     )

@@ -22,6 +22,7 @@ from app.chat.runtime import (
     create_checkpointer,
     load_runtime_config_from_env,
 )
+from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
 
 
 def _bundle(
@@ -43,6 +44,11 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
     monkeypatch.delenv("SLOTFLOW_AGENT_MODE", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_BACKEND", raising=False)
     monkeypatch.delenv("SLOTFLOW_DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SYSTEM_PROMPT", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SKILLS_ROOT", raising=False)
+    monkeypatch.delenv("SLOTFLOW_ENABLED_SKILLS", raising=False)
+    monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
+    monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
 
     config = load_runtime_config_from_env()
 
@@ -50,6 +56,23 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
         adapter_mode="static",
         model_name="deepseek-v4-flash",
         checkpointer_backend="memory",
+    )
+
+
+def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runtime only reads MCP config; actual tool loading remains in harness."""
+
+    monkeypatch.setenv("SLOTFLOW_MCP_ENABLED", "true")
+    monkeypatch.setenv("SLOTFLOW_MCP_SERVERS", "filesystem, search")
+
+    config = load_runtime_config_from_env()
+
+    assert config.mcp_config == SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(name="filesystem"),
+            SlotFlowMcpServerConfig(name="search"),
+        ),
     )
 
 

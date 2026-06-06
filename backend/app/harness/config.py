@@ -6,8 +6,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from app.harness.mcp import SlotFlowMcpConfig
+
+if TYPE_CHECKING:
+    from app.harness.mcp import McpToolProvider
 
 
 @dataclass(slots=True)
@@ -17,3 +23,5 @@ class SlotFlowHarnessConfig:
     system_prompt: str
     skills_root: Path | None = None
     enabled_skills: set[str] | None = None
+    mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
+    mcp_tool_provider: McpToolProvider | None = None
