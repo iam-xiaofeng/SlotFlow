@@ -813,6 +813,75 @@ builder 会把 MCP 配置传进 tools registry
 模块 13 暂不做真实 stdio/HTTP MCP 连接、复杂 JSON server 配置、工具权限过滤，也不执行
 skills allowed-tools 策略。
 
+## 模块 14：Harness middleware registry
+
+相关文件：
+
+```txt
+backend/app/harness/middleware/__init__.py
+backend/app/harness/middleware/config.py
+backend/app/harness/middleware/builtins.py
+backend/app/harness/middleware/registry.py
+backend/app/harness/config.py
+backend/app/harness/builder.py
+backend/app/chat/runtime.py
+backend/tests/test_harness_middleware.py
+docs/module-14-harness-middleware.md
+```
+
+模块 14 只落 LangChain agent middleware 的 SlotFlow 本地入口，不搬 DeerFlow 旧 middleware。
+
+当前第一颗内置 middleware：
+
+```txt
+SlotFlowRuntimeSummaryMiddleware
+```
+
+它只在 `before_agent` 阶段把 `runtime.context` 和 feature flags 摘要写进 graph state：
+
+```txt
+state["slotflow"]["runtime"]
+```
+
+它不改消息、不拦截模型、不拦截工具。当前作用是证明 middleware registry、开关和真实
+LangGraph graph 执行链路已经跑通。
+
+重要边界：
+
+```txt
+FastAPI middleware 处理 HTTP 请求
+LangChain AgentMiddleware 处理 agent graph 内部执行
+这两个不是一类东西
+```
+
+runtime 读取：
+
+```txt
+SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE=false
+```
+
+默认启用。`chat.runtime` 只解析成 `SlotFlowMiddlewareConfig`，不直接创建 middleware。
+真正组装发生在：
+
+```txt
+build_harness_middleware()
+-> build_slotflow_harness_graph()
+-> create_agent(middleware=...)
+```
+
+测试保护：
+
+```txt
+runtime summary 会保留原有 slotflow state
+默认加入 SlotFlowRuntimeSummaryMiddleware
+config 可以关闭内置 middleware
+按 middleware.name 去重，保留更早实例
+真实 LangGraph fake graph 会执行 before_agent 并返回 slotflow.runtime
+```
+
+模块 14 暂不做 uploads、sandbox、memory、title、tool error handling、dangling tool call、
+wrap_model_call 或 wrap_tool_call。这些后续按小模块逐个加。
+
 后端测试：
 
 ```bash

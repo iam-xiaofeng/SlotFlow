@@ -14,6 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from app.chat.models import RunContext
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
+from app.harness.middleware import build_harness_middleware
 from app.harness.skills import build_skills_prompt, load_enabled_skills
 from app.harness.state import SlotFlowAgentState
 from app.harness.tools import build_harness_tools
@@ -51,7 +52,11 @@ def build_slotflow_harness_graph(
         ),
     )
 
-    selected_middleware = list(middleware or [])
+    selected_middleware = build_harness_middleware(
+        features=features,
+        config=harness_config.middleware_config,
+        extra_middleware=middleware,
+    )
 
     return _create_agent_graph(
         model=model,

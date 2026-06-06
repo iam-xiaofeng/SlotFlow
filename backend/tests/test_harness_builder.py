@@ -15,6 +15,7 @@ from app.chat.runtime import DEFAULT_DEEPSEEK_SYSTEM_PROMPT, SlotFlowRuntimeConf
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
+from app.harness.middleware import SlotFlowMiddlewareConfig
 
 
 class ToolAwareFakeListChatModel(FakeListChatModel):
@@ -69,7 +70,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert graph is fake_graph
     assert captured["model"] is model
     assert [tool.name for tool in captured["tools"]] == ["slotflow_context"]
-    assert captured["middleware"] == []
+    assert [item.name for item in captured["middleware"]] == ["SlotFlowRuntimeSummaryMiddleware"]
     assert captured["checkpointer"] is checkpointer
     assert "base prompt" in captured["system_prompt"]
     assert "thinking_enabled=True" in captured["system_prompt"]
@@ -133,6 +134,29 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
     )
 
     assert [tool.name for tool in captured["tools"]] == ["slotflow_context", "mcp_fake"]
+
+
+def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
+    """middleware registry controls built-ins instead of scattering conditions in builder."""
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_agent_graph(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+
+    builder_module.build_slotflow_harness_graph(
+        model=ToolAwareFakeListChatModel(responses=["ok"]),
+        run_context=_run_context(mode="pro"),
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="base prompt",
+            middleware_config=SlotFlowMiddlewareConfig(runtime_summary_enabled=False),
+        ),
+    )
+
+    assert captured["middleware"] == []
 
 
 def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None:

@@ -31,6 +31,7 @@ from app.chat.agent_adapter import (
 from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
+from app.harness.middleware import SlotFlowMiddlewareConfig
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -59,6 +60,7 @@ class SlotFlowRuntimeConfig:
     enabled_skills: set[str] | None = None
     mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
     mcp_tool_provider: McpToolProvider | None = None
+    middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
 
 
 class RuntimeBackedAgentAdapter:
@@ -137,6 +139,18 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         skills_root=load_optional_path_from_env("SLOTFLOW_SKILLS_ROOT"),
         enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
         mcp_config=load_mcp_config_from_env(),
+        middleware_config=load_middleware_config_from_env(),
+    )
+
+
+def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
+    """Read SlotFlow-owned middleware switches from environment variables."""
+
+    return SlotFlowMiddlewareConfig(
+        runtime_summary_enabled=load_bool_from_env(
+            "SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE",
+            default=True,
+        ),
     )
 
 
@@ -257,6 +271,7 @@ def create_langgraph_agent_graph(
             enabled_skills=runtime_config.enabled_skills,
             mcp_config=runtime_config.mcp_config,
             mcp_tool_provider=runtime_config.mcp_tool_provider,
+            middleware_config=runtime_config.middleware_config,
         ),
         checkpointer=checkpointer,
     )

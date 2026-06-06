@@ -23,6 +23,7 @@ from app.chat.runtime import (
     load_runtime_config_from_env,
 )
 from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
+from app.harness.middleware import SlotFlowMiddlewareConfig
 
 
 def _bundle(
@@ -49,6 +50,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
     monkeypatch.delenv("SLOTFLOW_ENABLED_SKILLS", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
+    monkeypatch.delenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", raising=False)
 
     config = load_runtime_config_from_env()
 
@@ -74,6 +76,16 @@ def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.Monke
             SlotFlowMcpServerConfig(name="search"),
         ),
     )
+
+
+def test_load_runtime_config_from_env_reads_middleware_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runtime reads middleware switches but does not instantiate middleware."""
+
+    monkeypatch.setenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", "false")
+
+    config = load_runtime_config_from_env()
+
+    assert config.middleware_config == SlotFlowMiddlewareConfig(runtime_summary_enabled=False)
 
 
 def test_create_checkpointer_supports_none_and_memory() -> None:

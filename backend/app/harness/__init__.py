@@ -7,12 +7,14 @@
 from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
+from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.state import SlotFlowAgentState
 
 __all__ = [
     "SlotFlowAgentState",
     "SlotFlowHarnessConfig",
     "SlotFlowHarnessFeatures",
+    "SlotFlowMiddlewareConfig",
     "build_slotflow_harness_graph",
     "features_from_run_context",
 ]
