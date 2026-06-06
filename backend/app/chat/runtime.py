@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -53,6 +54,8 @@ class SlotFlowRuntimeConfig:
     checkpointer_backend: CheckpointerBackend = "memory"
     system_prompt: str = DEFAULT_DEEPSEEK_SYSTEM_PROMPT
     prefer_projection_stream: bool = True
+    skills_root: Path | None = None
+    enabled_skills: set[str] | None = None
 
 
 class RuntimeBackedAgentAdapter:
@@ -128,7 +131,28 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         model_name=os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash"),
         checkpointer_backend=checkpointer_backend,
         system_prompt=os.environ.get("SLOTFLOW_SYSTEM_PROMPT", DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
+        skills_root=load_optional_path_from_env("SLOTFLOW_SKILLS_ROOT"),
+        enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
     )
+
+
+def load_optional_path_from_env(name: str) -> Path | None:
+    """从环境变量读取可选路径。"""
+
+    value = os.environ.get(name)
+    if not value:
+        return None
+    return Path(value)
+
+
+def load_optional_csv_set_from_env(name: str) -> set[str] | None:
+    """从环境变量读取逗号分隔名单。"""
+
+    value = os.environ.get(name)
+    if not value:
+        return None
+    names = {item.strip() for item in value.split(",") if item.strip()}
+    return names or None
 
 
 def create_checkpointer(
@@ -189,6 +213,8 @@ def create_langgraph_agent_graph(
         run_context=run_context,
         harness_config=SlotFlowHarnessConfig(
             system_prompt=runtime_config.system_prompt,
+            skills_root=runtime_config.skills_root,
+            enabled_skills=runtime_config.enabled_skills,
         ),
         checkpointer=checkpointer,
     )

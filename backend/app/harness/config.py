@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(slots=True)
@@ -14,3 +15,5 @@ class SlotFlowHarnessConfig:
     """创建 LangGraph agent graph 需要的最小 harness 配置。"""
 
     system_prompt: str
+    skills_root: Path | None = None
+    enabled_skills: set[str] | None = None

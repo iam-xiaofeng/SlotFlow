@@ -14,6 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from app.chat.models import RunContext
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
+from app.harness.skills import build_skills_prompt, load_enabled_skills
 from app.harness.state import SlotFlowAgentState
 from app.harness.tools import build_harness_tools
 
@@ -93,17 +94,23 @@ def build_system_prompt(
     确实进入了 harness builder。正式 skills prompt 会在模块 12 接入。
     """
 
-    return "\n".join(
-        [
-            harness_config.system_prompt,
-            "",
-            "<slotflow-runtime>",
-            f"thinking_enabled={features.thinking_enabled}",
-            f"plan_enabled={features.plan_enabled}",
-            f"subagent_enabled={features.subagent_enabled}",
-            "</slotflow-runtime>",
-        ]
+    enabled_skills = load_enabled_skills(
+        skills_root=harness_config.skills_root,
+        enabled_names=harness_config.enabled_skills,
     )
+    sections = [
+        harness_config.system_prompt,
+        "",
+        "<slotflow-runtime>",
+        f"thinking_enabled={features.thinking_enabled}",
+        f"plan_enabled={features.plan_enabled}",
+        f"subagent_enabled={features.subagent_enabled}",
+        "</slotflow-runtime>",
+    ]
+    skills_prompt = build_skills_prompt(enabled_skills)
+    if skills_prompt:
+        sections.extend(["", skills_prompt])
+    return "\n".join(sections)
 
 
 def _create_agent_graph(

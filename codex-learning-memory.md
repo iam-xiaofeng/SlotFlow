@@ -725,6 +725,42 @@ subagent tools、skills allowed-tools 策略的统一入口。当前 registry �
 model 不支持。`harness.builder` 会在模型没有 tool binding 能力时跳过 tools，避免普通 fake
 model 测试失败；tool calling 的测试使用专门支持 `bind_tools()` 的 fake model。
 
+## 模块 12：Harness 只读 skills registry
+
+相关文件：
+
+```txt
+backend/app/harness/skills/__init__.py
+backend/app/harness/skills/types.py
+backend/app/harness/skills/parser.py
+backend/app/harness/skills/registry.py
+backend/tests/test_harness_skills.py
+docs/module-12-harness-skills.md
+```
+
+模块 12 加入只读 skills registry：
+
+```txt
+SKILL.md
+-> parse_skill_file()
+-> load_enabled_skills()
+-> build_skills_prompt()
+-> harness system prompt
+```
+
+skills 不是工具本身，也不是 sandbox 执行器。当前语义是“能力说明书 + 工具策略提示”。
+`allowed-tools` 的三种语义必须保留：
+
+```txt
+字段省略 -> inherit
+[]       -> none
+[a, b]   -> 只允许这些工具
+```
+
+当前只把 allowed-tools 写入 prompt，不真正过滤 tool registry。`SLOTFLOW_SKILLS_ROOT`
+和 `SLOTFLOW_ENABLED_SKILLS` 由 `chat.runtime` 读取，但 skill 内容扫描和 prompt 构建属于
+`app/harness/skills`。
+
 后端测试：
 
 ```bash
