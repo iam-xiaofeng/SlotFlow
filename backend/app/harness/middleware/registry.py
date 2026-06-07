@@ -8,6 +8,7 @@ from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
 from app.harness.middleware.config import SlotFlowMiddlewareConfig
+from app.harness.middleware.tool_safety import SlotFlowToolSafetyMiddleware
 from app.harness.state import SlotFlowAgentState
 
 
@@ -24,6 +25,9 @@ def build_harness_middleware(
 
     resolved = config or SlotFlowMiddlewareConfig()
     middleware: list[SlotFlowAgentMiddleware] = list(extra_middleware or [])
+
+    if resolved.tool_safety_enabled:
+        middleware.append(SlotFlowToolSafetyMiddleware())
 
     if resolved.runtime_summary_enabled:
         middleware.append(SlotFlowRuntimeSummaryMiddleware(features=features))

@@ -6,10 +6,12 @@ from app.harness.middleware.registry import (
     SlotFlowAgentMiddleware,
     build_harness_middleware,
 )
+from app.harness.middleware.tool_safety import SlotFlowToolSafetyMiddleware
 
 __all__ = [
     "SlotFlowAgentMiddleware",
     "SlotFlowMiddlewareConfig",
     "SlotFlowRuntimeSummaryMiddleware",
+    "SlotFlowToolSafetyMiddleware",
     "build_harness_middleware",
 ]

@@ -74,7 +74,10 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "workspace_list",
         "workspace_read",
     ]
-    assert [item.name for item in captured["middleware"]] == ["SlotFlowRuntimeSummaryMiddleware"]
+    assert [item.name for item in captured["middleware"]] == [
+        "SlotFlowToolSafetyMiddleware",
+        "SlotFlowRuntimeSummaryMiddleware",
+    ]
     assert captured["checkpointer"] is checkpointer
     assert "base prompt" in captured["system_prompt"]
     assert "thinking_enabled=True" in captured["system_prompt"]
@@ -161,7 +164,10 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
         run_context=_run_context(mode="pro"),
         harness_config=SlotFlowHarnessConfig(
             system_prompt="base prompt",
-            middleware_config=SlotFlowMiddlewareConfig(runtime_summary_enabled=False),
+            middleware_config=SlotFlowMiddlewareConfig(
+                runtime_summary_enabled=False,
+                tool_safety_enabled=False,
+            ),
         ),
     )
 

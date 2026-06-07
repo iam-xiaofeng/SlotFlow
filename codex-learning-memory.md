@@ -717,9 +717,8 @@ slotflow_context
 不访问网络、不执行 shell、不依赖 sandbox。它的目标是证明 harness tool calling 链路，
 不是提供复杂业务能力。
 
-`build_harness_tools(features=..., extra_tools=...)` 是后续 builtin tools、MCP tools、
-subagent tools、skills allowed-tools 策略的统一入口。当前 registry 会按 tool.name 去重，
-保留更早出现的工具。
+`build_harness_tools(features=..., extra_tools=...)` 是后续 builtin tools、workspace file tools、
+MCP tools、subagent tools 的统一入口。当前 registry 会按 tool.name 去重，保留更早出现的工具。
 
 重要边界：真实 DeepSeek/OpenAI chat model 支持 `bind_tools()`，但 LangChain 的部分 fake
 model 不支持。`harness.builder` 会在模型没有 tool binding 能力时跳过 tools，避免普通 fake
@@ -748,17 +747,11 @@ SKILL.md
 -> harness system prompt
 ```
 
-skills 不是工具本身，也不是 sandbox 执行器。当前语义是“能力说明书 + 工具策略提示”。
-`allowed-tools` 的三种语义必须保留：
+skills 不是工具本身，不是权限主体，也不是 sandbox 执行器。当前语义是“能力说明书 + 渐进加载
+资料包”。SlotFlow 不在 `SKILL.md` 中解析或保留工具 allowlist 类字段；工具可见性属于
+agent/run/harness config，资源访问属于 sandbox / permission layer。
 
-```txt
-字段省略 -> inherit
-[]       -> none
-[a, b]   -> 只允许这些工具
-```
-
-当前只把 allowed-tools 写入 prompt，不真正过滤 tool registry。`SLOTFLOW_SKILLS_ROOT`
-和 `SLOTFLOW_ENABLED_SKILLS` 由 `chat.runtime` 读取，但 skill 内容扫描和 prompt 构建属于
+`SLOTFLOW_SKILLS_ROOT` 和 `SLOTFLOW_ENABLED_SKILLS` 由 `chat.runtime` 读取，但 skill 内容扫描和 prompt 构建属于
 `app/harness/skills`。
 
 ## 模块 13：Harness MCP tools 边界
@@ -810,8 +803,7 @@ runtime env 会生成 SlotFlowMcpConfig
 builder 会把 MCP 配置传进 tools registry
 ```
 
-模块 13 暂不做真实 stdio/HTTP MCP 连接、复杂 JSON server 配置、工具权限过滤，也不执行
-skills allowed-tools 策略。
+模块 13 暂不做真实 stdio/HTTP MCP 连接、复杂 JSON server 配置，也不做 skill 驱动的工具权限过滤。
 
 ## 模块 14：Harness middleware registry
 
@@ -831,7 +823,7 @@ docs/module-14-harness-middleware.md
 
 模块 14 只落 LangChain agent middleware 的 SlotFlow 本地入口，不搬 DeerFlow 旧 middleware。
 
-当前第一颗内置 middleware：
+模块 14 当时加入第一颗内置 middleware：
 
 ```txt
 SlotFlowRuntimeSummaryMiddleware
@@ -873,14 +865,113 @@ build_harness_middleware()
 
 ```txt
 runtime summary 会保留原有 slotflow state
-默认加入 SlotFlowRuntimeSummaryMiddleware
-config 可以关闭内置 middleware
+模块 14 默认加入 SlotFlowRuntimeSummaryMiddleware
+config 可以关闭 runtime summary middleware
 按 middleware.name 去重，保留更早实例
 真实 LangGraph fake graph 会执行 before_agent 并返回 slotflow.runtime
 ```
 
-模块 14 暂不做 uploads、sandbox、memory、title、tool error handling、dangling tool call、
-wrap_model_call 或 wrap_tool_call。这些后续按小模块逐个加。
+模块 14 当时不做 uploads、sandbox、memory、title、tool error handling、dangling tool call、
+wrap_model_call 或 wrap_tool_call。后续模块已经补上 sandbox/workspace 和 tool safety。
+
+## 模块 15：Sandbox / workspace 边界
+
+相关文件：
+
+```txt
+backend/app/harness/sandbox/config.py
+backend/app/harness/sandbox/workspace.py
+backend/tests/test_harness_sandbox.py
+docs/module-15-harness-sandbox-workspace.md
+```
+
+模块 15 定义 workspace 安全边界，不暴露 LangChain tool、不执行代码。核心对象：
+
+```txt
+SlotFlowSandboxConfig
+SlotFlowWorkspace
+WorkspacePathError
+WorkspaceWriteDisabledError
+WorkspaceFileTooLargeError
+```
+
+当前规则：
+
+```txt
+workspace_root 默认 .slotflow/workspace
+writes_enabled 默认 false
+读写都有 1 MiB 默认字节上限
+拒绝空路径、绝对路径、../、Windows drive、反斜杠、NUL 字节
+resolve(strict=False) 后再次确认路径仍在 root 内，防 symlink 逃逸
+```
+
+## 模块 16：Harness workspace 文件工具
+
+相关文件：
+
+```txt
+backend/app/harness/tools/workspace.py
+backend/app/harness/tools/registry.py
+backend/tests/test_harness_tools.py
+docs/module-16-harness-file-tools.md
+```
+
+模块 16 把 `SlotFlowWorkspace` 暴露成 LangChain tools：
+
+```txt
+workspace_list(path=".")
+workspace_read(path)
+workspace_write(path, content)
+```
+
+`workspace_write` 只有 `SlotFlowSandboxConfig.writes_enabled=True` 时才注册。工具返回 JSON 字符串，
+并且所有路径和读写限制都交给 `SlotFlowWorkspace` 处理。
+
+默认 tools 顺序：
+
+```txt
+extra_tools
+slotflow_context
+workspace_list
+workspace_read
+workspace_write  # 仅写入打开时出现
+MCP tools
+```
+
+## 模块 17：Tool error / dangling tool call 处理
+
+相关文件：
+
+```txt
+backend/app/harness/middleware/tool_safety.py
+backend/app/harness/middleware/config.py
+backend/app/harness/middleware/registry.py
+backend/tests/test_harness_middleware.py
+docs/module-17-harness-tool-safety.md
+```
+
+模块 17 加入：
+
+```txt
+SlotFlowToolSafetyMiddleware
+```
+
+它默认开启，在 middleware registry 中和 runtime summary 分开配置：
+
+```txt
+SLOTFLOW_TOOL_SAFETY_MIDDLEWARE=false
+SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE=false
+```
+
+职责：
+
+```txt
+工具抛异常 -> ToolMessage(status="error")
+未注册工具 request.tool is None -> unknown_tool ToolMessage
+模型调用前发现 dangling AI tool call -> synthetic dangling_tool_call ToolMessage
+```
+
+它不重试工具、不隐藏错误来源、不把错误塞进 assistant 文本，也不把工具权限放回 SKILL.md。
 
 后端测试：
 

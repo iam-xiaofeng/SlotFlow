@@ -10,3 +10,4 @@ class SlotFlowMiddlewareConfig:
     """Feature switches for SlotFlow-owned agent middleware."""
 
     runtime_summary_enabled: bool = True
+    tool_safety_enabled: bool = True
