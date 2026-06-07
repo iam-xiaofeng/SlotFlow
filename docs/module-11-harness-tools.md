@@ -30,7 +30,7 @@ RunContext
 -> LangGraph create_agent(tools=...)
 ```
 
-后续 MCP tools、subagent tools、skills allowed-tools 策略，都应该进入 `build_harness_tools()` 或它
+后续 MCP tools、subagent tools、文件工具策略，都应该进入 `build_harness_tools()` 或它
 调用的子 registry，而不是直接散落在 builder/runtime 里。
 
 ## 它接收什么输入
@@ -47,7 +47,7 @@ extra_tools  测试或后续扩展传入的工具
 ```txt
 subagent_enabled -> 是否加入 task tool
 MCP enabled      -> 是否加入 MCP tools
-skills policy    -> 是否过滤 allowed-tools
+sandbox config   -> 文件工具能访问哪些 workspace 资源
 ```
 
 ## 它输出什么数据
@@ -164,7 +164,7 @@ backend/tests/test_harness_tools.py
 不加入网络工具
 不加入 MCP
 不加入 sandbox
-不做 skills allowed-tools 过滤
+不做文件工具
 ```
 
 这些能力后续会逐步进入，但第一步必须先让 tool calling 本身可解释、可测试。

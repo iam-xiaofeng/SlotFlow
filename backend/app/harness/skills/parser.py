@@ -40,7 +40,6 @@ def parse_skill_file(skill_file: Path) -> Skill | None:
         description=description.strip(),
         skill_dir=skill_file.parent,
         skill_file=skill_file,
-        allowed_tools=parse_allowed_tools(fields.get("allowed-tools")),
         enabled=True,
     )
 
@@ -103,19 +102,6 @@ def parse_frontmatter_fields(frontmatter: str) -> dict[str, object]:
         fields[key] = items
 
     return fields
-
-
-def parse_allowed_tools(raw: object) -> list[str] | None:
-    """解析 `allowed-tools` 字段。
-
-    `None` 表示字段省略，后续策略可理解为“不额外限制”；空列表表示明确无工具。
-    """
-
-    if raw is None:
-        return None
-    if isinstance(raw, list):
-        return [str(item).strip() for item in raw if str(item).strip()]
-    return None
 
 
 def parse_scalar_or_inline_list(value: str) -> str | list[str]:

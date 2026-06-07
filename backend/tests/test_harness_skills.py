@@ -25,17 +25,15 @@ def _write_skill(
     name: str,
     *,
     description: str = "测试 skill",
-    allowed_tools: str | None = None,
 ) -> Path:
     skill_dir = root / name
     skill_dir.mkdir(parents=True)
-    allowed_block = "" if allowed_tools is None else f"allowed-tools: {allowed_tools}\n"
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(
         f"""---
 name: {name}
 description: {description}
-{allowed_block}---
+---
 
 # {name}
 """,
@@ -53,23 +51,19 @@ def _run_context():
     ).context
 
 
-def test_parse_skill_file_reads_required_metadata_and_allowed_tools(tmp_path: Path) -> None:
-    """parser 只读 SKILL.md frontmatter，并保留 allowed-tools 的三种语义。"""
+def test_parse_skill_file_reads_required_metadata(tmp_path: Path) -> None:
+    """parser 只读 SKILL.md 的 name / description。"""
 
-    inherit_file = _write_skill(tmp_path, "inherit_skill", allowed_tools=None)
-    no_tools_file = _write_skill(tmp_path, "no_tools_skill", allowed_tools="[]")
-    limited_file = _write_skill(
+    skill_file = _write_skill(
         tmp_path,
-        "limited_skill",
-        allowed_tools="[slotflow_context, future_search]",
+        "alpha",
+        description="Alpha skill",
     )
+    skill = parse_skill_file(skill_file)
 
-    assert parse_skill_file(inherit_file).allowed_tools is None
-    assert parse_skill_file(no_tools_file).allowed_tools == []
-    assert parse_skill_file(limited_file).allowed_tools == [
-        "slotflow_context",
-        "future_search",
-    ]
+    assert skill.name == "alpha"
+    assert skill.description == "Alpha skill"
+    assert skill.skill_dir == tmp_path / "alpha"
 
 
 def test_load_enabled_skills_scans_root_and_filters_by_name(tmp_path: Path) -> None:
@@ -90,14 +84,14 @@ def test_load_enabled_skills_scans_root_and_filters_by_name(tmp_path: Path) -> N
 def test_build_skills_prompt_keeps_prompt_shape_explicit(tmp_path: Path) -> None:
     """skills prompt 是给模型看的能力说明，不是工具实现本身。"""
 
-    _write_skill(tmp_path, "alpha", description="Alpha skill", allowed_tools="[]")
+    _write_skill(tmp_path, "alpha", description="Alpha skill")
     skills = load_enabled_skills(skills_root=tmp_path)
 
     prompt = build_skills_prompt(skills)
 
     assert "<slotflow-skills>" in prompt
     assert "- alpha: Alpha skill" in prompt
-    assert "allowed_tools: none" in prompt
+    assert "</slotflow-skills>" in prompt
 
 
 def test_harness_builder_injects_enabled_skills_into_system_prompt(

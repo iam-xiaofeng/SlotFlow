@@ -51,6 +51,10 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
     monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
     monkeypatch.delenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("SLOTFLOW_WORKSPACE_WRITES_ENABLED", raising=False)
+    monkeypatch.delenv("SLOTFLOW_WORKSPACE_MAX_READ_BYTES", raising=False)
+    monkeypatch.delenv("SLOTFLOW_WORKSPACE_MAX_WRITE_BYTES", raising=False)
 
     config = load_runtime_config_from_env()
 

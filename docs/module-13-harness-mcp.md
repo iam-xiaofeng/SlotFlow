@@ -36,7 +36,7 @@ build_harness_tools()
 -> dedupe by tool.name
 ```
 
-这样后续 builtin、MCP、subagent、skills allowed-tools 策略都可以在 harness tools registry
+这样后续 builtin、MCP、subagent、文件工具策略都可以在 harness tools registry
 统一处理。
 
 ## 它接收什么输入
@@ -158,7 +158,6 @@ harness builder 会把 mcp_config / mcp_tool_provider 传进 tools registry
 不引入 MultiServerMCPClient
 不解析复杂 JSON server 配置
 不做工具权限过滤
-不执行 skill 里的 allowed-tools 策略
 ```
 
 这些留到后续模块。模块 13 只证明 MCP tools 的入口位置和配置传递路径是稳定的。

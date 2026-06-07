@@ -52,11 +52,5 @@ def build_skills_prompt(skills: list[Skill]) -> str:
     ]
     for skill in skills:
         lines.append(f"- {skill.name}: {skill.description}")
-        if skill.allowed_tools is None:
-            lines.append("  allowed_tools: inherit")
-        elif not skill.allowed_tools:
-            lines.append("  allowed_tools: none")
-        else:
-            lines.append(f"  allowed_tools: {', '.join(skill.allowed_tools)}")
     lines.append("</slotflow-skills>")
     return "\n".join(lines)

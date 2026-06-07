@@ -32,6 +32,7 @@ from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
+from app.harness.sandbox import SlotFlowSandboxConfig
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -61,6 +62,7 @@ class SlotFlowRuntimeConfig:
     mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
     mcp_tool_provider: McpToolProvider | None = None
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
+    sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
 
 
 class RuntimeBackedAgentAdapter:
@@ -140,6 +142,7 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
         mcp_config=load_mcp_config_from_env(),
         middleware_config=load_middleware_config_from_env(),
+        sandbox_config=load_sandbox_config_from_env(),
     )
 
 
@@ -150,6 +153,26 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
         runtime_summary_enabled=load_bool_from_env(
             "SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE",
             default=True,
+        ),
+    )
+
+
+def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
+    """Read SlotFlow workspace/sandbox limits from environment variables."""
+
+    return SlotFlowSandboxConfig(
+        workspace_root=load_optional_path_from_env("SLOTFLOW_WORKSPACE_ROOT"),
+        writes_enabled=load_bool_from_env(
+            "SLOTFLOW_WORKSPACE_WRITES_ENABLED",
+            default=False,
+        ),
+        max_read_bytes=load_positive_int_from_env(
+            "SLOTFLOW_WORKSPACE_MAX_READ_BYTES",
+            default=SlotFlowSandboxConfig().max_read_bytes,
+        ),
+        max_write_bytes=load_positive_int_from_env(
+            "SLOTFLOW_WORKSPACE_MAX_WRITE_BYTES",
+            default=SlotFlowSandboxConfig().max_write_bytes,
         ),
     )
 
@@ -207,6 +230,22 @@ def load_optional_csv_list_from_env(name: str) -> list[str] | None:
         return None
     names = [item.strip() for item in value.split(",") if item.strip()]
     return names or None
+
+
+def load_positive_int_from_env(name: str, *, default: int) -> int:
+    """Read a positive integer environment value."""
+
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return parsed
 
 
 def create_checkpointer(
@@ -272,6 +311,7 @@ def create_langgraph_agent_graph(
             mcp_config=runtime_config.mcp_config,
             mcp_tool_provider=runtime_config.mcp_tool_provider,
             middleware_config=runtime_config.middleware_config,
+            sandbox_config=runtime_config.sandbox_config,
         ),
         checkpointer=checkpointer,
     )

@@ -14,5 +14,4 @@ class Skill:
     description: str
     skill_dir: Path
     skill_file: Path
-    allowed_tools: list[str] | None = None
     enabled: bool = True
