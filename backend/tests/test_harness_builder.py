@@ -69,7 +69,11 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
 
     assert graph is fake_graph
     assert captured["model"] is model
-    assert [tool.name for tool in captured["tools"]] == ["slotflow_context"]
+    assert [tool.name for tool in captured["tools"]] == [
+        "slotflow_context",
+        "workspace_list",
+        "workspace_read",
+    ]
     assert [item.name for item in captured["middleware"]] == ["SlotFlowRuntimeSummaryMiddleware"]
     assert captured["checkpointer"] is checkpointer
     assert "base prompt" in captured["system_prompt"]
@@ -133,7 +137,12 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
         ),
     )
 
-    assert [tool.name for tool in captured["tools"]] == ["slotflow_context", "mcp_fake"]
+    assert [tool.name for tool in captured["tools"]] == [
+        "slotflow_context",
+        "workspace_list",
+        "workspace_read",
+        "mcp_fake",
+    ]
 
 
 def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:

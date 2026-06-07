@@ -8,6 +8,7 @@ from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, load_mcp_tools
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.tools.builtins import slotflow_context_tool
+from app.harness.tools.workspace import build_workspace_tools
 
 
 def build_harness_tools(
@@ -20,20 +21,21 @@ def build_harness_tools(
 ) -> list[BaseTool]:
     """组装本次 graph 要绑定的工具列表。
 
-    模块 11 只加入一个安全内置工具。`features` 和 `sandbox_config` 参数暂时没有分支逻辑，
-    但保留在函数签名里，是为了后续把 `subagent_enabled`、MCP 开关、文件工具等能力都
-    收敛到同一入口。
+    `features` 参数暂时没有分支逻辑，但保留在函数签名里，是为了后续把
+    `subagent_enabled`、MCP 开关等能力都收敛到同一入口。
     """
 
-    _ = features, sandbox_config
+    _ = features
     mcp_tools = load_mcp_tools(
         config=mcp_config or SlotFlowMcpConfig(),
         provider=mcp_tool_provider,
     )
+    workspace_tools = build_workspace_tools(sandbox_config)
     return dedupe_tools_by_name(
         [
             *(extra_tools or []),
             slotflow_context_tool,
+            *workspace_tools,
             *mcp_tools,
         ]
     )

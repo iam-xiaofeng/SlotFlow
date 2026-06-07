@@ -77,7 +77,7 @@ def test_load_mcp_tools_filters_disabled_servers_before_provider_call() -> None:
     )
 
 
-def test_build_harness_tools_includes_mcp_tools_after_safe_builtin() -> None:
+def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
     provider = CapturingMcpToolProvider()
 
     tools = build_harness_tools(
@@ -89,5 +89,10 @@ def test_build_harness_tools_includes_mcp_tools_after_safe_builtin() -> None:
         mcp_tool_provider=provider,
     )
 
-    assert [tool.name for tool in tools] == ["slotflow_context", "mcp_echo"]
+    assert [tool.name for tool in tools] == [
+        "slotflow_context",
+        "workspace_list",
+        "workspace_read",
+        "mcp_echo",
+    ]
     assert provider.calls[0].servers[0].name == "filesystem"
