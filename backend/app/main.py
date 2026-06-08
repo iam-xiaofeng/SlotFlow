@@ -4,6 +4,8 @@ from app.chat.agent_adapter import AgentAdapter
 from app.chat.repository import ChatRepository, build_chat_repository
 from app.chat.routes import router as chat_router
 from app.chat.runtime import SlotFlowRuntimeConfig, build_agent_adapter
+from app.uploads import SlotFlowUploadStore
+from app.uploads.routes import router as upload_router
 
 
 def create_app(
@@ -11,6 +13,7 @@ def create_app(
     chat_repo: ChatRepository | None = None,
     agent_adapter: AgentAdapter | None = None,
     runtime_config: SlotFlowRuntimeConfig | None = None,
+    upload_store: SlotFlowUploadStore | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用，并把学习链路需要的依赖放到 app.state。
 
@@ -18,6 +21,7 @@ def create_app(
 
     - `chat_repo`：thread / message / run 的业务仓库；
     - `agent_adapter`：模块四定义的 agent 事件适配器。
+    - `upload_store`：用户上传文件的 workspace 存储边界。
 
     测试可以传入自己的仓库和 adapter。真实运行如果没有传 adapter，就走 SlotFlow
     自己的本地 runtime 装配层：默认仍然是 `static`，但后面可以按同一入口切到
@@ -26,6 +30,7 @@ def create_app(
 
     app = FastAPI(title="SlotFlow API")
     app.state.chat_repo = chat_repo or build_chat_repository()
+    app.state.upload_store = upload_store or SlotFlowUploadStore()
     app.state.runtime_config = runtime_config
     app.state.agent_adapter = agent_adapter or build_agent_adapter(runtime_config)
 
@@ -34,6 +39,7 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(chat_router)
+    app.include_router(upload_router)
     return app
 
 

@@ -44,3 +44,9 @@ def new_run_id() -> str:
     """生成一次流式运行 run 的 ID。"""
 
     return new_id("run")
+
+
+def new_file_id() -> str:
+    """生成一次用户上传文件的 ID。"""
+
+    return new_id("file")
