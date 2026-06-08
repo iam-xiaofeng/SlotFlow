@@ -30,7 +30,7 @@ from app.chat.runtime import (
     create_checkpointer,
     load_runtime_config_from_env,
 )
-from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
+from app.harness.mcp import MultiServerMcpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
 
 
@@ -47,6 +47,22 @@ def _bundle(
     )
 
 
+class AsyncCapturingMcpToolProvider:
+    """Test MCP provider that records async preload calls."""
+
+    def __init__(self) -> None:
+        self.aload_calls: list[SlotFlowMcpConfig] = []
+        self.load_calls: list[SlotFlowMcpConfig] = []
+
+    async def aload_tools(self, config: SlotFlowMcpConfig):
+        self.aload_calls.append(config)
+        return []
+
+    def load_tools(self, config: SlotFlowMcpConfig):
+        self.load_calls.append(config)
+        return []
+
+
 def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """默认仍然走 static，避免本地开发和测试强依赖 API key。"""
 
@@ -61,6 +77,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
     monkeypatch.delenv("SLOTFLOW_ENABLED_SKILLS", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
+    monkeypatch.delenv("SLOTFLOW_MCP_CONFIG_JSON", raising=False)
     monkeypatch.delenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_TOOL_SAFETY_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_ROOT", raising=False)
@@ -106,6 +123,7 @@ def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.Monke
 
     monkeypatch.setenv("SLOTFLOW_MCP_ENABLED", "true")
     monkeypatch.setenv("SLOTFLOW_MCP_SERVERS", "filesystem, search")
+    monkeypatch.delenv("SLOTFLOW_MCP_CONFIG_JSON", raising=False)
 
     config = load_runtime_config_from_env()
 
@@ -116,6 +134,57 @@ def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.Monke
             SlotFlowMcpServerConfig(name="search"),
         ),
     )
+    assert config.mcp_tool_provider is None
+
+
+def test_load_runtime_config_from_env_reads_real_mcp_json_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full MCP JSON config enables the real MultiServerMCPClient provider."""
+
+    monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
+    monkeypatch.setenv(
+        "SLOTFLOW_MCP_CONFIG_JSON",
+        """
+        {
+            "filesystem": {
+                "transport": "stdio",
+                "command": "python",
+                "args": ["-m", "fake_server"]
+            },
+            "disabled": {
+                "enabled": false,
+                "transport": "streamable_http",
+                "url": "http://localhost:8000/mcp"
+            }
+        }
+        """,
+    )
+
+    config = load_runtime_config_from_env()
+
+    assert config.mcp_config == SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="filesystem",
+                config={
+                    "transport": "stdio",
+                    "command": "python",
+                    "args": ["-m", "fake_server"],
+                },
+            ),
+            SlotFlowMcpServerConfig(
+                name="disabled",
+                enabled=False,
+                config={
+                    "transport": "streamable_http",
+                    "url": "http://localhost:8000/mcp",
+                },
+            ),
+        ),
+    )
+    assert isinstance(config.mcp_tool_provider, MultiServerMcpToolProvider)
 
 
 def test_load_runtime_config_from_env_reads_middleware_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,6 +347,47 @@ async def test_runtime_backed_adapter_deepseek_mode_uses_request_model_and_keeps
         "second question",
         "second answer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_backed_adapter_preloads_async_mcp_tools_before_building_graph() -> None:
+    """Runtime uses async MCP provider before the synchronous harness tool registry runs."""
+
+    provider = AsyncCapturingMcpToolProvider()
+    mcp_config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="filesystem",
+                config={"transport": "stdio", "command": "python", "args": []},
+            ),
+        ),
+    )
+    adapter = RuntimeBackedAgentAdapter(
+        SlotFlowRuntimeConfig(
+            adapter_mode="deepseek",
+            checkpointer_backend="memory",
+            mcp_config=mcp_config,
+            mcp_tool_provider=provider,
+        ),
+        model_factory=lambda model_name: FakeListChatModel(responses=["mcp-ready"]),
+    )
+    request = ChatStreamRequest(message="use mcp", model_name="fake-mcp")
+
+    events = await collect_agent_events(
+        adapter.stream_events(
+            request=request,
+            bundle=_bundle(
+                thread_id="thread_mcp",
+                run_id="run_mcp",
+                request=request,
+            ),
+        )
+    )
+
+    assert provider.aload_calls == [mcp_config]
+    assert provider.load_calls == [mcp_config]
+    assert events[-1].event == "run.finished"
 
 
 @pytest.mark.asyncio

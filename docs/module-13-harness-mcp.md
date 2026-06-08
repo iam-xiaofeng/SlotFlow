@@ -2,7 +2,7 @@
 
 模块 13 给 SlotFlow harness 加入第一版 MCP tools 边界。
 
-这里先不连接真实 MCP server，也不启动外部进程。当前目标只是把边界钉住：
+模块 13 当时先不连接真实 MCP server，也不启动外部进程。目标只是把边界钉住：
 
 ```txt
 MCP env config
@@ -12,8 +12,8 @@ MCP env config
 -> LangGraph create_agent(tools=...)
 ```
 
-真实 `MultiServerMCPClient` 后续只需要实现 provider，不应该直接塞进 FastAPI 路由或
-chat runtime。
+模块 20 已经在这个边界上接入真实 `MultiServerMCPClient` provider。这个设计仍然保持：
+真实 MCP 客户端不直接塞进 FastAPI 路由。
 
 ## 这一层解决什么问题
 
@@ -75,7 +75,11 @@ false: 0 / false / no / off
 list[BaseTool]
 ```
 
-当前默认 provider 是 `EmptyMcpToolProvider`，不会连接任何外部 MCP server，只返回空列表。
+名字列表配置下，默认 provider 是 `EmptyMcpToolProvider`，不会连接任何外部 MCP server，
+只返回空列表。
+
+模块 20 新增 `SLOTFLOW_MCP_CONFIG_JSON` 后，runtime 可以创建真实
+`MultiServerMcpToolProvider`，再由 provider 调用 LangChain 的 `MultiServerMCPClient`。
 
 测试里的 fake provider 会返回一个 LangChain `BaseTool`，用来证明边界能工作。
 
@@ -153,11 +157,11 @@ harness builder 会把 mcp_config / mcp_tool_provider 传进 tools registry
 当前明确不做：
 
 ```txt
-不启动 MCP server
-不连接 stdio / HTTP MCP server
-不引入 MultiServerMCPClient
+不在模块 13 阶段启动 MCP server
+不在模块 13 阶段连接 stdio / HTTP MCP server
+不在模块 13 阶段引入 MultiServerMCPClient
 不解析复杂 JSON server 配置
 不做工具权限过滤
 ```
 
-这些留到后续模块。模块 13 只证明 MCP tools 的入口位置和配置传递路径是稳定的。
+这些后续由模块 20 继续推进。模块 13 只证明 MCP tools 的入口位置和配置传递路径是稳定的。

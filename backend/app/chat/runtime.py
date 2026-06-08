@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 from collections.abc import Callable, AsyncIterator
 from contextlib import suppress
@@ -32,7 +33,13 @@ from app.chat.agent_adapter import (
 )
 from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
-from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
+from app.harness.mcp import (
+    McpToolProvider,
+    MultiServerMcpToolProvider,
+    SlotFlowMcpConfig,
+    SlotFlowMcpServerConfig,
+    ensure_mcp_tools_loaded,
+)
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 
@@ -114,6 +121,7 @@ class RuntimeBackedAgentAdapter:
         elif self._runtime_config.adapter_mode == "deepseek":
             model_name = bundle.context.model_name or self._runtime_config.model_name
             checkpointer = await self._ensure_checkpointer()
+            await self._ensure_mcp_tools_loaded()
             graph = create_langgraph_agent_graph(
                 model=self._model_factory(model_name),
                 runtime_config=self._runtime_config,
@@ -139,6 +147,12 @@ class RuntimeBackedAgentAdapter:
             self._checkpointer = await create_async_checkpointer(self._runtime_config)
         return self._checkpointer
 
+    async def _ensure_mcp_tools_loaded(self) -> None:
+        await ensure_mcp_tools_loaded(
+            config=self._runtime_config.mcp_config,
+            provider=self._runtime_config.mcp_tool_provider,
+        )
+
 
 def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
     """从环境变量读取一个很小的 runtime 配置。
@@ -161,6 +175,8 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
             f"got {checkpointer_backend!r}",
         )
 
+    mcp_config = load_mcp_config_from_env()
+
     return SlotFlowRuntimeConfig(
         adapter_mode=adapter_mode,
         model_name=os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash"),
@@ -179,7 +195,8 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         system_prompt=os.environ.get("SLOTFLOW_SYSTEM_PROMPT", DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
         skills_root=load_optional_path_from_env("SLOTFLOW_SKILLS_ROOT"),
         enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
-        mcp_config=load_mcp_config_from_env(),
+        mcp_config=mcp_config,
+        mcp_tool_provider=build_mcp_tool_provider(mcp_config),
         middleware_config=load_middleware_config_from_env(),
         sandbox_config=load_sandbox_config_from_env(),
     )
@@ -223,12 +240,62 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
 def load_mcp_config_from_env() -> SlotFlowMcpConfig:
     """Read the first SlotFlow MCP config shape from environment variables."""
 
-    enabled = load_bool_from_env("SLOTFLOW_MCP_ENABLED", default=False)
+    raw_config = load_optional_text_from_env("SLOTFLOW_MCP_CONFIG_JSON")
+    enabled = load_bool_from_env("SLOTFLOW_MCP_ENABLED", default=raw_config is not None)
+    if raw_config is not None:
+        return SlotFlowMcpConfig(
+            enabled=enabled,
+            servers=tuple(load_mcp_servers_from_json(raw_config)),
+        )
+
     server_names = load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
     return SlotFlowMcpConfig(
         enabled=enabled,
         servers=tuple(SlotFlowMcpServerConfig(name=name) for name in server_names),
     )
+
+
+def load_mcp_servers_from_json(raw_config: str) -> list[SlotFlowMcpServerConfig]:
+    """Parse real MCP server connection config from JSON."""
+
+    try:
+        data = json.loads(raw_config)
+    except json.JSONDecodeError as exc:
+        raise ValueError("SLOTFLOW_MCP_CONFIG_JSON must be valid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("SLOTFLOW_MCP_CONFIG_JSON must be an object keyed by server name")
+
+    servers: list[SlotFlowMcpServerConfig] = []
+    for name, raw_server_config in data.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("SLOTFLOW_MCP_CONFIG_JSON server names must be non-empty strings")
+        if not isinstance(raw_server_config, dict):
+            raise ValueError(f"MCP server {name!r} config must be an object")
+
+        server_config = dict(raw_server_config)
+        enabled = server_config.pop("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"MCP server {name!r} enabled must be a boolean")
+
+        servers.append(
+            SlotFlowMcpServerConfig(
+                name=name.strip(),
+                enabled=enabled,
+                config=server_config,
+            )
+        )
+    return servers
+
+
+def build_mcp_tool_provider(config: SlotFlowMcpConfig) -> McpToolProvider | None:
+    """Create the real MCP provider only when full connection config exists."""
+
+    if not config.enabled:
+        return None
+    if any(server.config is not None for server in config.active_servers()):
+        return MultiServerMcpToolProvider()
+    return None
 
 
 def load_bool_from_env(name: str, *, default: bool) -> bool:

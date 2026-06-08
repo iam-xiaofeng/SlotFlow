@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
 from langchain_core.tools import BaseTool, tool
 
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.mcp import (
+    MultiServerMcpToolProvider,
     SlotFlowMcpConfig,
     SlotFlowMcpServerConfig,
+    build_multi_server_mcp_connections,
+    ensure_mcp_tools_loaded,
     load_mcp_tools,
 )
 from app.harness.tools.registry import build_harness_tools
@@ -30,6 +34,23 @@ class CapturingMcpToolProvider:
     def load_tools(self, config: SlotFlowMcpConfig) -> list[BaseTool]:
         self.calls.append(config)
         return list(self._tools)
+
+
+class FakeMultiServerMcpClient:
+    """Fake LangChain MCP client used to avoid starting a real MCP server in tests."""
+
+    def __init__(
+        self,
+        connections: dict[str, dict],
+        *,
+        captured_connections: list[dict[str, dict]],
+    ) -> None:
+        self._connections = connections
+        self._captured_connections = captured_connections
+
+    async def get_tools(self) -> list[BaseTool]:
+        self._captured_connections.append(self._connections)
+        return [mcp_echo_tool]
 
 
 def _features() -> SlotFlowHarnessFeatures:
@@ -96,3 +117,110 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
         "mcp_echo",
     ]
     assert provider.calls[0].servers[0].name == "filesystem"
+
+
+def test_build_multi_server_mcp_connections_requires_real_server_config() -> None:
+    config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(SlotFlowMcpServerConfig(name="filesystem"),),
+    )
+
+    try:
+        build_multi_server_mcp_connections(config)
+    except ValueError as exc:
+        assert "missing connection config" in str(exc)
+    else:
+        raise AssertionError("expected missing MCP config to fail")
+
+
+@pytest.mark.asyncio
+async def test_multi_server_mcp_provider_loads_and_caches_tools() -> None:
+    captured_connections: list[dict[str, dict]] = []
+
+    def client_factory(connections: dict[str, dict]) -> FakeMultiServerMcpClient:
+        return FakeMultiServerMcpClient(
+            connections,
+            captured_connections=captured_connections,
+        )
+
+    config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="filesystem",
+                config={
+                    "transport": "stdio",
+                    "command": "python",
+                    "args": ["-m", "fake_mcp_server"],
+                },
+            ),
+        ),
+    )
+    provider = MultiServerMcpToolProvider(client_factory=client_factory)
+
+    loaded_tools = await provider.aload_tools(config)
+    cached_tools = provider.load_tools(config)
+
+    assert loaded_tools == [mcp_echo_tool]
+    assert cached_tools == [mcp_echo_tool]
+    assert captured_connections == [
+        {
+            "filesystem": {
+                "transport": "stdio",
+                "command": "python",
+                "args": ["-m", "fake_mcp_server"],
+            }
+        }
+    ]
+
+
+def test_multi_server_mcp_provider_requires_async_preload() -> None:
+    provider = MultiServerMcpToolProvider(client_factory=lambda connections: None)
+    config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="filesystem",
+                config={"transport": "stdio", "command": "python", "args": []},
+            ),
+        ),
+    )
+
+    try:
+        provider.load_tools(config)
+    except RuntimeError as exc:
+        assert "loaded asynchronously" in str(exc)
+    else:
+        raise AssertionError("expected sync load before preload to fail")
+
+
+@pytest.mark.asyncio
+async def test_ensure_mcp_tools_loaded_calls_async_provider_before_registry() -> None:
+    captured_connections: list[dict[str, dict]] = []
+    provider = MultiServerMcpToolProvider(
+        client_factory=lambda connections: FakeMultiServerMcpClient(
+            connections,
+            captured_connections=captured_connections,
+        )
+    )
+    config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="search",
+                config={"transport": "streamable_http", "url": "http://localhost:8000/mcp"},
+            ),
+        ),
+    )
+
+    await ensure_mcp_tools_loaded(config=config, provider=provider)
+
+    assert [tool.name for tool in provider.load_tools(config)] == ["mcp_echo"]
+    assert captured_connections == [
+        {
+            "search": {
+                "transport": "streamable_http",
+                "url": "http://localhost:8000/mcp",
+            }
+        }
+    ]
