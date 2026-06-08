@@ -1,4 +1,4 @@
-"""内存版 chat 仓库。
+"""chat thread / message / run 仓库。
 
 模块一只定义了数据“长什么样”。模块二开始回答另一个问题：
 这些 thread、message、run 在进入数据库之前，先放在哪里？
@@ -16,8 +16,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
 from threading import RLock
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.chat.ids import new_message_id, new_run_id, new_thread_id
 from app.chat.models import (
@@ -29,6 +34,18 @@ from app.chat.models import (
     ThreadRecord,
     utc_now,
 )
+
+
+ChatRepositoryBackend = Literal["memory", "sqlite"]
+DEFAULT_SQLITE_REPOSITORY_PATH = Path(".slotflow/chat.sqlite3")
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRepositoryConfig:
+    """应用启动阶段选择 chat 仓库实现所需的最小配置。"""
+
+    backend: ChatRepositoryBackend = "memory"
+    sqlite_path: Path = DEFAULT_SQLITE_REPOSITORY_PATH
 
 
 class ChatRepositoryError(Exception):
@@ -106,10 +123,10 @@ class InMemoryChatRepository:
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._threads: dict[str, ThreadRecord] = {} # thread_id -> ThreadRecord
+        self._threads: dict[str, ThreadRecord] = {}  # thread_id -> ThreadRecord
         self._messages_by_thread: dict[str, list[MessageRecord]] = {}
         self._runs: dict[str, RunRecord] = {}  # run_id -> RunRecord
-        self._run_ids_by_thread: dict[str, list[str]] = {} # thread_id -> run_id 列表
+        self._run_ids_by_thread: dict[str, list[str]] = {}  # thread_id -> run_id 列表
 
     def create_thread(self, *, title: str | None = None) -> ThreadRecord:
         """创建一条新会话。
@@ -288,3 +305,396 @@ class InMemoryChatRepository:
         """返回 run 副本，避免调用方绕过仓库修改状态。"""
 
         return run.model_copy(deep=True)
+
+
+class SQLiteChatRepository:
+    """用 SQLite 保存 thread / message / run 的仓库。
+
+    它实现和 `InMemoryChatRepository` 相同的同步接口。SQLite 操作会碰磁盘，但当前
+    仓库调用都很小，先保持同步边界可以让 FastAPI 路由和测试不用改变形状。
+    """
+
+    def __init__(self, database_path: str | Path = DEFAULT_SQLITE_REPOSITORY_PATH) -> None:
+        self.database_path = Path(database_path)
+        self._database_path_text = str(database_path)
+        self._lock = RLock()
+
+        if self._database_path_text != ":memory:":
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._connection = sqlite3.connect(
+            self._database_path_text,
+            check_same_thread=False,
+            timeout=30.0,
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        if self._database_path_text != ":memory:":
+            self._connection.execute("PRAGMA journal_mode = WAL")
+        self._initialize_schema()
+
+    def close(self) -> None:
+        """关闭 SQLite 连接。测试或脚本显式释放文件句柄时可以调用。"""
+
+        with self._lock:
+            self._connection.close()
+
+    def create_thread(self, *, title: str | None = None) -> ThreadRecord:
+        """创建一条新会话，并写入 SQLite。"""
+
+        clean_title = title.strip() if title else ""
+        thread = ThreadRecord(id=new_thread_id(), title=clean_title or "新会话")
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO threads (id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    thread.id,
+                    thread.title,
+                    self._datetime_to_text(thread.created_at),
+                    self._datetime_to_text(thread.updated_at),
+                ),
+            )
+            return self._copy_thread(thread)
+
+    def list_threads(self) -> list[ThreadRecord]:
+        """列出所有会话，最近更新的排在前面。"""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id, title, created_at, updated_at
+                FROM threads
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                """
+            ).fetchall()
+            return [self._row_to_thread(row) for row in rows]
+
+    def get_thread(self, thread_id: str) -> ThreadRecord:
+        """读取一条 thread，不存在时抛出明确错误。"""
+
+        with self._lock:
+            return self._row_to_thread(self._fetch_thread_row(thread_id))
+
+    def add_message(
+        self,
+        thread_id: str,
+        *,
+        role: MessageRole,
+        content: str,
+        run_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> MessageRecord:
+        """往 thread 里追加一条消息，并推进 thread 更新时间。"""
+
+        with self._lock, self._connection:
+            self._fetch_thread_row(thread_id)
+            message = MessageRecord(
+                id=new_message_id(),
+                thread_id=thread_id,
+                role=role,
+                content=content,
+                run_id=run_id,
+                metadata=metadata or {},
+            )
+            self._connection.execute(
+                """
+                INSERT INTO messages (
+                    id, thread_id, role, content, run_id, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.id,
+                    message.thread_id,
+                    message.role,
+                    message.content,
+                    message.run_id,
+                    self._metadata_to_text(message.metadata),
+                    self._datetime_to_text(message.created_at),
+                ),
+            )
+            self._touch_thread(thread_id)
+            return self._copy_message(message)
+
+    def list_messages(self, thread_id: str) -> list[MessageRecord]:
+        """按写入顺序列出 thread 下的消息。"""
+
+        with self._lock:
+            self._fetch_thread_row(thread_id)
+            rows = self._connection.execute(
+                """
+                SELECT id, thread_id, role, content, run_id, metadata_json, created_at
+                FROM messages
+                WHERE thread_id = ?
+                ORDER BY sequence ASC
+                """,
+                (thread_id,),
+            ).fetchall()
+            return [self._row_to_message(row) for row in rows]
+
+    def create_run(
+        self,
+        thread_id: str,
+        *,
+        model_name: str,
+        mode: ChatMode,
+        agent_name: str,
+    ) -> RunRecord:
+        """为某个 thread 创建一次执行记录。"""
+
+        with self._lock, self._connection:
+            self._fetch_thread_row(thread_id)
+            run = RunRecord(
+                id=new_run_id(),
+                thread_id=thread_id,
+                model_name=model_name,
+                mode=mode,
+                agent_name=agent_name,
+            )
+            self._connection.execute(
+                """
+                INSERT INTO runs (
+                    id, thread_id, status, model_name, mode, agent_name,
+                    error, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.thread_id,
+                    run.status,
+                    run.model_name,
+                    run.mode,
+                    run.agent_name,
+                    run.error,
+                    self._datetime_to_text(run.created_at),
+                    self._datetime_to_text(run.updated_at),
+                ),
+            )
+            self._touch_thread(thread_id)
+            return self._copy_run(run)
+
+    def list_runs(self, thread_id: str) -> list[RunRecord]:
+        """按创建顺序列出 thread 下的 run。"""
+
+        with self._lock:
+            self._fetch_thread_row(thread_id)
+            rows = self._connection.execute(
+                """
+                SELECT id, thread_id, status, model_name, mode, agent_name,
+                    error, created_at, updated_at
+                FROM runs
+                WHERE thread_id = ?
+                ORDER BY sequence ASC
+                """,
+                (thread_id,),
+            ).fetchall()
+            return [self._row_to_run(row) for row in rows]
+
+    def get_run(self, run_id: str) -> RunRecord:
+        """读取一次 run，不存在时抛出明确错误。"""
+
+        with self._lock:
+            return self._row_to_run(self._fetch_run_row(run_id))
+
+    def update_run_status(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        error: str | None = None,
+    ) -> RunRecord:
+        """更新 run 状态，并推进所属 thread 更新时间。"""
+
+        with self._lock, self._connection:
+            run_row = self._fetch_run_row(run_id)
+            updated_at = utc_now()
+            self._connection.execute(
+                """
+                UPDATE runs
+                SET status = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, error, self._datetime_to_text(updated_at), run_id),
+            )
+            self._touch_thread(str(run_row["thread_id"]))
+            return self._row_to_run(self._fetch_run_row(run_id))
+
+    def _initialize_schema(self) -> None:
+        """创建模块 18 需要的最小 SQLite 表结构。"""
+
+        with self._lock, self._connection:
+            self._connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS threads (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    thread_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    run_id TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_messages_thread_sequence
+                    ON messages(thread_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS runs (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    thread_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_runs_thread_sequence
+                    ON runs(thread_id, sequence);
+
+                CREATE INDEX IF NOT EXISTS idx_threads_updated_at
+                    ON threads(updated_at DESC);
+                """
+            )
+
+    def _fetch_thread_row(self, thread_id: str) -> sqlite3.Row:
+        row = self._connection.execute(
+            """
+            SELECT id, title, created_at, updated_at
+            FROM threads
+            WHERE id = ?
+            """,
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}")
+        return row
+
+    def _fetch_run_row(self, run_id: str) -> sqlite3.Row:
+        row = self._connection.execute(
+            """
+            SELECT id, thread_id, status, model_name, mode, agent_name,
+                error, created_at, updated_at
+            FROM runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise RunNotFoundError(f"run not found: {run_id}")
+        return row
+
+    def _touch_thread(self, thread_id: str) -> None:
+        self._connection.execute(
+            """
+            UPDATE threads
+            SET updated_at = ?
+            WHERE id = ?
+            """,
+            (self._datetime_to_text(utc_now()), thread_id),
+        )
+
+    @staticmethod
+    def _row_to_thread(row: sqlite3.Row) -> ThreadRecord:
+        return ThreadRecord(
+            id=str(row["id"]),
+            title=str(row["title"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _row_to_message(row: sqlite3.Row) -> MessageRecord:
+        metadata = json.loads(str(row["metadata_json"]))
+        return MessageRecord(
+            id=str(row["id"]),
+            thread_id=str(row["thread_id"]),
+            role=row["role"],
+            content=str(row["content"]),
+            run_id=row["run_id"],
+            metadata=metadata,
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _row_to_run(row: sqlite3.Row) -> RunRecord:
+        return RunRecord(
+            id=str(row["id"]),
+            thread_id=str(row["thread_id"]),
+            status=row["status"],
+            model_name=str(row["model_name"]),
+            mode=row["mode"],
+            agent_name=str(row["agent_name"]),
+            error=row["error"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _metadata_to_text(metadata: dict) -> str:
+        return json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _datetime_to_text(value) -> str:
+        return value.isoformat()
+
+    @staticmethod
+    def _copy_thread(thread: ThreadRecord) -> ThreadRecord:
+        return thread.model_copy(deep=True)
+
+    @staticmethod
+    def _copy_message(message: MessageRecord) -> MessageRecord:
+        return message.model_copy(deep=True)
+
+    @staticmethod
+    def _copy_run(run: RunRecord) -> RunRecord:
+        return run.model_copy(deep=True)
+
+
+def load_chat_repository_config_from_env() -> ChatRepositoryConfig:
+    """从环境变量读取 chat 仓库配置。"""
+
+    backend = os.environ.get("SLOTFLOW_CHAT_REPOSITORY_BACKEND", "memory").strip().lower()
+    sqlite_path_value = os.environ.get("SLOTFLOW_CHAT_SQLITE_PATH")
+    sqlite_path = (
+        Path(sqlite_path_value.strip())
+        if sqlite_path_value and sqlite_path_value.strip()
+        else DEFAULT_SQLITE_REPOSITORY_PATH
+    )
+
+    if backend == "memory":
+        return ChatRepositoryConfig(backend="memory", sqlite_path=sqlite_path)
+    if backend == "sqlite":
+        return ChatRepositoryConfig(backend="sqlite", sqlite_path=sqlite_path)
+    raise ValueError(
+        "SLOTFLOW_CHAT_REPOSITORY_BACKEND must be 'memory' or 'sqlite', "
+        f"got {backend!r}",
+    )
+
+
+def build_chat_repository(config: ChatRepositoryConfig | None = None) -> ChatRepository:
+    """按配置创建 chat 仓库实现。"""
+
+    resolved = config or load_chat_repository_config_from_env()
+    if resolved.backend == "memory":
+        return InMemoryChatRepository()
+    if resolved.backend == "sqlite":
+        return SQLiteChatRepository(resolved.sqlite_path)
+    raise ValueError(f"unsupported chat repository backend: {resolved.backend!r}")

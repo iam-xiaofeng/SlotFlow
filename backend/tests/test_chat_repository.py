@@ -1,24 +1,48 @@
-"""模块二测试：内存版 thread/message/run 仓库。
+"""模块二/十八测试：thread/message/run 仓库。
 
 模块一只证明“数据盒子”长得对；模块二开始证明这些数据能被保存、读取和更新。
 
-这里仍然不碰 FastAPI，也不碰 agent。原因是仓库本身应该是一个清楚的小边界：
-上层告诉它要保存什么，它负责保存并按规则取回。
+模块十八把同一组仓库行为扩展到 SQLite。这里仍然不碰 agent，原因是仓库本身应该
+是一个清楚的小边界：上层告诉它要保存什么，它负责保存并按规则取回。
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
 from time import sleep
 
 import pytest
 
-from app.chat.repository import InMemoryChatRepository, RunNotFoundError, ThreadNotFoundError
+from app.chat.repository import (
+    ChatRepository,
+    ChatRepositoryConfig,
+    InMemoryChatRepository,
+    RunNotFoundError,
+    SQLiteChatRepository,
+    ThreadNotFoundError,
+    build_chat_repository,
+    load_chat_repository_config_from_env,
+)
 
 
-def test_create_thread_uses_default_title_when_title_is_blank() -> None:
+@pytest.fixture(params=["memory", "sqlite"])
+def repo(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ChatRepository]:
+    """同一批仓库契约测试同时跑内存版和 SQLite 版。"""
+
+    if request.param == "memory":
+        yield InMemoryChatRepository()
+        return
+
+    sqlite_repo = SQLiteChatRepository(tmp_path / "chat.sqlite3")
+    try:
+        yield sqlite_repo
+    finally:
+        sqlite_repo.close()
+
+
+def test_create_thread_uses_default_title_when_title_is_blank(repo: ChatRepository) -> None:
     """前端还没生成标题时，仓库先给一个稳定的占位标题。"""
-
-    repo = InMemoryChatRepository()
 
     thread = repo.create_thread(title="   ")
 
@@ -27,10 +51,8 @@ def test_create_thread_uses_default_title_when_title_is_blank() -> None:
     assert repo.get_thread(thread.id).title == "新会话"
 
 
-def test_create_thread_strips_title_and_lists_recent_first() -> None:
+def test_create_thread_strips_title_and_lists_recent_first(repo: ChatRepository) -> None:
     """thread 标题去掉两侧空白；会话列表按最近活动排序。"""
-
-    repo = InMemoryChatRepository()
 
     first = repo.create_thread(title="  第一条  ")
     sleep(0.001)
@@ -47,10 +69,9 @@ def test_create_thread_strips_title_and_lists_recent_first() -> None:
     assert [thread.id for thread in threads] == [first.id, second.id]
 
 
-def test_add_and_list_messages_keep_write_order() -> None:
+def test_add_and_list_messages_keep_write_order(repo: ChatRepository) -> None:
     """消息按写入顺序保存，这是聊天记录能正确展示的基础。"""
 
-    repo = InMemoryChatRepository()
     thread = repo.create_thread()
 
     first = repo.add_message(thread.id, role="user", content="你好")
@@ -71,10 +92,8 @@ def test_add_and_list_messages_keep_write_order() -> None:
     assert messages[1].metadata == {"source": "fake-agent"}
 
 
-def test_message_operations_fail_for_missing_thread() -> None:
+def test_message_operations_fail_for_missing_thread(repo: ChatRepository) -> None:
     """不存在的 thread 不能悄悄创建，否则调用方很难发现传错了 ID。"""
-
-    repo = InMemoryChatRepository()
 
     with pytest.raises(ThreadNotFoundError, match="thread not found"):
         repo.add_message("thread_missing", role="user", content="hello")
@@ -83,10 +102,9 @@ def test_message_operations_fail_for_missing_thread() -> None:
         repo.list_messages("thread_missing")
 
 
-def test_create_list_get_and_update_run() -> None:
+def test_create_list_get_and_update_run(repo: ChatRepository) -> None:
     """run 从 queued 开始，随后可以被更新为 running/completed/failed 等状态。"""
 
-    repo = InMemoryChatRepository()
     thread = repo.create_thread()
 
     run = repo.create_run(
@@ -109,10 +127,9 @@ def test_create_list_get_and_update_run() -> None:
     assert [item.id for item in runs] == [run.id]
 
 
-def test_update_run_can_store_error_message() -> None:
+def test_update_run_can_store_error_message(repo: ChatRepository) -> None:
     """stream 失败时，仓库要保存最终错误，后续 API 才能返回给前端。"""
 
-    repo = InMemoryChatRepository()
     thread = repo.create_thread()
     run = repo.create_run(
         thread.id,
@@ -127,10 +144,8 @@ def test_update_run_can_store_error_message() -> None:
     assert failed.error == "agent crashed"
 
 
-def test_run_operations_fail_for_missing_objects() -> None:
+def test_run_operations_fail_for_missing_objects(repo: ChatRepository) -> None:
     """仓库层用明确异常表达缺失对象，后面路由层再翻译成 HTTP 404。"""
-
-    repo = InMemoryChatRepository()
 
     with pytest.raises(ThreadNotFoundError, match="thread not found"):
         repo.create_run(
@@ -147,10 +162,9 @@ def test_run_operations_fail_for_missing_objects() -> None:
         repo.update_run_status("run_missing", status="running")
 
 
-def test_repository_returns_copies_not_internal_objects() -> None:
+def test_repository_returns_copies_not_internal_objects(repo: ChatRepository) -> None:
     """调用方拿到的是副本，不能绕过仓库直接改内部状态。"""
 
-    repo = InMemoryChatRepository()
     thread = repo.create_thread(title="原始标题")
     message = repo.add_message(thread.id, role="assistant", content="原始回答", metadata={"tool": "none"})
     run = repo.create_run(
@@ -171,3 +185,57 @@ def test_repository_returns_copies_not_internal_objects() -> None:
     assert stored_thread.title == "原始标题"
     assert stored_message.metadata == {"tool": "none"}
     assert stored_run.status == "queued"
+
+
+def test_sqlite_repository_persists_records_across_instances(tmp_path: Path) -> None:
+    """SQLite 版重开连接后仍能读回 thread/message/run。"""
+
+    db_path = tmp_path / "chat.sqlite3"
+    first_repo = SQLiteChatRepository(db_path)
+    thread = first_repo.create_thread(title="持久化会话")
+    message = first_repo.add_message(
+        thread.id,
+        role="assistant",
+        content="这条消息会落盘",
+        metadata={"source": "sqlite-test"},
+    )
+    run = first_repo.create_run(
+        thread.id,
+        model_name="fake-model",
+        mode="pro",
+        agent_name="default",
+    )
+    first_repo.update_run_status(run.id, status="completed")
+    first_repo.close()
+
+    second_repo = SQLiteChatRepository(db_path)
+    try:
+        assert second_repo.get_thread(thread.id).title == "持久化会话"
+        assert second_repo.list_messages(thread.id)[0].id == message.id
+        assert second_repo.list_messages(thread.id)[0].metadata == {"source": "sqlite-test"}
+        assert second_repo.get_run(run.id).status == "completed"
+    finally:
+        second_repo.close()
+
+
+def test_chat_repository_config_defaults_to_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认仍然使用内存仓库，避免本地测试意外写文件。"""
+
+    monkeypatch.delenv("SLOTFLOW_CHAT_REPOSITORY_BACKEND", raising=False)
+    monkeypatch.delenv("SLOTFLOW_CHAT_SQLITE_PATH", raising=False)
+
+    assert load_chat_repository_config_from_env() == ChatRepositoryConfig()
+
+
+def test_build_chat_repository_can_create_sqlite(tmp_path: Path) -> None:
+    """启动阶段可以按配置创建 SQLite 仓库。"""
+
+    repo = build_chat_repository(
+        ChatRepositoryConfig(
+            backend="sqlite",
+            sqlite_path=tmp_path / "chat.sqlite3",
+        )
+    )
+
+    assert isinstance(repo, SQLiteChatRepository)
+    repo.close()

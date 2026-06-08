@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.chat.agent_adapter import AgentEvent, StaticProjectionAgentAdapter
 from app.chat.models import ChatStreamRequest, RunConfigBundle
-from app.chat.repository import InMemoryChatRepository
+from app.chat.repository import ChatRepository, InMemoryChatRepository, SQLiteChatRepository
 from app.main import create_app
 
 
@@ -46,7 +47,7 @@ class BrokenAgentAdapter:
         raise RuntimeError("boom from test adapter")
 
 
-def _client(repo: InMemoryChatRepository, adapter=None) -> TestClient:
+def _client(repo: ChatRepository, adapter=None) -> TestClient:
     """创建带测试仓库和测试 adapter 的 TestClient。"""
 
     return TestClient(
@@ -55,6 +56,35 @@ def _client(repo: InMemoryChatRepository, adapter=None) -> TestClient:
             agent_adapter=adapter or StaticProjectionAgentAdapter(),
         )
     )
+
+
+def test_create_app_can_use_sqlite_repository_from_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """模块十八后，应用启动入口可以通过环境变量切到 SQLite 仓库。"""
+
+    db_path = tmp_path / "chat.sqlite3"
+    monkeypatch.setenv("SLOTFLOW_CHAT_REPOSITORY_BACKEND", "sqlite")
+    monkeypatch.setenv("SLOTFLOW_CHAT_SQLITE_PATH", str(db_path))
+
+    app = create_app(agent_adapter=StaticProjectionAgentAdapter())
+    client = TestClient(app)
+    repo = app.state.chat_repo
+    persisted_repo: SQLiteChatRepository | None = None
+
+    try:
+        response = client.post("/api/chat/threads", json={"title": "SQLite 会话"})
+        persisted_repo = SQLiteChatRepository(db_path)
+
+        assert isinstance(repo, SQLiteChatRepository)
+        assert response.status_code == 200
+        assert persisted_repo.list_threads()[0].title == "SQLite 会话"
+    finally:
+        if persisted_repo is not None:
+            persisted_repo.close()
+        if isinstance(repo, SQLiteChatRepository):
+            repo.close()
 
 
 def _parse_sse(text: str) -> list[dict]:
