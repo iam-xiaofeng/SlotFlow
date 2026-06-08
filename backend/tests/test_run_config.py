@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.chat.models import ChatStreamRequest
+from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config, mode_to_feature_flags
 
 
@@ -90,6 +90,7 @@ def test_build_run_config_puts_business_fields_in_context() -> None:
     assert bundle.context.mode == "ultra"
     assert bundle.context.agent_name == "researcher"
     assert bundle.context.files == ["upload_1", "upload_2"]
+    assert bundle.context.uploaded_files == []
     assert bundle.context.thinking_enabled is True
     assert bundle.context.is_plan_mode is True
     assert bundle.context.subagent_enabled is True
@@ -110,6 +111,33 @@ def test_build_run_config_copies_files_from_request() -> None:
     request.files.append("upload_2")
 
     assert bundle.context.files == ["upload_1"]
+
+
+def test_build_run_config_copies_resolved_uploaded_files() -> None:
+    """解析后的上传文件元数据进入 context 时也要复制，避免外部后续修改。"""
+
+    request = ChatStreamRequest(message="分析上传文件", files=["file_abc123def456"])
+    uploaded_file = UploadedFileContext(
+        id="file_abc123def456",
+        filename="report.md",
+        content_type="text/markdown",
+        size_bytes=8,
+        workspace_path="uploads/file_abc123def456/report.md",
+    )
+
+    bundle = build_run_config(
+        thread_id="thread_upload",
+        run_id="run_upload",
+        request=request,
+        uploaded_files=[uploaded_file],
+    )
+    uploaded_file.filename = "changed.md"
+
+    assert bundle.context.files == ["file_abc123def456"]
+    assert bundle.context.uploaded_files[0].filename == "report.md"
+    assert bundle.context.uploaded_files[0].workspace_path == (
+        "uploads/file_abc123def456/report.md"
+    )
 
 
 def test_build_run_config_uses_flash_as_lightweight_mode() -> None:

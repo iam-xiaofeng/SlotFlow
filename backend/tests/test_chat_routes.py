@@ -23,7 +23,9 @@ from fastapi.testclient import TestClient
 from app.chat.agent_adapter import AgentEvent, StaticProjectionAgentAdapter
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 from app.chat.repository import ChatRepository, InMemoryChatRepository, SQLiteChatRepository
+from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
+from app.uploads import SlotFlowUploadStore
 
 
 class BrokenAgentAdapter:
@@ -47,13 +49,18 @@ class BrokenAgentAdapter:
         raise RuntimeError("boom from test adapter")
 
 
-def _client(repo: ChatRepository, adapter=None) -> TestClient:
+def _client(
+    repo: ChatRepository,
+    adapter=None,
+    upload_store: SlotFlowUploadStore | None = None,
+) -> TestClient:
     """创建带测试仓库和测试 adapter 的 TestClient。"""
 
     return TestClient(
         create_app(
             chat_repo=repo,
             agent_adapter=adapter or StaticProjectionAgentAdapter(),
+            upload_store=upload_store,
         )
     )
 
@@ -144,12 +151,21 @@ def test_missing_thread_routes_return_404() -> None:
     )
 
 
-def test_stream_run_emits_sse_and_persists_messages_and_completed_run() -> None:
+def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
+    tmp_path: Path,
+) -> None:
     """前端发送 stream 请求后，后端应该返回 SSE，并保存用户和 assistant 消息。"""
 
     repo = InMemoryChatRepository()
-    client = _client(repo)
+    upload_store = SlotFlowUploadStore(
+        SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
+    )
+    client = _client(repo, upload_store=upload_store)
     thread = client.post("/api/chat/threads", json={"title": "链路测试"}).json()
+    uploaded = client.post(
+        "/api/uploads",
+        files={"file": ("report.md", b"# report", "text/markdown")},
+    ).json()
 
     response = client.post(
         f"/api/chat/threads/{thread['id']}/runs/stream",
@@ -157,7 +173,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run() -> None:
             "message": "解释完整链路",
             "model_name": "deepseek-v4-flash",
             "mode": "pro",
-            "files": ["upload_1"],
+            "files": [uploaded["id"]],
         },
     )
     events = _parse_sse(response.text)
@@ -174,15 +190,43 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run() -> None:
 
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].content == "解释完整链路"
-    assert messages[0].metadata == {
-        "files": ["upload_1"],
-        "request_metadata": {},
-    }
+    assert messages[0].metadata["files"] == [uploaded["id"]]
+    assert messages[0].metadata["request_metadata"] == {}
+    assert messages[0].metadata["uploaded_files"][0]["id"] == uploaded["id"]
+    assert messages[0].metadata["uploaded_files"][0]["workspace_path"] == (
+        uploaded["workspace_path"]
+    )
     assert "解释完整链路" in messages[1].content
     assert messages[1].run_id == runs[0].id
     assert runs[0].status == "completed"
     assert runs[0].model_name == "deepseek-v4-flash"
     assert runs[0].mode == "pro"
+
+
+def test_stream_run_rejects_unknown_uploaded_file_without_persisting(
+    tmp_path: Path,
+) -> None:
+    """stream 请求带不存在的 file_id 时，要 404，且不能创建消息或 run。"""
+
+    repo = InMemoryChatRepository()
+    upload_store = SlotFlowUploadStore(
+        SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
+    )
+    client = _client(repo, upload_store=upload_store)
+    thread = client.post("/api/chat/threads", json={"title": "缺失文件"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={
+            "message": "分析缺失文件",
+            "files": ["file_missing"],
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "upload not found"
+    assert repo.list_messages(thread["id"]) == []
+    assert repo.list_runs(thread["id"]) == []
 
 
 def test_stream_run_error_event_marks_run_failed() -> None:

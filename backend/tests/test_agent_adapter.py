@@ -23,17 +23,21 @@ from app.chat.agent_adapter import (
     projection_item_to_agent_event,
     protocol_event_to_agent_event,
 )
-from app.chat.models import ChatStreamRequest
+from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
 
 
-def _bundle(request: ChatStreamRequest | None = None):
+def _bundle(
+    request: ChatStreamRequest | None = None,
+    uploaded_files: list[UploadedFileContext] | None = None,
+):
     """构建一份稳定 run bundle，减少测试重复样板。"""
 
     return build_run_config(
         thread_id="thread_test",
         run_id="run_test",
         request=request or ChatStreamRequest(message="解释 v3 投影"),
+        uploaded_files=uploaded_files,
     )
 
 
@@ -199,7 +203,14 @@ async def test_static_projection_adapter_emits_complete_learning_sequence() -> N
         mode="ultra",
         files=["upload_1", "upload_2"],
     )
-    bundle = _bundle(request)
+    uploaded_file = UploadedFileContext(
+        id="upload_1",
+        filename="report.md",
+        content_type="text/markdown",
+        size_bytes=8,
+        workspace_path="uploads/upload_1/report.md",
+    )
+    bundle = _bundle(request, uploaded_files=[uploaded_file])
     adapter = StaticProjectionAgentAdapter()
 
     events = await collect_agent_events(adapter.stream_events(request=request, bundle=bundle))
@@ -224,6 +235,9 @@ async def test_static_projection_adapter_emits_complete_learning_sequence() -> N
     assert snapshot["messages"][0]["content"] == streamed_text
     assert "收到 2 个文件" in streamed_text
     assert snapshot["state"]["subagent_enabled"] is True
+    assert snapshot["state"]["uploaded_files"][0]["workspace_path"] == (
+        "uploads/upload_1/report.md"
+    )
 
 
 @pytest.mark.asyncio

@@ -140,6 +140,10 @@ class StaticProjectionAgentAdapter:
                     "is_plan_mode": bundle.context.is_plan_mode,
                     "subagent_enabled": bundle.context.subagent_enabled,
                     "files": list(bundle.context.files),
+                    "uploaded_files": [
+                        uploaded_file.model_dump(mode="json")
+                        for uploaded_file in bundle.context.uploaded_files
+                    ],
                 },
             },
         )

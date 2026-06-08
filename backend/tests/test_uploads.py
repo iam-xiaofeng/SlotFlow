@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.harness.sandbox import SlotFlowSandboxConfig
+from app.harness.tools.workspace import build_workspace_tools
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
 
@@ -57,6 +58,26 @@ def test_get_uploaded_file_returns_metadata(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["workspace_path"] == uploaded["workspace_path"]
+
+
+def test_workspace_read_can_read_uploaded_file_by_workspace_path(tmp_path: Path) -> None:
+    """模块 23：上传文件返回的 workspace_path 仍然受 workspace 工具边界保护。"""
+
+    client, store = _client(tmp_path)
+    uploaded = client.post(
+        "/api/uploads",
+        files={"file": ("notes.txt", b"hello from upload", "text/plain")},
+    ).json()
+    workspace_read = next(
+        tool for tool in build_workspace_tools(store.workspace.config)
+        if tool.name == "workspace_read"
+    )
+
+    payload = json.loads(workspace_read.invoke({"path": uploaded["workspace_path"]}))
+
+    assert payload["path"] == uploaded["workspace_path"]
+    assert payload["content"] == "hello from upload"
+    assert payload["source"] == "slotflow_workspace"
 
 
 def test_upload_rejects_oversized_file(tmp_path: Path) -> None:

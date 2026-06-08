@@ -80,7 +80,7 @@ class ChatStreamRequest(BaseModel):
     - `message` 是用户这次说的话；
     - `model_name` 暂时只是透传到 run context，让你能看到配置怎么进入后端；
     - `mode` 模拟不同能力档位，后面会变成真实 feature flags；
-    - `files` 先用字符串占位，未来可以替换为上传文件 ID。
+    - `files` 是上传 API 返回的 file_id 列表，stream 路由会解析成上传元数据。
     """
 
     message: str = Field(min_length=1)
@@ -98,6 +98,23 @@ class ChatStreamRequest(BaseModel):
         if not value.strip():
             raise ValueError("message cannot be blank")
         return value
+
+
+class UploadedFileContext(BaseModel):
+    """一次 run 中已经解析过的上传文件引用。
+
+    外部 API 仍然只接收 `files: list[str]`，这些字符串是上传 API 返回的 file_id。
+    stream 路由会在创建 run 之前把 file_id 解析成这份结构化元数据。这样 agent/runtime
+    能知道文件在 workspace 里的安全相对路径，但业务数据库仍然只保存元数据，不保存
+    文件二进制。
+    """
+
+    id: str
+    filename: str
+    content_type: str | None = None
+    size_bytes: int
+    workspace_path: str
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class RunRecord(BaseModel):
@@ -132,6 +149,7 @@ class RunContext(BaseModel):
     mode: ChatMode
     agent_name: str
     files: list[str] = Field(default_factory=list)
+    uploaded_files: list[UploadedFileContext] = Field(default_factory=list)
     thinking_enabled: bool
     is_plan_mode: bool
     subagent_enabled: bool

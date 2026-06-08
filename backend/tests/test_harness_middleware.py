@@ -72,6 +72,7 @@ def test_runtime_summary_middleware_writes_compact_context_snapshot() -> None:
                 "plan_enabled": True,
                 "subagent_enabled": True,
                 "files_count": 1,
+                "uploaded_files": [],
             },
         }
     }

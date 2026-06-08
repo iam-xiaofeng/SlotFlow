@@ -29,10 +29,13 @@ from app.chat.models import (
     MessageRecord,
     ThreadCreateRequest,
     ThreadRecord,
+    UploadedFileContext,
 )
 from app.chat.repository import ChatRepository, ThreadNotFoundError
 from app.chat.run_config import build_run_config
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
+from app.uploads.models import UploadedFileRecord
+from app.uploads.storage import SlotFlowUploadStore, UploadNotFoundError
 
 
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
@@ -92,12 +95,13 @@ async def stream_thread_run(
     这里是后端学习链路的核心入口。它做的事情按顺序是：
 
     1. 确认 thread 存在；
-    2. 保存用户消息；
-    3. 创建 run；
-    4. 构建 `config + context`；
-    5. 调用 agent adapter；
-    6. 把业务事件编码成 SSE；
-    7. 根据流式结果更新 run 状态和 assistant 消息。
+    2. 解析请求里的上传文件 ID；
+    3. 保存用户消息；
+    4. 创建 run；
+    5. 构建 `config + context`；
+    6. 调用 agent adapter；
+    7. 把业务事件编码成 SSE；
+    8. 根据流式结果更新 run 状态和 assistant 消息。
     """
 
     repo = get_repo(request)
@@ -108,12 +112,19 @@ async def stream_thread_run(
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
+    uploaded_files = resolve_uploaded_files(body.files, store=get_upload_store(request))
+    uploaded_file_metadata = [
+        uploaded_file.model_dump(mode="json")
+        for uploaded_file in uploaded_files
+    ]
+
     repo.add_message(
         thread_id,
         role="user",
         content=body.message,
         metadata={
             "files": list(body.files),
+            "uploaded_files": uploaded_file_metadata,
             "request_metadata": dict(body.metadata),
         },
     )
@@ -123,7 +134,12 @@ async def stream_thread_run(
         mode=body.mode,
         agent_name=body.agent_name,
     )
-    bundle = build_run_config(thread_id=thread_id, run_id=run.id, request=body)
+    bundle = build_run_config(
+        thread_id=thread_id,
+        run_id=run.id,
+        request=body,
+        uploaded_files=uploaded_files,
+    )
     repo.update_run_status(run.id, status="running")
 
     async def frames() -> AsyncIterator[str]:
@@ -199,6 +215,28 @@ def latest_assistant_content(event: BusinessSseEvent) -> str | None:
     return None
 
 
+def resolve_uploaded_files(
+    file_ids: list[str],
+    *,
+    store: SlotFlowUploadStore,
+) -> list[UploadedFileContext]:
+    """把请求里的 file_id 解析成本次 run 可读取的上传文件元数据。"""
+
+    uploaded_files: list[UploadedFileContext] = []
+    for file_id in file_ids:
+        try:
+            uploaded_files.append(uploaded_file_to_context(store.get_upload(file_id)))
+        except UploadNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="upload not found") from exc
+    return uploaded_files
+
+
+def uploaded_file_to_context(record: UploadedFileRecord) -> UploadedFileContext:
+    """把上传存储层记录转换成 chat runtime 使用的上下文记录。"""
+
+    return UploadedFileContext.model_validate(record.model_dump())
+
+
 def get_repo(request: Request) -> ChatRepository:
     """从 app.state 取 chat 仓库。"""
 
@@ -209,3 +247,9 @@ def get_agent_adapter(request: Request) -> AgentAdapter:
     """从 app.state 取 agent adapter。"""
 
     return request.app.state.agent_adapter
+
+
+def get_upload_store(request: Request) -> SlotFlowUploadStore:
+    """从 app.state 取上传文件存储边界。"""
+
+    return request.app.state.upload_store

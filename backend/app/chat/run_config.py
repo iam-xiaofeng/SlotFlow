@@ -15,7 +15,13 @@
 
 from __future__ import annotations
 
-from app.chat.models import ChatMode, ChatStreamRequest, RunConfigBundle, RunContext
+from app.chat.models import (
+    ChatMode,
+    ChatStreamRequest,
+    RunConfigBundle,
+    RunContext,
+    UploadedFileContext,
+)
 
 
 def mode_to_feature_flags(mode: ChatMode) -> dict[str, bool]:
@@ -43,6 +49,7 @@ def build_run_config(
     thread_id: str,
     run_id: str,
     request: ChatStreamRequest,
+    uploaded_files: list[UploadedFileContext] | None = None,
 ) -> RunConfigBundle:
     """构建调用 agent stream 时需要的 `config + context`。
 
@@ -54,6 +61,10 @@ def build_run_config(
     """
 
     flags = mode_to_feature_flags(request.mode)
+    resolved_uploaded_files = [
+        uploaded_file.model_copy(deep=True)
+        for uploaded_file in (uploaded_files or [])
+    ]
 
     return RunConfigBundle(
         config={
@@ -68,6 +79,7 @@ def build_run_config(
             mode=request.mode,
             agent_name=request.agent_name,
             files=list(request.files),
+            uploaded_files=resolved_uploaded_files,
             thinking_enabled=flags["thinking_enabled"],
             is_plan_mode=flags["is_plan_mode"],
             subagent_enabled=flags["subagent_enabled"],

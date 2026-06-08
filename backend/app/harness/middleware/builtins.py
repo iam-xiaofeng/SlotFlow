@@ -38,5 +38,9 @@ class SlotFlowRuntimeSummaryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
             "plan_enabled": self._features.plan_enabled,
             "subagent_enabled": self._features.subagent_enabled,
             "files_count": len(context.files),
+            "uploaded_files": [
+                uploaded_file.model_dump(mode="json")
+                for uploaded_file in context.uploaded_files
+            ],
         }
         return {"slotflow": existing}
