@@ -7,6 +7,7 @@ from langchain_core.tools import BaseTool
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, load_mcp_tools
 from app.harness.sandbox import SlotFlowSandboxConfig
+from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
 from app.harness.tools.builtins import slotflow_context_tool
 from app.harness.tools.workspace import build_workspace_tools
 
@@ -18,6 +19,7 @@ def build_harness_tools(
     mcp_config: SlotFlowMcpConfig | None = None,
     mcp_tool_provider: McpToolProvider | None = None,
     sandbox_config: SlotFlowSandboxConfig | None = None,
+    subagent_config: SlotFlowSubagentConfig | None = None,
 ) -> list[BaseTool]:
     """组装本次 graph 要绑定的工具列表。
 
@@ -31,11 +33,16 @@ def build_harness_tools(
         provider=mcp_tool_provider,
     )
     workspace_tools = build_workspace_tools(sandbox_config)
+    subagent_tools = build_subagent_tools(
+        features=features,
+        config=subagent_config,
+    )
     return dedupe_tools_by_name(
         [
             *(extra_tools or []),
             slotflow_context_tool,
             *workspace_tools,
+            *subagent_tools,
             *mcp_tools,
         ]
     )

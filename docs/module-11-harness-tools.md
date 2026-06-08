@@ -31,18 +31,22 @@ RunContext
 ```
 
 后续 MCP tools、subagent tools、文件工具策略，都应该进入 `build_harness_tools()` 或它
-调用的子 registry，而不是直接散落在 builder/runtime 里。
+调用的子 registry，而不是直接散落在 builder/runtime 里。模块 16/20/21 已经分别把
+workspace 文件工具、真实 MCP provider、`task_tool` 接进了这条 registry。
 
 ## 它接收什么输入
 
 当前 `build_harness_tools()` 接收：
 
 ```txt
-features     从 RunContext 收窄后的 harness feature flags
-extra_tools  测试或后续扩展传入的工具
+features          从 RunContext 收窄后的 harness feature flags
+extra_tools       测试或后续扩展传入的工具
+sandbox_config    workspace 文件工具边界
+mcp_config        MCP server 配置
+subagent_config   task_tool 子 agent profile 配置
 ```
 
-模块 11 暂时还没有根据 feature 做分支，但参数已经保留。后续可以按这些字段扩展：
+模块 21 后，`subagent_enabled` 已经开始控制 `task_tool` 是否注册：
 
 ```txt
 subagent_enabled -> 是否加入 task tool
@@ -160,11 +164,11 @@ backend/tests/test_harness_tools.py
 
 ```txt
 不加入 bash
-不加入文件写入
+不在模块 11 阶段加入文件写入
 不加入网络工具
-不加入 MCP
-不加入 sandbox
-不做文件工具
+不在模块 11 阶段加入 MCP
+不在模块 11 阶段加入 sandbox
+不在模块 11 阶段做文件工具
 ```
 
 这些能力后续会逐步进入，但第一步必须先让 tool calling 本身可解释、可测试。

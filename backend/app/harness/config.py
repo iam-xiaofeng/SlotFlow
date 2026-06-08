@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from app.harness.mcp import SlotFlowMcpConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
+from app.harness.subagents import SlotFlowSubagentConfig
 
 if TYPE_CHECKING:
     from app.harness.mcp import McpToolProvider
@@ -29,3 +30,4 @@ class SlotFlowHarnessConfig:
     mcp_tool_provider: McpToolProvider | None = None
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
+    subagent_config: SlotFlowSubagentConfig = field(default_factory=SlotFlowSubagentConfig)
