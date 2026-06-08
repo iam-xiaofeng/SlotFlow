@@ -14,8 +14,10 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable, AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -40,9 +42,10 @@ if TYPE_CHECKING:
 
 
 RuntimeMode = Literal["static", "deepseek"]
-CheckpointerBackend = Literal["none", "memory"]
+CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = "你是 SlotFlow 的学习版助手，回答要简洁、具体。"
+DEFAULT_CHECKPOINTER_SQLITE_PATH = Path(".slotflow/checkpoints.sqlite3")
 
 
 @dataclass(slots=True)
@@ -55,6 +58,9 @@ class SlotFlowRuntimeConfig:
     adapter_mode: RuntimeMode = "static"
     model_name: str = "deepseek-v4-flash"
     checkpointer_backend: CheckpointerBackend = "memory"
+    checkpointer_sqlite_path: Path = DEFAULT_CHECKPOINTER_SQLITE_PATH
+    checkpointer_postgres_uri: str | None = None
+    checkpointer_setup: bool = True
     system_prompt: str = DEFAULT_DEEPSEEK_SYSTEM_PROMPT
     prefer_projection_stream: bool = True
     skills_root: Path | None = None
@@ -83,8 +89,19 @@ class RuntimeBackedAgentAdapter:
         self._checkpointer = (
             create_checkpointer(runtime_config)
             if runtime_config.adapter_mode == "deepseek"
+            and runtime_config.checkpointer_backend in ("none", "memory")
             else None
         )
+
+    def close(self) -> None:
+        """关闭 runtime 持有的持久化 checkpointer 连接。"""
+
+        close_checkpointer(self._checkpointer)
+
+    async def aclose(self) -> None:
+        """异步关闭 runtime 持有的持久化 checkpointer 连接。"""
+
+        await aclose_checkpointer(self._checkpointer)
 
     async def stream_events(
         self,
@@ -96,11 +113,12 @@ class RuntimeBackedAgentAdapter:
             adapter = StaticProjectionAgentAdapter()
         elif self._runtime_config.adapter_mode == "deepseek":
             model_name = bundle.context.model_name or self._runtime_config.model_name
+            checkpointer = await self._ensure_checkpointer()
             graph = create_langgraph_agent_graph(
                 model=self._model_factory(model_name),
                 runtime_config=self._runtime_config,
                 run_context=bundle.context,
-                checkpointer=self._checkpointer,
+                checkpointer=checkpointer,
             )
             adapter = LangGraphEventAgentAdapter(
                 graph,
@@ -111,6 +129,15 @@ class RuntimeBackedAgentAdapter:
 
         async for event in adapter.stream_events(request=request, bundle=bundle):
             yield event
+
+    async def _ensure_checkpointer(self) -> Checkpointer | None:
+        if self._runtime_config.adapter_mode != "deepseek":
+            return None
+        if self._runtime_config.checkpointer_backend in ("none", "memory"):
+            return self._checkpointer
+        if self._checkpointer is None:
+            self._checkpointer = await create_async_checkpointer(self._runtime_config)
+        return self._checkpointer
 
 
 def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
@@ -126,10 +153,11 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
             f"got {adapter_mode!r}",
         )
 
-    checkpointer_backend = os.environ.get("SLOTFLOW_CHECKPOINTER_BACKEND", "memory")
-    if checkpointer_backend not in ("none", "memory"):
+    checkpointer_backend = os.environ.get("SLOTFLOW_CHECKPOINTER_BACKEND", "memory").strip().lower()
+    if checkpointer_backend not in ("none", "memory", "sqlite", "postgres"):
         raise ValueError(
-            "SLOTFLOW_CHECKPOINTER_BACKEND must be 'none' or 'memory', "
+            "SLOTFLOW_CHECKPOINTER_BACKEND must be 'none', 'memory', 'sqlite', "
+            "or 'postgres', "
             f"got {checkpointer_backend!r}",
         )
 
@@ -137,6 +165,17 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         adapter_mode=adapter_mode,
         model_name=os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash"),
         checkpointer_backend=checkpointer_backend,
+        checkpointer_sqlite_path=load_path_from_env(
+            "SLOTFLOW_CHECKPOINTER_SQLITE_PATH",
+            default=DEFAULT_CHECKPOINTER_SQLITE_PATH,
+        ),
+        checkpointer_postgres_uri=load_optional_text_from_env(
+            "SLOTFLOW_CHECKPOINTER_POSTGRES_URI",
+        ),
+        checkpointer_setup=load_bool_from_env(
+            "SLOTFLOW_CHECKPOINTER_SETUP",
+            default=True,
+        ),
         system_prompt=os.environ.get("SLOTFLOW_SYSTEM_PROMPT", DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
         skills_root=load_optional_path_from_env("SLOTFLOW_SKILLS_ROOT"),
         enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
@@ -216,6 +255,24 @@ def load_optional_path_from_env(name: str) -> Path | None:
     return Path(value)
 
 
+def load_path_from_env(name: str, *, default: Path) -> Path:
+    """从环境变量读取路径，不存在时返回默认值。"""
+
+    value = os.environ.get(name)
+    if not value or not value.strip():
+        return default
+    return Path(value.strip())
+
+
+def load_optional_text_from_env(name: str) -> str | None:
+    """从环境变量读取非空字符串。"""
+
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip()
+
+
 def load_optional_csv_set_from_env(name: str) -> set[str] | None:
     """从环境变量读取逗号分隔名单。"""
 
@@ -255,22 +312,115 @@ def load_positive_int_from_env(name: str, *, default: int) -> int:
 def create_checkpointer(
     runtime_config: SlotFlowRuntimeConfig,
 ) -> Checkpointer | None:
-    """创建 SlotFlow 当前需要的最小 checkpointer。
-
-    第一版只支持：
-
-    - `none`：完全无状态
-    - `memory`：LangGraph 自带 `InMemorySaver`
-
-    这样先把“graph 运行时可以显式拿到 checkpointer”这件事落下来，后面再按 SlotFlow
-    自己的节奏扩到 SQLite/Postgres。
-    """
+    """创建同步可用的 LangGraph checkpointer。"""
 
     if runtime_config.checkpointer_backend == "none":
         return None
     if runtime_config.checkpointer_backend == "memory":
         return InMemorySaver()
+    if runtime_config.checkpointer_backend in ("sqlite", "postgres"):
+        raise ValueError(
+            "persistent checkpointer backends require create_async_checkpointer() "
+            "because SlotFlow streams LangGraph with async APIs",
+        )
     raise ValueError(f"unknown checkpointer backend: {runtime_config.checkpointer_backend!r}")
+
+
+async def create_async_checkpointer(
+    runtime_config: SlotFlowRuntimeConfig,
+) -> Checkpointer | None:
+    """创建 async graph stream 可用的 LangGraph checkpointer。"""
+
+    if runtime_config.checkpointer_backend in ("none", "memory"):
+        return create_checkpointer(runtime_config)
+    if runtime_config.checkpointer_backend == "sqlite":
+        return await create_sqlite_checkpointer(
+            runtime_config.checkpointer_sqlite_path,
+            setup=runtime_config.checkpointer_setup,
+        )
+    if runtime_config.checkpointer_backend == "postgres":
+        if runtime_config.checkpointer_postgres_uri is None:
+            raise ValueError(
+                "SLOTFLOW_CHECKPOINTER_POSTGRES_URI is required when "
+                "SLOTFLOW_CHECKPOINTER_BACKEND=postgres",
+            )
+        return await create_postgres_checkpointer(
+            runtime_config.checkpointer_postgres_uri,
+            setup=runtime_config.checkpointer_setup,
+        )
+    raise ValueError(f"unknown checkpointer backend: {runtime_config.checkpointer_backend!r}")
+
+
+async def create_sqlite_checkpointer(
+    database_path: str | Path,
+    *,
+    setup: bool = True,
+) -> Checkpointer:
+    """创建 LangGraph Async SQLite checkpointer。"""
+
+    import aiosqlite
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    database_path_text = str(database_path)
+    if database_path_text != ":memory:":
+        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+
+    connection = await aiosqlite.connect(database_path_text)
+    checkpointer = AsyncSqliteSaver(connection)
+    if setup:
+        await checkpointer.setup()
+    return checkpointer
+
+
+async def create_postgres_checkpointer(
+    conn_string: str,
+    *,
+    setup: bool = True,
+) -> Checkpointer:
+    """创建 LangGraph Async Postgres checkpointer。"""
+
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg import AsyncConnection
+    from psycopg.rows import dict_row
+
+    connection = await AsyncConnection.connect(
+        conn_string,
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+    )
+    checkpointer = AsyncPostgresSaver(connection)
+    if setup:
+        await checkpointer.setup()
+    return checkpointer
+
+
+def close_checkpointer(checkpointer: Checkpointer | None) -> None:
+    """关闭官方 saver 持有的底层数据库连接。"""
+
+    if checkpointer is None:
+        return
+
+    connection = getattr(checkpointer, "conn", None)
+    close = getattr(connection, "close", None)
+    if callable(close) and not inspect.iscoroutinefunction(close):
+        with suppress(Exception):
+            close()
+
+
+async def aclose_checkpointer(checkpointer: Checkpointer | None) -> None:
+    """异步关闭官方 saver 持有的底层数据库连接。"""
+
+    if checkpointer is None:
+        return
+
+    connection = getattr(checkpointer, "conn", None)
+    close = getattr(connection, "close", None)
+    if callable(close):
+        with suppress(Exception):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 def create_deepseek_chat_model(*, model_name: str) -> BaseChatModel:

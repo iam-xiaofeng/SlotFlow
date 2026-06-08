@@ -128,7 +128,8 @@ none
 memory -> langgraph.checkpoint.memory.InMemorySaver
 ```
 
-第一版先不急着做 SQLite / Postgres。先把“显式把 checkpointer 传进 graph”这件事落下来。
+模块 19 已经在这个边界上继续扩展了 SQLite / Postgres 持久化 checkpointer。模块 7
+保留的是最初的 runtime 装配思路。
 
 ### 3. 增加 `RuntimeBackedAgentAdapter`
 
@@ -195,7 +196,7 @@ checkpointer 价值。
 ```txt
 不直接引入 DeerFlow 包
 不迁移 DeerFlow 全量 tools / middlewares
-不做 SQLite / Postgres checkpointer
+不在模块 7 阶段做 SQLite / Postgres checkpointer
 不改变 AgentEvent / BusinessSseEvent / SSE 事件名
 不改 FastAPI 路由契约
 ```

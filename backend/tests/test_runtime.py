@@ -9,16 +9,24 @@
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.chat.agent_adapter import collect_agent_events
 from app.chat.models import ChatStreamRequest
+import app.chat.runtime as runtime_module
 from app.chat.run_config import build_run_config
 from app.chat.runtime import (
+    DEFAULT_CHECKPOINTER_SQLITE_PATH,
     RuntimeBackedAgentAdapter,
     SlotFlowRuntimeConfig,
+    aclose_checkpointer,
+    create_async_checkpointer,
     create_checkpointer,
     load_runtime_config_from_env,
 )
@@ -44,6 +52,9 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
 
     monkeypatch.delenv("SLOTFLOW_AGENT_MODE", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_BACKEND", raising=False)
+    monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_SQLITE_PATH", raising=False)
+    monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_POSTGRES_URI", raising=False)
+    monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_SETUP", raising=False)
     monkeypatch.delenv("SLOTFLOW_DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("SLOTFLOW_SYSTEM_PROMPT", raising=False)
     monkeypatch.delenv("SLOTFLOW_SKILLS_ROOT", raising=False)
@@ -63,7 +74,31 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
         adapter_mode="static",
         model_name="deepseek-v4-flash",
         checkpointer_backend="memory",
+        checkpointer_sqlite_path=DEFAULT_CHECKPOINTER_SQLITE_PATH,
     )
+
+
+def test_load_runtime_config_from_env_reads_checkpointer_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """模块十九后，runtime 可以从环境变量读取持久化 checkpointer 配置。"""
+
+    sqlite_path = tmp_path / "checkpoints.sqlite3"
+    monkeypatch.setenv("SLOTFLOW_CHECKPOINTER_BACKEND", "sqlite")
+    monkeypatch.setenv("SLOTFLOW_CHECKPOINTER_SQLITE_PATH", str(sqlite_path))
+    monkeypatch.setenv(
+        "SLOTFLOW_CHECKPOINTER_POSTGRES_URI",
+        "postgresql://slotflow:slotflow@localhost:5432/slotflow",
+    )
+    monkeypatch.setenv("SLOTFLOW_CHECKPOINTER_SETUP", "false")
+
+    config = load_runtime_config_from_env()
+
+    assert config.checkpointer_backend == "sqlite"
+    assert config.checkpointer_sqlite_path == sqlite_path
+    assert config.checkpointer_postgres_uri == "postgresql://slotflow:slotflow@localhost:5432/slotflow"
+    assert config.checkpointer_setup is False
 
 
 def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,7 +133,7 @@ def test_load_runtime_config_from_env_reads_middleware_config(monkeypatch: pytes
 
 
 def test_create_checkpointer_supports_none_and_memory() -> None:
-    """第一版 runtime 只保留最小的 checkpointer 选择。"""
+    """同步 checkpointer 工厂只负责 none / memory。"""
 
     assert create_checkpointer(
         SlotFlowRuntimeConfig(adapter_mode="static", checkpointer_backend="none")
@@ -109,6 +144,70 @@ def test_create_checkpointer_supports_none_and_memory() -> None:
         ),
         InMemorySaver,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_async_checkpointer_supports_sqlite(tmp_path: Path) -> None:
+    """模块十九后，SQLite checkpointer 使用官方 AsyncSqliteSaver。"""
+
+    sqlite_path = tmp_path / "checkpoints.sqlite3"
+    checkpointer = await create_async_checkpointer(
+        SlotFlowRuntimeConfig(
+            adapter_mode="deepseek",
+            checkpointer_backend="sqlite",
+            checkpointer_sqlite_path=sqlite_path,
+        )
+    )
+    try:
+        assert isinstance(checkpointer, AsyncSqliteSaver)
+        assert _sqlite_table_names(sqlite_path) >= {"checkpoints", "writes"}
+    finally:
+        await aclose_checkpointer(checkpointer)
+
+
+@pytest.mark.asyncio
+async def test_create_async_checkpointer_requires_postgres_uri() -> None:
+    """Postgres 后端必须显式给连接串，不能悄悄落到本地默认值。"""
+
+    with pytest.raises(ValueError, match="SLOTFLOW_CHECKPOINTER_POSTGRES_URI"):
+        await create_async_checkpointer(
+            SlotFlowRuntimeConfig(
+                adapter_mode="deepseek",
+                checkpointer_backend="postgres",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_async_checkpointer_delegates_to_postgres_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Postgres 创建逻辑有单独边界，测试不需要真的启动 PostgreSQL。"""
+
+    calls: list[tuple[str, bool]] = []
+    sentinel = object()
+
+    async def fake_create_postgres_checkpointer(conn_string: str, *, setup: bool):
+        calls.append((conn_string, setup))
+        return sentinel
+
+    monkeypatch.setattr(
+        runtime_module,
+        "create_postgres_checkpointer",
+        fake_create_postgres_checkpointer,
+    )
+
+    checkpointer = await create_async_checkpointer(
+        SlotFlowRuntimeConfig(
+            adapter_mode="deepseek",
+            checkpointer_backend="postgres",
+            checkpointer_postgres_uri="postgresql://slotflow@localhost/slotflow",
+            checkpointer_setup=False,
+        )
+    )
+
+    assert checkpointer is sentinel
+    assert calls == [("postgresql://slotflow@localhost/slotflow", False)]
 
 
 @pytest.mark.asyncio
@@ -179,3 +278,88 @@ async def test_runtime_backed_adapter_deepseek_mode_uses_request_model_and_keeps
         "second question",
         "second answer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_backed_adapter_sqlite_checkpointer_survives_adapter_restart(
+    tmp_path: Path,
+) -> None:
+    """SQLite checkpointer 会把同一个 thread_id 的 graph 状态落盘。"""
+
+    calls: list[str] = []
+    responses = iter(["first durable answer", "second durable answer"])
+    sqlite_path = tmp_path / "checkpoints.sqlite3"
+
+    def model_factory(model_name: str) -> FakeListChatModel:
+        calls.append(model_name)
+        return FakeListChatModel(responses=[next(responses)])
+
+    first_config = SlotFlowRuntimeConfig(
+        adapter_mode="deepseek",
+        checkpointer_backend="sqlite",
+        checkpointer_sqlite_path=sqlite_path,
+    )
+    first_adapter = RuntimeBackedAgentAdapter(
+        first_config,
+        model_factory=model_factory,
+    )
+    first_request = ChatStreamRequest(message="first durable question", model_name="fake-one")
+    try:
+        first_events = await collect_agent_events(
+            first_adapter.stream_events(
+                request=first_request,
+                bundle=_bundle(
+                    thread_id="thread_durable",
+                    run_id="run_durable_one",
+                    request=first_request,
+                ),
+            )
+        )
+        first_snapshot = next(event.data for event in first_events if event.event == "state.snapshot")
+        assert first_snapshot["messages"][-1]["content"] == "first durable answer"
+    finally:
+        await first_adapter.aclose()
+
+    second_config = SlotFlowRuntimeConfig(
+        adapter_mode="deepseek",
+        checkpointer_backend="sqlite",
+        checkpointer_sqlite_path=sqlite_path,
+    )
+    second_adapter = RuntimeBackedAgentAdapter(
+        second_config,
+        model_factory=model_factory,
+    )
+    second_request = ChatStreamRequest(message="second durable question", model_name="fake-two")
+    try:
+        second_events = await collect_agent_events(
+            second_adapter.stream_events(
+                request=second_request,
+                bundle=_bundle(
+                    thread_id="thread_durable",
+                    run_id="run_durable_two",
+                    request=second_request,
+                ),
+            )
+        )
+        second_snapshot = next(event.data for event in second_events if event.event == "state.snapshot")
+    finally:
+        await second_adapter.aclose()
+
+    assert calls == ["fake-one", "fake-two"]
+    assert [message["content"] for message in second_snapshot["messages"]] == [
+        "first durable question",
+        "first durable answer",
+        "second durable question",
+        "second durable answer",
+    ]
+
+
+def _sqlite_table_names(database_path: Path) -> set[str]:
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+    finally:
+        connection.close()
