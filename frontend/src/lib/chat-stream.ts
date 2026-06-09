@@ -20,13 +20,21 @@ export type ChatStreamRequest = {
   metadata?: Record<string, unknown>;
 };
 
-export async function createThread(title?: string): Promise<ThreadRecord> {
+export type ChatRequestOptions = {
+  signal?: AbortSignal;
+};
+
+export async function createThread(
+  title?: string,
+  options: ChatRequestOptions = {},
+): Promise<ThreadRecord> {
   const response = await fetch("/api/chat/threads", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ title }),
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -39,6 +47,7 @@ export async function createThread(title?: string): Promise<ThreadRecord> {
 export async function* streamThreadRun(
   threadId: string,
   body: ChatStreamRequest,
+  options: ChatRequestOptions = {},
 ): AsyncGenerator<ChatStreamEvent> {
   const response = await fetch(`/api/chat/threads/${threadId}/runs/stream`, {
     method: "POST",
@@ -46,6 +55,7 @@ export async function* streamThreadRun(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -60,24 +70,28 @@ export async function* streamThreadRun(
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = drainSseBuffer(buffer);
+      buffer = parsed.rest;
+
+      for (const event of parsed.events) {
+        yield event;
+      }
     }
 
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = drainSseBuffer(buffer);
-    buffer = parsed.rest;
-
+    buffer += decoder.decode();
+    const parsed = drainSseBuffer(buffer, { flush: true });
     for (const event of parsed.events) {
       yield event;
     }
-  }
-
-  buffer += decoder.decode();
-  const parsed = drainSseBuffer(buffer, { flush: true });
-  for (const event of parsed.events) {
-    yield event;
+  } finally {
+    reader.releaseLock();
   }
 }

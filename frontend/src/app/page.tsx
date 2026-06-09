@@ -1,36 +1,36 @@
 "use client";
 
-import { FormEvent, startTransition, useEffect, useRef, useState } from "react";
-import { LoaderCircle, RotateCcw, Send, Signal } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { LoaderCircle, RotateCcw, Send, Signal, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import {
-  ChatStreamEvent,
-  ThreadRecord,
-  createThread,
-  streamThreadRun,
-} from "@/lib/chat-stream";
-
-type UiMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  status?: "streaming" | "done" | "error";
-};
+import { useChatStream } from "@/hooks/use-chat-stream";
 
 const starterPrompt = "用三句话解释 SlotFlow 当前后端链路。";
 const defaultModelName = "deepseek-v4-flash";
-const streamDisplayChunkSize = 2;
-const streamDisplayDelayMs = 24;
 
 export default function Home() {
-  const [thread, setThread] = useState<ThreadRecord | null>(null);
-  const [messages, setMessages] = useState<UiMessage[]>([]);
-  const [events, setEvents] = useState<ChatStreamEvent[]>([]);
   const [input, setInput] = useState(starterPrompt);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const {
+    thread,
+    messages,
+    events,
+    isStreaming,
+    error,
+    sendMessage,
+    startNewThread,
+    cancelStream,
+  } = useChatStream({
+    defaultThreadTitle: "SlotFlow smoke test",
+    defaultModelName,
+    defaultMode: "pro",
+    defaultAgentName: "default",
+    defaultMetadata: {
+      source: "frontend-smoke",
+    },
+    maxEventLogItems: 12,
+  });
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -41,11 +41,8 @@ export default function Home() {
       return;
     }
 
-    setError(null);
-    setMessages([]);
-    setEvents([]);
     setInput(starterPrompt);
-    setThread(await createThread("SlotFlow smoke test"));
+    await startNewThread("SlotFlow smoke test");
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -56,107 +53,11 @@ export default function Home() {
       return;
     }
 
-    const activeThread = thread ?? (await createThread("SlotFlow smoke test"));
-    const userMessage: UiMessage = {
-      id: makeId("user"),
-      role: "user",
-      content: text,
-      status: "done",
-    };
-    const assistantId = makeId("assistant");
-    const assistantMessage: UiMessage = {
-      id: assistantId,
-      role: "assistant",
-      content: "",
-      status: "streaming",
-    };
-
-    setThread(activeThread);
     setInput("");
-    setError(null);
-    setIsStreaming(true);
-    setMessages((current) => [...current, userMessage, assistantMessage]);
-
-    try {
-      for await (const streamEvent of streamThreadRun(activeThread.id, {
-        message: text,
-        model_name: defaultModelName,
-        mode: "pro",
-        agent_name: "default",
-        metadata: {
-          source: "frontend-smoke",
-        },
-      })) {
-        startTransition(() => {
-          setEvents((current) => [...current.slice(-11), streamEvent]);
-        });
-
-        if (streamEvent.event === "message.delta") {
-          const delta = streamEvent.data.delta;
-          if (typeof delta === "string") {
-            await appendAssistantTextSlowly(assistantId, delta);
-          }
-        }
-
-        if (streamEvent.event === "state.snapshot") {
-          const content = latestAssistantContent(streamEvent);
-          if (content) {
-            replaceAssistantText(assistantId, content);
-          }
-        }
-
-        if (streamEvent.event === "run.error") {
-          const message = String(streamEvent.data.message ?? "agent stream failed");
-          setError(message);
-          markAssistant(assistantId, "error");
-        }
-      }
-
-      markAssistant(assistantId, "done");
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "stream failed";
-      setError(message);
-      markAssistant(assistantId, "error");
-    } finally {
-      setIsStreaming(false);
+    const result = await sendMessage(text);
+    if (!result.accepted) {
+      setInput(text);
     }
-  }
-
-  function appendAssistantText(messageId: string, delta: string) {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === messageId
-          ? { ...message, content: message.content + delta }
-          : message,
-      ),
-    );
-  }
-
-  async function appendAssistantTextSlowly(messageId: string, delta: string) {
-    const characters = Array.from(delta);
-    for (let index = 0; index < characters.length; index += streamDisplayChunkSize) {
-      appendAssistantText(
-        messageId,
-        characters.slice(index, index + streamDisplayChunkSize).join(""),
-      );
-      await sleep(streamDisplayDelayMs);
-    }
-  }
-
-  function replaceAssistantText(messageId: string, content: string) {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === messageId ? { ...message, content } : message,
-      ),
-    );
-  }
-
-  function markAssistant(messageId: string, status: UiMessage["status"]) {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === messageId ? { ...message, status } : message,
-      ),
-    );
   }
 
   return (
@@ -260,18 +161,26 @@ export default function Home() {
                   className="min-h-24 flex-1 resize-none border border-[var(--border)] bg-white px-3 py-2 text-sm leading-6 outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-blue-100 disabled:opacity-60"
                   placeholder="输入一条消息，验证后端 SSE 流..."
                 />
-                <Button
-                  type="submit"
-                  disabled={isStreaming || !input.trim()}
-                  className="h-auto min-h-11 sm:w-32"
-                >
-                  {isStreaming ? (
-                    <LoaderCircle className="size-4 animate-spin" />
-                  ) : (
+                {isStreaming ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={cancelStream}
+                    className="h-auto min-h-11 bg-white sm:w-32"
+                  >
+                    <Square className="size-4" />
+                    Cancel
+                  </Button>
+                ) : (
+                  <Button
+                    type="submit"
+                    disabled={!input.trim()}
+                    className="h-auto min-h-11 sm:w-32"
+                  >
                     <Send className="size-4" />
-                  )}
-                  Send
-                </Button>
+                    Send
+                  </Button>
+                )}
               </div>
             </form>
           </div>
@@ -311,36 +220,4 @@ export default function Home() {
       </div>
     </main>
   );
-}
-
-function latestAssistantContent(event: ChatStreamEvent): string | null {
-  const messages = event.data.messages;
-  if (!Array.isArray(messages)) {
-    return null;
-  }
-
-  for (const message of [...messages].reverse()) {
-    if (
-      typeof message === "object" &&
-      message !== null &&
-      "role" in message &&
-      "content" in message
-    ) {
-      const role = message.role;
-      const content = message.content;
-      if ((role === "assistant" || role === "ai") && typeof content === "string") {
-        return content;
-      }
-    }
-  }
-
-  return null;
-}
-
-function makeId(prefix: string) {
-  return `${prefix}_${crypto.randomUUID()}`;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
