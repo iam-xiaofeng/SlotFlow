@@ -6,12 +6,14 @@ import {
   type ChatMode,
   type ChatStreamEvent,
   type ChatStreamRequest,
+  type MessageRecord,
   type ThreadRecord,
   createThread,
+  listThreadMessages,
   streamThreadRun,
 } from "@/lib/chat-stream";
 
-export type ChatUiMessageRole = "user" | "assistant";
+export type ChatUiMessageRole = "user" | "assistant" | "system" | "tool";
 export type ChatUiMessageStatus = "streaming" | "done" | "error" | "cancelled";
 
 export type ChatUiMessage = {
@@ -20,6 +22,8 @@ export type ChatUiMessage = {
   content: string;
   status: ChatUiMessageStatus;
   runId?: string;
+  createdAt?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type UseChatStreamOptions = {
@@ -31,7 +35,9 @@ export type UseChatStreamOptions = {
   maxEventLogItems?: number;
 };
 
-export type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message">;
+export type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message"> & {
+  threadTitle?: string;
+};
 
 export type SendChatMessageResult = {
   accepted: boolean;
@@ -131,6 +137,37 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     [defaultThreadTitle, thread],
   );
 
+  const resetThread = useCallback((): boolean => {
+    if (isStreamingRef.current) {
+      return false;
+    }
+
+    setThread(null);
+    setMessages([]);
+    setEvents([]);
+    setError(null);
+    return true;
+  }, []);
+
+  const loadThread = useCallback(async (targetThread: ThreadRecord): Promise<boolean> => {
+    if (isStreamingRef.current) {
+      return false;
+    }
+
+    setError(null);
+    try {
+      const storedMessages = await listThreadMessages(targetThread.id);
+      setThread(targetThread);
+      setMessages(storedMessages.map(messageRecordToUiMessage));
+      setEvents([]);
+      return true;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "load thread failed";
+      setError(message);
+      return false;
+    }
+  }, []);
+
   const sendMessage = useCallback(
     async (
       rawMessage: string,
@@ -142,11 +179,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       }
 
       const controller = new AbortController();
+      const messageMetadata = {
+        ...defaultMetadata,
+        ...(overrides.metadata ?? {}),
+      };
       const userMessage: ChatUiMessage = {
         id: makeId("user"),
         role: "user",
         content: text,
         status: "done",
+        metadata: messageMetadata,
       };
       const assistantMessageId = makeId("assistant");
       const assistantMessage: ChatUiMessage = {
@@ -165,7 +207,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       let accepted = false;
       try {
         if (!activeThread) {
-          activeThread = await createThread(defaultThreadTitle, {
+          activeThread = await createThread(overrides.threadTitle ?? defaultThreadTitle, {
             signal: controller.signal,
           });
           setThread(activeThread);
@@ -181,10 +223,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           mode: overrides.mode ?? defaultMode,
           agent_name: overrides.agent_name ?? defaultAgentName,
           files: overrides.files ?? [],
-          metadata: {
-            ...defaultMetadata,
-            ...(overrides.metadata ?? {}),
-          },
+          metadata: messageMetadata,
         };
 
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
@@ -273,7 +312,21 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     sendMessage,
     startNewThread,
     cancelStream,
+    resetThread,
+    loadThread,
     clearError: () => setError(null),
+  };
+}
+
+function messageRecordToUiMessage(record: MessageRecord): ChatUiMessage {
+  return {
+    id: record.id,
+    role: record.role,
+    content: record.content,
+    status: "done",
+    runId: record.run_id ?? undefined,
+    createdAt: record.created_at,
+    metadata: record.metadata,
   };
 }
 

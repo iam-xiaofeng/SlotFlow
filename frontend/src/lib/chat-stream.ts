@@ -9,6 +9,16 @@ export type ThreadRecord = {
   updated_at: string;
 };
 
+export type MessageRecord = {
+  id: string;
+  thread_id: string;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  run_id?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
 export type ChatMode = "flash" | "pro" | "ultra";
 
 export type ChatStreamRequest = {
@@ -18,6 +28,15 @@ export type ChatStreamRequest = {
   agent_name?: string;
   files?: string[];
   metadata?: Record<string, unknown>;
+};
+
+export type UploadedFileRecord = {
+  id: string;
+  filename: string;
+  content_type?: string | null;
+  size_bytes: number;
+  workspace_path: string;
+  created_at: string;
 };
 
 export type ChatRequestOptions = {
@@ -42,6 +61,70 @@ export async function createThread(
   }
 
   return response.json() as Promise<ThreadRecord>;
+}
+
+export async function listThreads(
+  options: ChatRequestOptions = {},
+): Promise<ThreadRecord[]> {
+  const response = await fetch("/api/chat/threads", {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`list threads failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<ThreadRecord[]>;
+}
+
+export async function getThread(
+  threadId: string,
+  options: ChatRequestOptions = {},
+): Promise<ThreadRecord> {
+  const response = await fetch(`/api/chat/threads/${threadId}`, {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`get thread failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<ThreadRecord>;
+}
+
+export async function listThreadMessages(
+  threadId: string,
+  options: ChatRequestOptions = {},
+): Promise<MessageRecord[]> {
+  const response = await fetch(`/api/chat/threads/${threadId}/messages`, {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`list messages failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<MessageRecord[]>;
+}
+
+export async function uploadFile(
+  file: File,
+  options: ChatRequestOptions = {},
+): Promise<UploadedFileRecord> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch("/api/uploads", {
+    method: "POST",
+    body: formData,
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`upload file failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<UploadedFileRecord>;
 }
 
 export async function* streamThreadRun(
