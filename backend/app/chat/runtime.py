@@ -3,10 +3,8 @@
 这里不直接依赖 DeerFlow 包，而是把“真实 agent 怎么创建、checkpointer 怎么挂进去”
 这类运行时装配问题单独收拢成一个更小的本地边界。
 
-当前只实现两种模式：
-
-- `static`：继续使用稳定的 `StaticProjectionAgentAdapter`
-- `deepseek`：用 LangChain/LangGraph + DeepSeek OpenAI-compatible API 创建真实 graph
+当前运行链路只保留真实 LangChain/LangGraph graph。测试如果需要稳定输出，通过
+`model_factory` 注入 fake chat model，而不是在生产代码里保留一套静态 adapter。
 
 后面如果要继续吸收 DeerFlow 的有价值能力，也应该优先在这里本地重写，而不是把旧项目
 整包 import 进来。
@@ -17,7 +15,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from collections.abc import Callable, AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +27,6 @@ from app.chat.agent_adapter import (
     AgentEvent,
     AgentAdapter,
     LangGraphEventAgentAdapter,
-    StaticProjectionAgentAdapter,
 )
 from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
@@ -48,7 +45,6 @@ if TYPE_CHECKING:
     from langgraph.types import Checkpointer
 
 
-RuntimeMode = Literal["static", "deepseek"]
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = "你是 SlotFlow 的学习版助手，回答要简洁、具体。"
@@ -62,14 +58,12 @@ class SlotFlowRuntimeConfig:
     先只保留和当前学习链路直接相关的字段，不提前引入 DeerFlow 旧网关里的大而全配置树。
     """
 
-    adapter_mode: RuntimeMode = "static"
     model_name: str = "deepseek-v4-flash"
     checkpointer_backend: CheckpointerBackend = "memory"
     checkpointer_sqlite_path: Path = DEFAULT_CHECKPOINTER_SQLITE_PATH
     checkpointer_postgres_uri: str | None = None
     checkpointer_setup: bool = True
     system_prompt: str = DEFAULT_DEEPSEEK_SYSTEM_PROMPT
-    prefer_projection_stream: bool = True
     skills_root: Path | None = None
     enabled_skills: set[str] | None = None
     mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
@@ -95,8 +89,7 @@ class RuntimeBackedAgentAdapter:
         self._model_factory = model_factory or (lambda model_name: create_deepseek_chat_model(model_name=model_name))
         self._checkpointer = (
             create_checkpointer(runtime_config)
-            if runtime_config.adapter_mode == "deepseek"
-            and runtime_config.checkpointer_backend in ("none", "memory")
+            if runtime_config.checkpointer_backend in ("none", "memory")
             else None
         )
 
@@ -116,31 +109,21 @@ class RuntimeBackedAgentAdapter:
         request: ChatStreamRequest,
         bundle: RunConfigBundle,
     ) -> AsyncIterator[AgentEvent]:
-        if self._runtime_config.adapter_mode == "static":
-            adapter = StaticProjectionAgentAdapter()
-        elif self._runtime_config.adapter_mode == "deepseek":
-            model_name = bundle.context.model_name or self._runtime_config.model_name
-            checkpointer = await self._ensure_checkpointer()
-            await self._ensure_mcp_tools_loaded()
-            graph = create_langgraph_agent_graph(
-                model=self._model_factory(model_name),
-                runtime_config=self._runtime_config,
-                run_context=bundle.context,
-                checkpointer=checkpointer,
-            )
-            adapter = LangGraphEventAgentAdapter(
-                graph,
-                prefer_projection_stream=self._runtime_config.prefer_projection_stream,
-            )
-        else:
-            raise ValueError(f"unsupported adapter mode: {self._runtime_config.adapter_mode!r}")
+        model_name = bundle.context.model_name or self._runtime_config.model_name
+        checkpointer = await self._ensure_checkpointer()
+        await self._ensure_mcp_tools_loaded()
+        graph = create_langgraph_agent_graph(
+            model=self._model_factory(model_name),
+            runtime_config=self._runtime_config,
+            run_context=bundle.context,
+            checkpointer=checkpointer,
+        )
+        adapter = LangGraphEventAgentAdapter(graph)
 
         async for event in adapter.stream_events(request=request, bundle=bundle):
             yield event
 
     async def _ensure_checkpointer(self) -> Checkpointer | None:
-        if self._runtime_config.adapter_mode != "deepseek":
-            return None
         if self._runtime_config.checkpointer_backend in ("none", "memory"):
             return self._checkpointer
         if self._checkpointer is None:
@@ -157,15 +140,9 @@ class RuntimeBackedAgentAdapter:
 def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
     """从环境变量读取一个很小的 runtime 配置。
 
-    默认仍然使用 `static`，这样本地开发和测试不需要 API key。
+    默认使用 DeepSeek-compatible 真实 graph。日常测试通过 `model_factory` 注入 fake
+    model，不再让生产配置携带测试模式。
     """
-
-    adapter_mode = os.environ.get("SLOTFLOW_AGENT_MODE", "static")
-    if adapter_mode not in ("static", "deepseek"):
-        raise ValueError(
-            "SLOTFLOW_AGENT_MODE must be 'static' or 'deepseek', "
-            f"got {adapter_mode!r}",
-        )
 
     checkpointer_backend = os.environ.get("SLOTFLOW_CHECKPOINTER_BACKEND", "memory").strip().lower()
     if checkpointer_backend not in ("none", "memory", "sqlite", "postgres"):
@@ -178,7 +155,6 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
     mcp_config = load_mcp_config_from_env()
 
     return SlotFlowRuntimeConfig(
-        adapter_mode=adapter_mode,
         model_name=os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash"),
         checkpointer_backend=checkpointer_backend,
         checkpointer_sqlite_path=load_path_from_env(

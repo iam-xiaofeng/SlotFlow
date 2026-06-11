@@ -8,6 +8,6 @@
 4. 后端把事件翻译成前端容易消费的 SSE；
 5. 仓库保存 thread / message / run 的最终结果。
 
-现在先从最小但清晰的内存实现开始。等这些边界稳定以后，再把内部的
-fake agent 换成真实 DeerFlow harness。
+现在已经收敛到 SlotFlow 自己的 LangGraph harness。测试里的 fake 只留在 tests
+边界内，不再作为生产 runtime 的一种模式。
 """

@@ -1,7 +1,7 @@
 """SlotFlow harness graph builder。
 
-这里是 LangGraph agent graph 的唯一组装入口。`chat.runtime` 负责选择 static/deepseek
-运行模式；一旦需要真实 graph，就把 model、checkpointer、RunContext 显式传给这里。
+这里是 LangGraph agent graph 的唯一组装入口。`chat.runtime` 负责准备 model、
+checkpointer、RunContext，再把这些运行时依赖显式传给这里。
 """
 
 from __future__ import annotations

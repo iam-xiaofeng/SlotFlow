@@ -1,4 +1,7 @@
+import os
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.chat.agent_adapter import AgentAdapter
 from app.chat.repository import ChatRepository, build_chat_repository
@@ -6,6 +9,12 @@ from app.chat.routes import router as chat_router
 from app.chat.runtime import SlotFlowRuntimeConfig, build_agent_adapter
 from app.uploads import SlotFlowUploadStore
 from app.uploads.routes import router as upload_router
+
+
+LOCAL_DEV_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
 
 
 def create_app(
@@ -24,11 +33,17 @@ def create_app(
     - `upload_store`：用户上传文件的 workspace 存储边界。
 
     测试可以传入自己的仓库和 adapter。真实运行如果没有传 adapter，就走 SlotFlow
-    自己的本地 runtime 装配层：默认仍然是 `static`，但后面可以按同一入口切到
-    `deepseek` 或后续本地重写的更真实 harness。
+    自己的本地 runtime 装配层，创建 LangGraph/DeepSeek-compatible graph。
     """
 
     app = FastAPI(title="SlotFlow API")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=load_cors_origins(),
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.state.chat_repo = chat_repo or build_chat_repository()
     app.state.upload_store = upload_store or SlotFlowUploadStore()
     app.state.runtime_config = runtime_config
@@ -41,6 +56,14 @@ def create_app(
     app.include_router(chat_router)
     app.include_router(upload_router)
     return app
+
+
+def load_cors_origins() -> list[str]:
+    raw_origins = os.environ.get("SLOTFLOW_CORS_ORIGINS")
+    if raw_origins is None:
+        return list(LOCAL_DEV_CORS_ORIGINS)
+
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
 app = create_app()

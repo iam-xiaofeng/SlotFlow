@@ -55,7 +55,6 @@ async def test_deepseek_agent_adapter_streams_v3_events() -> None:
     )
     adapter = RuntimeBackedAgentAdapter(
         SlotFlowRuntimeConfig(
-            adapter_mode="deepseek",
             model_name=model_name,
             checkpointer_backend="memory",
         )

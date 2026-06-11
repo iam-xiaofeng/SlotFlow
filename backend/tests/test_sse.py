@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from app.chat.agent_adapter import AgentEvent, LangGraphEventAgentAdapter, StaticProjectionAgentAdapter
+from app.chat.agent_adapter import AgentEvent, LangGraphEventAgentAdapter
 from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
 from app.chat.sse import (
@@ -136,20 +136,52 @@ async def test_iter_sse_frames_encodes_agent_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_static_agent_adapter_stream_can_be_encoded_as_sse_frames() -> None:
-    """模块四的静态 adapter 可以直接接到模块五的 SSE 编码器。"""
-
-    request = ChatStreamRequest(message="解释 SSE", mode="pro")
-    bundle = build_run_config(
-        thread_id="thread_sse",
-        run_id="run_sse",
-        request=request,
-    )
-    adapter = StaticProjectionAgentAdapter()
+async def test_completed_agent_event_stream_can_be_encoded_as_sse_frames() -> None:
+    """一轮完整 AgentEvent 流可以直接接到模块五的 SSE 编码器。"""
 
     frames = [
         frame
-        async for frame in iter_sse_frames(adapter.stream_events(request=request, bundle=bundle))
+        async for frame in iter_sse_frames(
+            _events(
+                AgentEvent(
+                    event="run.prepared",
+                    data={
+                        "thread_id": "thread_sse",
+                        "run_id": "run_sse",
+                    },
+                ),
+                AgentEvent(
+                    event="message.delta",
+                    data={
+                        "message_id": "run_sse:assistant",
+                        "role": "assistant",
+                        "delta": "解释 SSE",
+                        "index": 0,
+                    },
+                ),
+                AgentEvent(
+                    event="state.snapshot",
+                    data={
+                        "thread_id": "thread_sse",
+                        "run_id": "run_sse",
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "content": "解释 SSE",
+                            }
+                        ],
+                        "state": {"mode": "pro"},
+                    },
+                ),
+                AgentEvent(
+                    event="run.finished",
+                    data={
+                        "thread_id": "thread_sse",
+                        "run_id": "run_sse",
+                    },
+                ),
+            )
+        )
     ]
     event_lines = [frame.splitlines()[0] for frame in frames]
 

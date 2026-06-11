@@ -20,7 +20,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.chat.agent_adapter import AgentEvent, StaticProjectionAgentAdapter
+from app.chat.agent_adapter import AgentEvent
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 from app.chat.repository import ChatRepository, InMemoryChatRepository, SQLiteChatRepository
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -49,6 +49,75 @@ class BrokenAgentAdapter:
         raise RuntimeError("boom from test adapter")
 
 
+class CompletedAgentAdapter:
+    """测试用 adapter：产出一轮完整成功事件，不进入真实模型。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        message_id = f"{bundle.context.run_id}:assistant"
+        answer = f"测试回答：{request.message}"
+        if bundle.context.files:
+            answer += f"，收到 {len(bundle.context.files)} 个文件"
+
+        yield AgentEvent(
+            event="run.prepared",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+                "model_name": bundle.context.model_name,
+                "mode": bundle.context.mode,
+                "agent_name": bundle.context.agent_name,
+            },
+        )
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": answer,
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="state.snapshot",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+                "messages": [
+                    {
+                        "id": message_id,
+                        "role": "assistant",
+                        "content": answer,
+                    }
+                ],
+                "state": {
+                    "messages": [
+                        {
+                            "id": message_id,
+                            "role": "assistant",
+                            "content": answer,
+                        }
+                    ],
+                    "uploaded_files": [
+                        uploaded_file.model_dump(mode="json")
+                        for uploaded_file in bundle.context.uploaded_files
+                    ],
+                },
+            },
+        )
+        yield AgentEvent(
+            event="run.finished",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+
+
 def _client(
     repo: ChatRepository,
     adapter=None,
@@ -59,7 +128,7 @@ def _client(
     return TestClient(
         create_app(
             chat_repo=repo,
-            agent_adapter=adapter or StaticProjectionAgentAdapter(),
+            agent_adapter=adapter or CompletedAgentAdapter(),
             upload_store=upload_store,
         )
     )
@@ -75,7 +144,7 @@ def test_create_app_can_use_sqlite_repository_from_env(
     monkeypatch.setenv("SLOTFLOW_CHAT_REPOSITORY_BACKEND", "sqlite")
     monkeypatch.setenv("SLOTFLOW_CHAT_SQLITE_PATH", str(db_path))
 
-    app = create_app(agent_adapter=StaticProjectionAgentAdapter())
+    app = create_app(agent_adapter=CompletedAgentAdapter())
     client = TestClient(app)
     repo = app.state.chat_repo
     persisted_repo: SQLiteChatRepository | None = None

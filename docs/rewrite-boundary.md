@@ -192,15 +192,14 @@ SSE 事件契约
 ```txt
 HTTP endpoint
 -> graph.astream_events(..., version="v3")
--> 优先 typed projections
--> 必要时 raw event method / params.data fallback
+-> typed projections
 -> AgentEvent
 -> 业务 SSE 事件
 ```
 
-这条路径用于先跑通学习链路。只有在明确验证某个真实 harness agent 不支持 v3
-typed projections 时，才回退到较底层的 `astream(stream_mode=[...])`，并且要在模块文档
-里写清楚具体原因。
+这条路径用于先跑通学习链路。模块 26A 后，生产代码不再保留 raw protocol fallback。
+只有在明确验证某个真实 harness agent 不支持 v3 typed projections 时，才考虑引入新的
+回退设计，并且要在模块文档里写清楚具体原因。
 
 不要重新做旧项目这一串中转：
 

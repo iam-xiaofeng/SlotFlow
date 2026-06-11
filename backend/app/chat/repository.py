@@ -328,10 +328,15 @@ class SQLiteChatRepository:
             timeout=30.0,
         )
         self._connection.row_factory = sqlite3.Row
+        #改变数据库查询结果的返回格式，将默认的“元组（Tuple）”格式升级为类字典的“Row 对象”
+        #从而允许你通过“列名（字段名）”来直接访问数据。
         self._connection.execute("PRAGMA foreign_keys = ON")
+        #显式开启“外键约束”功能 防止数据不一致
         if self._database_path_text != ":memory:":
             self._connection.execute("PRAGMA journal_mode = WAL")
+            # 使用 WAL（Write-Ahead Logging）模式，提高并发性能
         self._initialize_schema()
+        # 初始化数据库模式
 
     def close(self) -> None:
         """关闭 SQLite 连接。测试或脚本显式释放文件句柄时可以调用。"""

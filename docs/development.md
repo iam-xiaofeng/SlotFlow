@@ -65,11 +65,13 @@ extensions
 
 SlotFlow 已经把模块四改成这个方向：真实 graph 通过
 `await graph.astream_events(..., version="v3")` 拿到 run stream。FastAPI 使用的是异步
-路径，本地实测的 `AsyncGraphRunStream` 当前没有 `ainterleave(...)`，所以代码当前采用：
+路径。模块 26A 后，代码只消费官方 typed projections：
 
 ```txt
-优先消费 typed projections（messages / values / tool_calls）
-projection lane 不足时，再回退到 raw protocol event
+messages / values / tool_calls
+-> AgentEvent
+-> BusinessSseEvent
+-> SSE frame
 ```
 
 这样做比旧式 `astream(stream_mode=[...])` 更贴近官方新接口，也更适合前端消费。
@@ -80,8 +82,8 @@ projection lane 不足时，再回退到 raw protocol event
 1. 默认使用 v3 event streaming。
 2. 业务层只认识 AgentEvent，不直接依赖 LangGraph 投影对象。
 3. SSE 层只认识 AgentEvent，不直接依赖 LangGraph 或 DeepSeek。
-4. 只有在真实 harness agent 明确不支持 v3 时，才回退到 astream(stream_mode=[...])。
-5. 任何回退都必须写清楚具体版本、具体 API、具体失败原因。
+4. 不在生产代码里保留 raw protocol fallback；如果未来需要回退，必须先写清楚具体版本、
+   具体 API、具体失败原因，再作为新设计加入。
 ```
 
 ## Runtime 边界
@@ -104,7 +106,7 @@ DeerFlow 的有价值能力时，不需要回头拆现有 FastAPI / SSE / AgentE
 真实 DeepSeek 调用不进入 `make verify`。原因是它依赖网络、API key、余额、模型服务状态，
 不适合作为日常健康闸门。
 
-日常测试使用 `StaticProjectionAgentAdapter`。它不假装是旧 API，而是模拟 v3 projection
-之后的业务事件顺序。
+日常测试不调用真实模型。需要稳定输出时，在测试文件里定义轻量 fake adapter，或者通过
+`RuntimeBackedAgentAdapter(model_factory=...)` 注入 LangChain fake chat model。
 
 需要验证真实模型时，单独运行 live smoke test，并临时提供 `DEEPSEEK_API_KEY`。

@@ -2,7 +2,7 @@
 
 这一层不直接依赖 DeerFlow 包，而是把 SlotFlow 自己需要的最小运行时装配收拢出来：
 
-- 选择当前 agent 模式（static / deepseek）
+- 创建真实 LangGraph/DeepSeek-compatible agent graph
 - 显式挂接 checkpointer
 - 保持 AgentAdapter / AgentEvent 外部契约不变
 """
@@ -64,9 +64,8 @@ class AsyncCapturingMcpToolProvider:
 
 
 def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """默认仍然走 static，避免本地开发和测试强依赖 API key。"""
+    """默认配置只描述真实 runtime，不再携带测试/静态模式。"""
 
-    monkeypatch.delenv("SLOTFLOW_AGENT_MODE", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_BACKEND", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_SQLITE_PATH", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_POSTGRES_URI", raising=False)
@@ -88,7 +87,6 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
     config = load_runtime_config_from_env()
 
     assert config == SlotFlowRuntimeConfig(
-        adapter_mode="static",
         model_name="deepseek-v4-flash",
         checkpointer_backend="memory",
         checkpointer_sqlite_path=DEFAULT_CHECKPOINTER_SQLITE_PATH,
@@ -205,11 +203,11 @@ def test_create_checkpointer_supports_none_and_memory() -> None:
     """同步 checkpointer 工厂只负责 none / memory。"""
 
     assert create_checkpointer(
-        SlotFlowRuntimeConfig(adapter_mode="static", checkpointer_backend="none")
+        SlotFlowRuntimeConfig(checkpointer_backend="none")
     ) is None
     assert isinstance(
         create_checkpointer(
-            SlotFlowRuntimeConfig(adapter_mode="deepseek", checkpointer_backend="memory")
+            SlotFlowRuntimeConfig(checkpointer_backend="memory")
         ),
         InMemorySaver,
     )
@@ -222,7 +220,6 @@ async def test_create_async_checkpointer_supports_sqlite(tmp_path: Path) -> None
     sqlite_path = tmp_path / "checkpoints.sqlite3"
     checkpointer = await create_async_checkpointer(
         SlotFlowRuntimeConfig(
-            adapter_mode="deepseek",
             checkpointer_backend="sqlite",
             checkpointer_sqlite_path=sqlite_path,
         )
@@ -241,7 +238,6 @@ async def test_create_async_checkpointer_requires_postgres_uri() -> None:
     with pytest.raises(ValueError, match="SLOTFLOW_CHECKPOINTER_POSTGRES_URI"):
         await create_async_checkpointer(
             SlotFlowRuntimeConfig(
-                adapter_mode="deepseek",
                 checkpointer_backend="postgres",
             )
         )
@@ -268,7 +264,6 @@ async def test_create_async_checkpointer_delegates_to_postgres_factory(
 
     checkpointer = await create_async_checkpointer(
         SlotFlowRuntimeConfig(
-            adapter_mode="deepseek",
             checkpointer_backend="postgres",
             checkpointer_postgres_uri="postgresql://slotflow@localhost/slotflow",
             checkpointer_setup=False,
@@ -280,26 +275,8 @@ async def test_create_async_checkpointer_delegates_to_postgres_factory(
 
 
 @pytest.mark.asyncio
-async def test_runtime_backed_adapter_static_mode_keeps_agent_boundary() -> None:
-    """static 模式只是本地 runtime 的一种装配结果，对外仍然流出 AgentEvent。"""
-
-    adapter = RuntimeBackedAgentAdapter(
-        SlotFlowRuntimeConfig(adapter_mode="static"),
-    )
-    request = ChatStreamRequest(message="解释 static runtime", files=["upload_1"])
-    bundle = _bundle(request=request)
-
-    events = await collect_agent_events(adapter.stream_events(request=request, bundle=bundle))
-
-    assert events[0].event == "run.prepared"
-    assert "message.delta" in [event.event for event in events]
-    assert events[-2].event == "state.snapshot"
-    assert events[-1].event == "run.finished"
-
-
-@pytest.mark.asyncio
-async def test_runtime_backed_adapter_deepseek_mode_uses_request_model_and_keeps_thread_state() -> None:
-    """deepseek 模式下，每次 run 可动态选模型，并通过共享 checkpointer 保留多轮状态。"""
+async def test_runtime_backed_adapter_uses_request_model_and_keeps_thread_state() -> None:
+    """每次 run 可动态选模型，并通过共享 checkpointer 保留多轮状态。"""
 
     calls: list[str] = []
     responses = iter(["first answer", "second answer"])
@@ -309,7 +286,7 @@ async def test_runtime_backed_adapter_deepseek_mode_uses_request_model_and_keeps
         return FakeListChatModel(responses=[next(responses)])
 
     adapter = RuntimeBackedAgentAdapter(
-        SlotFlowRuntimeConfig(adapter_mode="deepseek", checkpointer_backend="memory"),
+        SlotFlowRuntimeConfig(checkpointer_backend="memory"),
         model_factory=model_factory,
     )
 
@@ -365,7 +342,6 @@ async def test_runtime_backed_adapter_preloads_async_mcp_tools_before_building_g
     )
     adapter = RuntimeBackedAgentAdapter(
         SlotFlowRuntimeConfig(
-            adapter_mode="deepseek",
             checkpointer_backend="memory",
             mcp_config=mcp_config,
             mcp_tool_provider=provider,
@@ -405,7 +381,6 @@ async def test_runtime_backed_adapter_sqlite_checkpointer_survives_adapter_resta
         return FakeListChatModel(responses=[next(responses)])
 
     first_config = SlotFlowRuntimeConfig(
-        adapter_mode="deepseek",
         checkpointer_backend="sqlite",
         checkpointer_sqlite_path=sqlite_path,
     )
@@ -431,7 +406,6 @@ async def test_runtime_backed_adapter_sqlite_checkpointer_survives_adapter_resta
         await first_adapter.aclose()
 
     second_config = SlotFlowRuntimeConfig(
-        adapter_mode="deepseek",
         checkpointer_backend="sqlite",
         checkpointer_sqlite_path=sqlite_path,
     )

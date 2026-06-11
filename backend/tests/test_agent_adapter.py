@@ -15,21 +15,18 @@ import pytest
 from app.chat.agent_adapter import (
     AgentEvent,
     LangGraphEventAgentAdapter,
-    StaticProjectionAgentAdapter,
     build_agent_input,
     collect_agent_events,
     extract_message_delta,
     normalize_values_snapshot,
     projection_item_to_agent_event,
-    protocol_event_to_agent_event,
 )
-from app.chat.models import ChatStreamRequest, UploadedFileContext
+from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
 
 
 def _bundle(
     request: ChatStreamRequest | None = None,
-    uploaded_files: list[UploadedFileContext] | None = None,
 ):
     """构建一份稳定 run bundle，减少测试重复样板。"""
 
@@ -37,7 +34,6 @@ def _bundle(
         thread_id="thread_test",
         run_id="run_test",
         request=request or ChatStreamRequest(message="解释 v3 投影"),
-        uploaded_files=uploaded_files,
     )
 
 
@@ -131,33 +127,6 @@ def test_projection_tool_call_item_becomes_tool_delta_event() -> None:
     )
 
 
-def test_protocol_message_event_becomes_message_delta_event() -> None:
-    """异步 v3 raw event 里 method=messages 时，也要能映射成 message.delta。"""
-
-    event = protocol_event_to_agent_event(
-        {
-            "type": "event",
-            "method": "messages",
-            "params": {
-                "namespace": [],
-                "timestamp": 0,
-                "data": {"delta": "来自 raw protocol event 的文本"},
-            },
-        },
-        bundle=_bundle(),
-    )
-
-    assert event == AgentEvent(
-        event="message.delta",
-        data={
-            "message_id": "run_test:assistant",
-            "role": "assistant",
-            "delta": "来自 raw protocol event 的文本",
-            "index": None,
-        },
-    )
-
-
 def test_normalize_values_snapshot_keeps_thread_and_run_identity() -> None:
     """状态快照必须带 thread_id/run_id，前端才能把它放回正确会话。"""
 
@@ -194,57 +163,10 @@ def test_run_bundle_keeps_business_context_out_of_configurable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_static_projection_adapter_emits_complete_learning_sequence() -> None:
-    """静态 adapter 应该模拟真实链路里的 prepared -> delta -> snapshot -> finished。"""
-
-    request = ChatStreamRequest(
-        message="分析上传内容",
-        model_name="deepseek-v4-flash",
-        mode="ultra",
-        files=["upload_1", "upload_2"],
-    )
-    uploaded_file = UploadedFileContext(
-        id="upload_1",
-        filename="report.md",
-        content_type="text/markdown",
-        size_bytes=8,
-        workspace_path="uploads/upload_1/report.md",
-    )
-    bundle = _bundle(request, uploaded_files=[uploaded_file])
-    adapter = StaticProjectionAgentAdapter()
-
-    events = await collect_agent_events(adapter.stream_events(request=request, bundle=bundle))
-
-    assert events[0].event == "run.prepared"
-    assert "message.delta" in [event.event for event in events]
-    assert events[-2].event == "state.snapshot"
-    assert events[-1].event == "run.finished"
-    assert events[0].data == {
-        "thread_id": "thread_test",
-        "run_id": "run_test",
-        "model_name": "deepseek-v4-flash",
-        "mode": "ultra",
-        "agent_name": "default",
-    }
-    streamed_text = "".join(
-        event.data["delta"]
-        for event in events
-        if event.event == "message.delta"
-    )
-    snapshot = events[-2].data
-    assert snapshot["messages"][0]["content"] == streamed_text
-    assert "收到 2 个文件" in streamed_text
-    assert snapshot["state"]["subagent_enabled"] is True
-    assert snapshot["state"]["uploaded_files"][0]["workspace_path"] == (
-        "uploads/upload_1/report.md"
-    )
-
-
-@pytest.mark.asyncio
 async def test_langgraph_event_adapter_consumes_v3_projection_stream() -> None:
     """用 LangChain fake model 跑真实 v3 stream，证明 adapter 不只是静态模拟。
 
-    这里重点验证默认主路径优先消费官方 projection，而不是先走 raw protocol 解析。
+    这里重点验证主路径消费官方 typed projections。
     """
 
     from langchain.agents import create_agent
@@ -271,8 +193,8 @@ async def test_langgraph_event_adapter_consumes_v3_projection_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_langgraph_event_adapter_prefers_projection_stream_before_raw_fallback() -> None:
-    """默认主路径应先消费 projection；若成功，就不读取 raw 主日志。"""
+async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_iteration() -> None:
+    """adapter 只消费 typed projections，不再保留 raw event 兼容分支。"""
 
     class ProjectionChannel:
         def __init__(self, items):
@@ -299,7 +221,7 @@ async def test_langgraph_event_adapter_prefers_projection_stream_before_raw_fall
             self.tool_calls = ProjectionChannel([])
 
         def __aiter__(self):
-            raise AssertionError("raw protocol fallback should not run on projection success")
+            raise AssertionError("adapter should not iterate raw event stream")
 
     class StubGraph:
         async def astream_events(self, *_args, **_kwargs):
@@ -321,42 +243,3 @@ async def test_langgraph_event_adapter_prefers_projection_stream_before_raw_fall
         "run.finished",
     ]
     assert "".join(event.data["delta"] for event in events if event.event == "message.delta") == "AB"
-
-
-@pytest.mark.asyncio
-async def test_langgraph_event_adapter_keeps_raw_fallback_for_projection_gap() -> None:
-    """当 projection lane 不可用时，仍保留 raw protocol fallback。"""
-
-    class RawOnlyStream:
-        def __aiter__(self):
-            async def iterator():
-                yield {
-                    "method": "messages",
-                    "params": {"data": {"delta": "raw"}},
-                }
-                yield {
-                    "method": "values",
-                    "params": {"data": {"messages": [{"role": "assistant", "content": "raw"}]}},
-                }
-
-            return iterator()
-
-    class StubGraph:
-        async def astream_events(self, *_args, **_kwargs):
-            return RawOnlyStream()
-
-    adapter = LangGraphEventAgentAdapter(StubGraph())
-    events = await collect_agent_events(
-        adapter.stream_events(
-            request=ChatStreamRequest(message="ping"),
-            bundle=_bundle(),
-        )
-    )
-
-    assert [event.event for event in events] == [
-        "run.prepared",
-        "message.delta",
-        "state.snapshot",
-        "run.finished",
-    ]
-    assert events[1].data["delta"] == "raw"

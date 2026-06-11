@@ -2,6 +2,8 @@ import { drainSseBuffer, type ChatStreamEvent } from "@/lib/sse-parser";
 
 export type { ChatStreamEvent, ChatStreamEventName } from "@/lib/sse-parser";
 
+const localDevStreamBaseUrl = "http://127.0.0.1:8000";
+
 export type ThreadRecord = {
   id: string;
   title: string;
@@ -132,14 +134,17 @@ export async function* streamThreadRun(
   body: ChatStreamRequest,
   options: ChatRequestOptions = {},
 ): AsyncGenerator<ChatStreamEvent> {
-  const response = await fetch(`/api/chat/threads/${threadId}/runs/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await fetch(
+    resolveChatStreamUrl(`/api/chat/threads/${threadId}/runs/stream`),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
     },
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
+  );
 
   if (!response.ok) {
     throw new Error(`stream run failed: ${response.status}`);
@@ -177,4 +182,40 @@ export async function* streamThreadRun(
   } finally {
     reader.releaseLock();
   }
+}
+
+export function resolveChatStreamUrl(path: string): string {
+  return joinBaseUrl(resolveChatStreamBaseUrl(), path);
+}
+
+function resolveChatStreamBaseUrl(): string {
+  const configuredBaseUrl =
+    process.env.NEXT_PUBLIC_SLOTFLOW_STREAM_BASE_URL ??
+    process.env.NEXT_PUBLIC_SLOTFLOW_API_BASE_URL;
+
+  if (configuredBaseUrl) {
+    return configuredBaseUrl;
+  }
+
+  if (isLocalBrowserHost()) {
+    return localDevStreamBaseUrl;
+  }
+
+  return "";
+}
+
+function isLocalBrowserHost(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+}
+
+function joinBaseUrl(baseUrl: string, path: string): string {
+  if (!baseUrl) {
+    return path;
+  }
+
+  return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }

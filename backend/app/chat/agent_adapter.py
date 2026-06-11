@@ -57,7 +57,7 @@ class AgentAdapter(Protocol):
     """所有 agent 适配器都要实现的最小接口。
 
     路由层后面只依赖这个协议，而不直接依赖 LangChain、LangGraph 或 LLM。
-    这样测试可以换成稳定的本地 adapter，真实运行再换成 LangGraph adapter。
+    测试可以在测试文件里定义自己的轻量 fake；生产代码只保留真实运行需要的 adapter。
     """
 
     async def stream_events(
@@ -67,97 +67,6 @@ class AgentAdapter(Protocol):
         bundle: RunConfigBundle,
     ) -> AsyncIterator[AgentEvent]:
         """根据一次聊天请求流式产出业务事件。"""
-
-
-class StaticProjectionAgentAdapter:
-    """测试和学习用的 v3 投影模拟器。
-
-    它不调用模型，也不访问网络。它模拟的是“v3 投影之后的形状”，不是旧模块四里的
-    `("messages", chunk)` stream_mode 元组。这样模块五和模块六从一开始就沿着真实
-    LangGraph v3 event streaming 的方向学习。
-    """
-
-    def __init__(self, *, answer_prefix: str = "SlotFlow 收到") -> None:
-        self._answer_prefix = answer_prefix
-
-    async def stream_events(
-        self,
-        *,
-        request: ChatStreamRequest,
-        bundle: RunConfigBundle,
-    ) -> AsyncIterator[AgentEvent]:
-        """产出一组稳定、可测试的业务事件。
-
-        输出顺序模拟真实聊天链路：
-
-        1. `run.prepared` 说明 run 配置已经整理好；
-        2. 多条 `message.delta` 模拟 assistant 文本逐段流出；
-        3. `state.snapshot` 给前端一份最终状态；
-        4. `run.finished` 表示这次 agent 执行结束。
-        """
-
-        yield make_prepared_event(bundle=bundle)
-
-        answer = self._build_answer(request=request, bundle=bundle)
-        message_id = assistant_message_id(bundle)
-
-        for index, delta in enumerate(split_text(answer)):
-            yield AgentEvent(
-                event="message.delta",
-                data={
-                    "message_id": message_id,
-                    "role": "assistant",
-                    "delta": delta,
-                    "index": index,
-                },
-            )
-
-        yield AgentEvent(
-            event="state.snapshot",
-            data={
-                "thread_id": bundle.context.thread_id,
-                "run_id": bundle.context.run_id,
-                "messages": [
-                    {
-                        "id": message_id,
-                        "role": "assistant",
-                        "content": answer,
-                    }
-                ],
-                # 这里是教学模拟，不是 LangGraph 真实 values 输出。结构故意保持成
-                # “graph state 快照”的样子，避免让它看起来像 RunContext 本身。
-                "state": {
-                    "messages": [
-                        {
-                            "id": message_id,
-                            "role": "assistant",
-                            "content": answer,
-                        }
-                    ],
-                    "model_name": bundle.context.model_name,
-                    "mode": bundle.context.mode,
-                    "thinking_enabled": bundle.context.thinking_enabled,
-                    "is_plan_mode": bundle.context.is_plan_mode,
-                    "subagent_enabled": bundle.context.subagent_enabled,
-                    "files": list(bundle.context.files),
-                    "uploaded_files": [
-                        uploaded_file.model_dump(mode="json")
-                        for uploaded_file in bundle.context.uploaded_files
-                    ],
-                },
-            },
-        )
-        yield make_finished_event(bundle=bundle)
-
-    def _build_answer(self, *, request: ChatStreamRequest, bundle: RunConfigBundle) -> str:
-        """拼出稳定回答，方便测试看清 request/context 是否真的进入 agent。"""
-
-        file_note = f"，并收到 {len(bundle.context.files)} 个文件" if bundle.context.files else ""
-        return (
-            f"{self._answer_prefix}：{request.message}{file_note}。"
-            f" model={bundle.context.model_name}, mode={bundle.context.mode}, "
-            f"thread={bundle.context.thread_id}, run={bundle.context.run_id}。"
-        )
 
 
 class LangGraphEventAgentAdapter:
@@ -170,9 +79,8 @@ class LangGraphEventAgentAdapter:
     终态方法，不适合一边流一边读；等事件流结束后再通过 `run.finished` 表达完成。
     """
 
-    def __init__(self, graph: Any, *, prefer_projection_stream: bool = True) -> None:
+    def __init__(self, graph: Any) -> None:
         self._graph = graph
-        self._prefer_projection_stream = prefer_projection_stream
 
     async def stream_events(
         self,
@@ -186,40 +94,17 @@ class LangGraphEventAgentAdapter:
 
         stream_input = build_agent_input(request)
 
-        if self._prefer_projection_stream:
-            projection_stream = await self._graph.astream_events(
-                stream_input,
-                config=bundle.config,
-                version="v3",
-                context=bundle.context,
-            )
-            yielded_projection_event = False
-            async for event in iter_projection_agent_events(projection_stream, bundle=bundle):
-                yielded_projection_event = True
-                yield event
-
-            if yielded_projection_event:
-                yield make_finished_event(bundle=bundle)
-                return
-
-        run_stream = await self._graph.astream_events(
+        projection_stream = await self._graph.astream_events(
             stream_input,
             config=bundle.config,
             version="v3",
             context=bundle.context,
         )
-
-        # 当前异步 v3 run stream 暴露了 `stream.messages` / `stream.values` /
-        # `stream.tool_calls` 这些 typed projections，但没有同步 lane 的
-        # `interleave()` / 异步版 `ainterleave()`。如果分别消费多个 projection，
-        # 就无法稳定恢复 LangGraph 原始事件顺序，所以这里保留 raw protocol log
-        # fallback 作为顺序保真路径。
-        async for raw_event in run_stream:
-            event = protocol_event_to_agent_event(raw_event, bundle=bundle)
-            if event is not None:
-                yield event
+        async for event in iter_projection_agent_events(projection_stream, bundle=bundle):
+            yield event
 
         yield make_finished_event(bundle=bundle)
+
 
 @dataclass(slots=True)
 class ProjectionEnvelope:
@@ -237,8 +122,7 @@ async def iter_projection_agent_events(
     """优先消费官方 v3 projections，并映射成 SlotFlow AgentEvent。
 
     当前异步 v3 API 没有官方 `ainterleave()`，所以这里只能并发拉取 projection
-    channel，再按“谁先产出谁先发”的近似顺序输出。若三个 channel 都没有产出任何可映射
-    事件，调用方会退回 raw protocol fallback。
+    channel，再按“谁先产出谁先发”的近似顺序输出。
     """
 
     channels = projection_channels(run_stream)
@@ -390,25 +274,6 @@ def assistant_message_id(bundle: RunConfigBundle) -> str:
     return f"{bundle.context.run_id}:assistant"
 
 
-def split_text(text: str) -> list[str]:
-    """把文本切成适合测试观察的短片段。
-
-    真模型按 token 流出，边界不稳定；学习测试更需要稳定可读，所以这里按中文标点
-    和英文句号切分。
-    """
-
-    chunks: list[str] = []
-    current = ""
-    for char in text:
-        current += char
-        if char in "，。.!?":
-            chunks.append(current)
-            current = ""
-    if current:
-        chunks.append(current)
-    return chunks
-
-
 def projection_item_to_agent_event(
     *,
     projection: str,
@@ -448,39 +313,6 @@ def projection_item_to_agent_event(
         )
 
     return None
-
-
-def protocol_event_to_agent_event(event: Any, *, bundle: RunConfigBundle) -> AgentEvent | None:
-    """把 v3 protocol event 转成 SlotFlow 业务事件。
-
-    `astream_events(..., version="v3")` 的异步返回值可以直接迭代主事件日志。每条日志
-    大致长这样：
-
-    ```py
-    {
-        "method": "messages",
-        "params": {
-            "data": ...
-        }
-    }
-    ```
-
-    我们只取 `method` 和 `params.data`，再复用 projection 映射函数。
-    """
-
-    if not isinstance(event, dict):
-        return None
-
-    method = event.get("method")
-    params = event.get("params", {})
-    if not isinstance(method, str) or not isinstance(params, dict):
-        return None
-
-    return projection_item_to_agent_event(
-        projection=method,
-        item=params.get("data"),
-        bundle=bundle,
-    )
 
 
 def extract_message_delta(item: Any) -> str:
