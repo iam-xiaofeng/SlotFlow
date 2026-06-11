@@ -939,16 +939,40 @@ function MessageBubble({ message }: { message: ChatUiMessage }) {
 }
 
 function MarkdownContent({ content }: { content: string }) {
+  const normalizedContent = normalizeMathForMarkdown(content);
+
   return (
     <div className="slotflow-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
       >
-        {content}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );
+}
+
+function normalizeMathForMarkdown(content: string) {
+  return content
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, math: string) => {
+      return `\n$$\n${math.trim()}\n$$\n`;
+    })
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, math: string) => {
+      return `$${math.trim()}$`;
+    })
+    .replace(
+      /(^|\n)\s*\[\s*(\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\3\})\s*\]\s*(?=\n|$)/g,
+      (_match, prefix: string, math: string) => {
+        return `${prefix}$$\n${math.trim()}\n$$`;
+      },
+    )
+    .replace(
+      /\[\s*(\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\2\})\s*\]/g,
+      (_match, math: string) => {
+        return `\n$$\n${math.trim()}\n$$\n`;
+      },
+    );
 }
 
 function MessageAttachments({ files }: { files: MessageFile[] }) {
