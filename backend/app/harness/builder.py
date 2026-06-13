@@ -46,6 +46,8 @@ def build_slotflow_harness_graph(
         model=model,
         tools=build_harness_tools(
             features=features,
+            model=model,
+            run_context=run_context,
             extra_tools=tools,
             mcp_config=harness_config.mcp_config,
             mcp_tool_provider=harness_config.mcp_tool_provider,
@@ -67,6 +69,7 @@ def build_slotflow_harness_graph(
         system_prompt=build_system_prompt(
             harness_config=harness_config,
             features=features,
+            run_context=run_context,
         ),
         checkpointer=checkpointer,
     )
@@ -96,6 +99,7 @@ def build_system_prompt(
     *,
     harness_config: SlotFlowHarnessConfig,
     features: SlotFlowHarnessFeatures,
+    run_context: RunContext,
 ) -> str:
     """构建第一版 harness system prompt。
 
@@ -116,6 +120,22 @@ def build_system_prompt(
         f"subagent_enabled={features.subagent_enabled}",
         "</slotflow-runtime>",
     ]
+    if run_context.uploaded_files:
+        sections.extend(["", "<slotflow-uploaded-files>"])
+        for uploaded_file in run_context.uploaded_files:
+            sections.append(
+                "- "
+                f"path={uploaded_file.workspace_path}; "
+                f"filename={uploaded_file.filename}; "
+                f"content_type={uploaded_file.content_type or 'unknown'}; "
+                f"size_bytes={uploaded_file.size_bytes}"
+            )
+        sections.extend(
+            [
+                "Use workspace_read(path) to inspect these files when relevant.",
+                "</slotflow-uploaded-files>",
+            ]
+        )
     skills_prompt = build_skills_prompt(enabled_skills)
     if skills_prompt:
         sections.extend(["", skills_prompt])

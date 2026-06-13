@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool, tool
 
+from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.subagents.config import SlotFlowSubagentConfig, SlotFlowSubagentProfile
 
@@ -37,13 +43,19 @@ class SubagentTaskResult:
 
 
 class SubagentTaskRunner:
-    """First local runner for subagent task delegation.
+    """Run a focused task through a real LangChain agent profile."""
 
-    This runner does not start another model yet. It validates the requested profile
-    and returns a structured handoff that the main agent can reason over.
-    """
-
-    def __init__(self, config: SlotFlowSubagentConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model: str | BaseChatModel,
+        run_context: RunContext,
+        environment_tools: Sequence[BaseTool] = (),
+        config: SlotFlowSubagentConfig | None = None,
+    ) -> None:
+        self._model = model
+        self._run_context = run_context
+        self._environment_tools = list(environment_tools)
         self._profiles = {
             profile.name: profile
             for profile in (config or SlotFlowSubagentConfig()).enabled_profiles()
@@ -54,7 +66,13 @@ class SubagentTaskRunner:
 
         return bool(self._profiles)
 
-    def run(self, *, agent_name: str, task: str, context: str = "") -> SubagentTaskResult:
+    async def arun(
+        self,
+        *,
+        agent_name: str,
+        task: str,
+        context: str = "",
+    ) -> SubagentTaskResult:
         clean_agent_name = agent_name.strip()
         clean_task = task.strip()
         clean_context = context.strip()
@@ -78,12 +96,47 @@ class SubagentTaskRunner:
                 result=f"unknown subagent: {clean_agent_name}",
             )
 
+        try:
+            graph = create_agent(
+                model=self._model,
+                tools=usable_tools_for_model(
+                    model=self._model,
+                    tools=self._environment_tools,
+                ),
+                system_prompt=build_subagent_system_prompt(
+                    profile=profile,
+                    run_context=self._run_context,
+                ),
+            )
+            result = await graph.ainvoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": build_subagent_user_prompt(
+                                task=clean_task,
+                                context=clean_context,
+                                run_context=self._run_context,
+                            ),
+                        }
+                    ]
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - return model-readable tool result
+            return SubagentTaskResult(
+                status="error",
+                agent_name=profile.name,
+                task=clean_task,
+                context=clean_context,
+                result=f"subagent execution failed: {exc.__class__.__name__}: {exc}",
+            )
+
         return SubagentTaskResult(
-            status="accepted",
+            status="completed",
             agent_name=profile.name,
             task=clean_task,
             context=clean_context,
-            result=render_delegation_result(profile=profile, task=clean_task, context=clean_context),
+            result=latest_assistant_text(result) or "",
         )
 
 
@@ -91,42 +144,158 @@ def build_subagent_tools(
     *,
     features: SlotFlowHarnessFeatures,
     config: SlotFlowSubagentConfig | None = None,
+    model: str | BaseChatModel | None = None,
+    run_context: RunContext | None = None,
+    environment_tools: Sequence[BaseTool] = (),
 ) -> list[BaseTool]:
     """Build subagent tools only when the current run enables subagents."""
 
     if not features.subagent_enabled:
         return []
+    if model is None or run_context is None:
+        return []
 
-    runner = SubagentTaskRunner(config)
+    runner = SubagentTaskRunner(
+        model=model,
+        run_context=run_context,
+        environment_tools=environment_tools,
+        config=config,
+    )
     if not runner.has_profiles():
         return []
 
     @tool("task_tool")
-    def task_tool(agent_name: str, task: str, context: str = "") -> str:
+    async def task_tool(agent_name: str, task: str, context: str = "") -> str:
         """Delegate a focused task to a named SlotFlow subagent profile."""
 
-        return runner.run(
+        result = await runner.arun(
             agent_name=agent_name,
             task=task,
             context=context,
-        ).to_json()
+        )
+        return result.to_json()
 
     return [task_tool]
 
 
-def render_delegation_result(
+def build_subagent_system_prompt(
     *,
     profile: SlotFlowSubagentProfile,
+    run_context: RunContext,
+) -> str:
+    """Build the system prompt for a real subagent run."""
+
+    sections = [
+        profile.system_prompt,
+        "",
+        "<slotflow-subagent>",
+        f"name={profile.name}",
+        f"description={profile.description}",
+        f"parent_thread_id={run_context.thread_id}",
+        f"parent_run_id={run_context.run_id}",
+        "Return a concise, concrete result for the parent agent.",
+        "</slotflow-subagent>",
+    ]
+    if run_context.uploaded_files:
+        sections.extend(["", "<slotflow-uploaded-files>"])
+        for uploaded_file in run_context.uploaded_files:
+            sections.append(
+                "- "
+                f"path={uploaded_file.workspace_path}; "
+                f"filename={uploaded_file.filename}; "
+                f"content_type={uploaded_file.content_type or 'unknown'}; "
+                f"size_bytes={uploaded_file.size_bytes}"
+            )
+        sections.extend(
+            [
+                "Use workspace_read(path) when the task requires file content.",
+                "</slotflow-uploaded-files>",
+            ]
+        )
+    return "\n".join(sections)
+
+
+def build_subagent_user_prompt(
+    *,
     task: str,
     context: str,
+    run_context: RunContext,
 ) -> str:
-    """Render the first deterministic subagent handoff result."""
+    """Build the user message sent to a subagent."""
 
-    parts = [
-        f"Delegated to {profile.name}: {profile.description}",
+    sections = [
         f"Task: {task}",
+        "",
+        f"Parent mode: {run_context.mode}",
+        f"Parent agent: {run_context.agent_name}",
     ]
     if context:
-        parts.append(f"Context: {context}")
-    parts.append(f"Instruction: {profile.system_prompt}")
-    return "\n".join(parts)
+        sections.extend(["", f"Context: {context}"])
+    return "\n".join(sections)
+
+
+def usable_tools_for_model(
+    *,
+    model: str | BaseChatModel,
+    tools: Sequence[BaseTool],
+) -> list[BaseTool]:
+    """Only bind child tools when the selected model supports tool calling."""
+
+    if not tools:
+        return []
+    if isinstance(model, str):
+        return list(tools)
+    if type(model).bind_tools is BaseChatModel.bind_tools:
+        return []
+    return list(tools)
+
+
+def latest_assistant_text(result: Any) -> str | None:
+    """Extract the last assistant text from a LangGraph agent result."""
+
+    if not isinstance(result, dict):
+        return None
+
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return None
+
+    for message in reversed(messages):
+        role = message_role(message)
+        if role not in {"assistant", "ai"}:
+            continue
+        content = message_content(message)
+        if content:
+            return content
+    return None
+
+
+def message_role(message: Any) -> str | None:
+    if isinstance(message, BaseMessage):
+        return message.type
+    if isinstance(message, dict):
+        raw_role = message.get("role") or message.get("type")
+        return str(raw_role) if raw_role is not None else None
+    raw_type = getattr(message, "type", None)
+    return str(raw_type) if raw_type is not None else None
+
+
+def message_content(message: Any) -> str:
+    if isinstance(message, BaseMessage):
+        content = message.content
+    elif isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", None)
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return "" if content is None else str(content)

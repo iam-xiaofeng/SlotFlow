@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
+from pypdf import PdfWriter
 
 from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
@@ -74,6 +77,9 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         "slotflow_context",
         "workspace_list",
         "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
     ]
     assert tools[0] is replacement_context_tool
 
@@ -89,7 +95,13 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
         for item in build_workspace_tools(SlotFlowSandboxConfig(workspace_root=root))
     }
 
-    assert list(tools) == ["workspace_list", "workspace_read"]
+    assert list(tools) == [
+        "workspace_list",
+        "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
+    ]
     listing = json.loads(tools["workspace_list"].invoke({"path": "."}))
     read_result = json.loads(tools["workspace_read"].invoke({"path": "docs/a.txt"}))
 
@@ -100,10 +112,73 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
     }
     assert read_result == {
         "path": "docs/a.txt",
+        "kind": "text",
+        "media_type": "text/plain",
         "content": "hello",
         "size_bytes": 5,
         "source": "slotflow_workspace",
+        "metadata": {"format": "txt"},
     }
+
+
+def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> None:
+    """workspace_read returns model-readable payloads for common upload formats."""
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    create_docx(root / "note.docx", "Docx hello")
+    create_blank_pdf(root / "blank.pdf")
+    (root / "photo.jpg").write_bytes(tiny_jpeg_bytes(width=2, height=1))
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(SlotFlowSandboxConfig(workspace_root=root))
+    }
+
+    docx = json.loads(tools["workspace_read"].invoke({"path": "note.docx"}))
+    pdf = json.loads(tools["workspace_read"].invoke({"path": "blank.pdf"}))
+    image = json.loads(tools["workspace_read"].invoke({"path": "photo.jpg"}))
+
+    assert docx["kind"] == "document"
+    assert docx["content"] == "Docx hello"
+    assert pdf["kind"] == "pdf"
+    assert pdf["metadata"]["pages"] == 1
+    assert pdf["warning"] == "pdf text extraction returned no text"
+    assert image["kind"] == "image"
+    assert image["metadata"] == {"format": "JPEG", "width": 2, "height": 1}
+    assert "image pixels are not inlined" in image["warning"]
+
+
+def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
+    """Claude Code style workspace navigation stays inside the sandbox boundary."""
+
+    root = tmp_path / "workspace"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "guide.md").write_text("SlotFlow tools are useful", encoding="utf-8")
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(
+                workspace_root=root,
+                writes_enabled=True,
+            )
+        )
+    }
+
+    tree = json.loads(tools["workspace_tree"].invoke({"path": ".", "max_depth": 3}))
+    search = json.loads(tools["workspace_search"].invoke({"query": "tools"}))
+    artifact = json.loads(
+        tools["artifact_write"].invoke(
+            {"path": "summary.md", "content": "# Summary"}
+        )
+    )
+    artifacts = json.loads(tools["artifact_list"].invoke({}))
+
+    assert {"path": "docs/guide.md", "kind": "file", "size_bytes": 25} in tree["entries"]
+    assert search["matches"][0]["path"] == "docs/guide.md"
+    assert artifact["path"] == "artifacts/summary.md"
+    assert artifacts["entries"] == [
+        {"path": "artifacts/summary.md", "kind": "file", "size_bytes": 9}
+    ]
 
 
 def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> None:
@@ -112,7 +187,13 @@ def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) ->
     read_only_tools = build_workspace_tools(
         SlotFlowSandboxConfig(workspace_root=tmp_path / "readonly")
     )
-    assert [item.name for item in read_only_tools] == ["workspace_list", "workspace_read"]
+    assert [item.name for item in read_only_tools] == [
+        "workspace_list",
+        "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
+    ]
 
     writable_root = tmp_path / "writable"
     writable_tools = {
@@ -129,7 +210,15 @@ def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) ->
         {"path": "notes/a.txt", "content": "hello"}
     )
 
-    assert list(writable_tools) == ["workspace_list", "workspace_read", "workspace_write"]
+    assert list(writable_tools) == [
+        "workspace_list",
+        "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
+        "workspace_write",
+        "artifact_write",
+    ]
     assert json.loads(raw) == {
         "path": "notes/a.txt",
         "bytes_written": 5,
@@ -184,3 +273,37 @@ async def test_harness_graph_can_execute_builtin_tool_call() -> None:
     assert tool_messages[0].name == "slotflow_context"
     assert json.loads(str(tool_messages[0].content))["run_id"] == bundle.context.run_id
     assert result["messages"][-1].content == "工具结果已经收到。"
+
+
+def create_docx(path: Path, text: str) -> None:
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>"
+        f"{text}"
+        "</w:t></w:r></w:p></w:body></w:document>"
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+
+
+def create_blank_pdf(path: Path) -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    buffer = BytesIO()
+    writer.write(buffer)
+    path.write_bytes(buffer.getvalue())
+
+
+def tiny_jpeg_bytes(*, width: int, height: int) -> bytes:
+    return b"".join(
+        [
+            b"\xff\xd8",
+            b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00",
+            b"\xff\xc0\x00\x11\x08",
+            height.to_bytes(2, "big"),
+            width.to_bytes(2, "big"),
+            b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00",
+            b"\xff\xd9",
+        ]
+    )

@@ -22,6 +22,8 @@ import {
   type ChatMode,
   type ThreadRecord,
   type UploadedFileRecord,
+  type WorkspaceEntryRecord,
+  listArtifacts,
   listThreads,
   uploadFile,
 } from "@/lib/chat-stream";
@@ -41,6 +43,7 @@ export function ChatApp() {
   const [threadListError, setThreadListError] = useState<string | null>(null);
   const [isLoadingThreads, setIsLoadingThreads] = useState(true);
   const [attachments, setAttachments] = useState<UploadedFileRecord[]>([]);
+  const [artifacts, setArtifacts] = useState<WorkspaceEntryRecord[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -81,6 +84,14 @@ export function ChatApp() {
     }
   }, []);
 
+  const refreshArtifacts = useCallback(async () => {
+    try {
+      setArtifacts(await listArtifacts());
+    } catch {
+      setArtifacts([]);
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
 
@@ -93,6 +104,7 @@ export function ChatApp() {
       if (nextThreads[0]) {
         await loadThread(nextThreads[0]);
       }
+      await refreshArtifacts();
       if (active) {
         setIsLoadingThreads(false);
       }
@@ -103,7 +115,7 @@ export function ChatApp() {
     return () => {
       active = false;
     };
-  }, [loadThread, refreshThreads]);
+  }, [loadThread, refreshArtifacts, refreshThreads]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -200,6 +212,7 @@ export function ChatApp() {
 
     if (result.accepted) {
       await refreshThreads();
+      await refreshArtifacts();
     } else {
       setInput(text);
       setAttachments(currentAttachments);
@@ -278,6 +291,7 @@ export function ChatApp() {
           activeThreadId={thread?.id ?? null}
           disabled={isStreaming}
           filteredThreads={filteredThreads}
+          artifacts={artifacts}
           isLoading={isLoadingThreads}
           query={threadQuery}
           threadListError={threadListError}

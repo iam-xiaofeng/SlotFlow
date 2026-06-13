@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
+from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, load_mcp_tools
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -15,6 +17,8 @@ from app.harness.tools.workspace import build_workspace_tools
 def build_harness_tools(
     *,
     features: SlotFlowHarnessFeatures,
+    model: str | BaseChatModel | None = None,
+    run_context: RunContext | None = None,
     extra_tools: list[BaseTool] | None = None,
     mcp_config: SlotFlowMcpConfig | None = None,
     mcp_tool_provider: McpToolProvider | None = None,
@@ -36,6 +40,13 @@ def build_harness_tools(
     subagent_tools = build_subagent_tools(
         features=features,
         config=subagent_config,
+        model=model,
+        run_context=run_context,
+        environment_tools=[
+            slotflow_context_tool,
+            *workspace_tools,
+            *mcp_tools,
+        ],
     )
     return dedupe_tools_by_name(
         [

@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from app.harness.sandbox.config import SlotFlowSandboxConfig
+from app.harness.sandbox.readers import WorkspaceReadResult, read_workspace_file
 
 
 class WorkspacePathError(ValueError):
@@ -79,15 +80,18 @@ class SlotFlowWorkspace:
         """Read a text file after enforcing path and byte limits."""
 
         target = self.resolve_path(relative_path)
-        if not target.is_file():
-            raise WorkspacePathError(f"workspace path is not a file: {relative_path!r}")
-
-        size = target.stat().st_size
-        if size > self.config.max_read_bytes:
-            raise WorkspaceFileTooLargeError(
-                f"workspace read exceeds max_read_bytes: {size} > {self.config.max_read_bytes}",
-            )
+        self._assert_readable_file(target, relative_path)
         return target.read_text(encoding=encoding)
+
+    def read_file(self, relative_path: str | Path) -> WorkspaceReadResult:
+        """Read a workspace file into a model-readable structured payload."""
+
+        target = self.resolve_path(relative_path)
+        self._assert_readable_file(target, relative_path)
+        return read_workspace_file(
+            target,
+            relative_path=target.relative_to(self.root).as_posix(),
+        )
 
     def write_text(
         self,
@@ -115,6 +119,36 @@ class SlotFlowWorkspace:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding=encoding)
         return target
+
+    def write_bytes(self, relative_path: str | Path, data: bytes) -> Path:
+        """Write bytes only when workspace writes are explicitly enabled."""
+
+        if not self.config.writes_enabled:
+            raise WorkspaceWriteDisabledError("workspace writes are disabled")
+
+        if len(data) > self.config.max_write_bytes:
+            raise WorkspaceFileTooLargeError(
+                "workspace write exceeds max_write_bytes: "
+                f"{len(data)} > {self.config.max_write_bytes}",
+            )
+
+        target = self.resolve_path(relative_path)
+        if target.exists() and target.is_dir():
+            raise WorkspacePathError(f"workspace path is a directory: {relative_path!r}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return target
+
+    def _assert_readable_file(self, target: Path, relative_path: str | Path) -> None:
+        if not target.is_file():
+            raise WorkspacePathError(f"workspace path is not a file: {relative_path!r}")
+
+        size = target.stat().st_size
+        if size > self.config.max_read_bytes:
+            raise WorkspaceFileTooLargeError(
+                f"workspace read exceeds max_read_bytes: {size} > {self.config.max_read_bytes}",
+            )
 
 
 def validate_relative_workspace_path(relative_path: str | Path) -> Path:

@@ -38,19 +38,41 @@ def _bundle(mode: str = "ultra"):
 
 
 def test_subagent_tools_are_registered_only_when_feature_is_enabled() -> None:
-    flash_features = features_from_run_context(_bundle(mode="flash").context)
-    ultra_features = features_from_run_context(_bundle(mode="ultra").context)
+    flash_bundle = _bundle(mode="flash")
+    ultra_bundle = _bundle(mode="ultra")
+    model = ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")])
 
-    assert build_subagent_tools(features=flash_features) == []
-    assert [tool.name for tool in build_subagent_tools(features=ultra_features)] == ["task_tool"]
+    assert build_subagent_tools(
+        features=features_from_run_context(flash_bundle.context),
+        model=model,
+        run_context=flash_bundle.context,
+    ) == []
+    assert build_subagent_tools(
+        features=features_from_run_context(ultra_bundle.context),
+    ) == []
+    assert [
+        tool.name
+        for tool in build_subagent_tools(
+            features=features_from_run_context(ultra_bundle.context),
+            model=model,
+            run_context=ultra_bundle.context,
+        )
+    ] == ["task_tool"]
 
 
-def test_task_tool_returns_structured_delegation_result() -> None:
+@pytest.mark.asyncio
+async def test_task_tool_runs_real_subagent_and_returns_result() -> None:
+    bundle = _bundle(mode="ultra")
+    model = ToolAwareFakeMessagesListChatModel(
+        responses=[AIMessage(content="真实子 agent 结果")]
+    )
     tool = build_subagent_tools(
-        features=features_from_run_context(_bundle(mode="ultra").context),
+        features=features_from_run_context(bundle.context),
+        model=model,
+        run_context=bundle.context,
     )[0]
 
-    raw = tool.invoke(
+    raw = await tool.ainvoke(
         {
             "agent_name": "researcher",
             "task": "整理 MCP provider 的官方用法",
@@ -59,21 +81,25 @@ def test_task_tool_returns_structured_delegation_result() -> None:
     )
     result = json.loads(raw)
 
-    assert result["status"] == "accepted"
+    assert result["status"] == "completed"
     assert result["agent_name"] == "researcher"
     assert result["task"] == "整理 MCP provider 的官方用法"
     assert result["context"] == "模块 20 后续验证"
-    assert "Delegated to researcher" in result["result"]
+    assert result["result"] == "真实子 agent 结果"
     assert result["source"] == "slotflow_subagent_task_tool"
 
 
-def test_task_tool_returns_structured_error_for_unknown_agent() -> None:
+@pytest.mark.asyncio
+async def test_task_tool_returns_structured_error_for_unknown_agent() -> None:
+    bundle = _bundle(mode="ultra")
     tool = build_subagent_tools(
-        features=features_from_run_context(_bundle(mode="ultra").context),
+        features=features_from_run_context(bundle.context),
+        model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
+        run_context=bundle.context,
     )[0]
 
     result = json.loads(
-        tool.invoke(
+        await tool.ainvoke(
             {
                 "agent_name": "missing",
                 "task": "do something",
@@ -87,14 +113,20 @@ def test_task_tool_returns_structured_error_for_unknown_agent() -> None:
 
 
 def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary() -> None:
+    bundle = _bundle(mode="ultra")
     tools = build_harness_tools(
-        features=features_from_run_context(_bundle(mode="ultra").context),
+        features=features_from_run_context(bundle.context),
+        model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
+        run_context=bundle.context,
     )
 
     assert [tool.name for tool in tools] == [
         "slotflow_context",
         "workspace_list",
         "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
         "task_tool",
     ]
 
@@ -113,6 +145,8 @@ def test_disabled_subagent_profiles_do_not_register_task_tool() -> None:
 
     assert build_subagent_tools(
         features=features_from_run_context(_bundle(mode="ultra").context),
+        model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
+        run_context=_bundle(mode="ultra").context,
         config=config,
     ) == []
 
@@ -136,6 +170,7 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
                     }
                 ],
             ),
+            AIMessage(content="真实 coder 子任务结果。"),
             AIMessage(content="子任务结果已经收到。"),
         ]
     )
@@ -160,5 +195,6 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
     assert tool_messages[0].name == "task_tool"
     tool_result = json.loads(str(tool_messages[0].content))
     assert tool_result["agent_name"] == "coder"
-    assert tool_result["status"] == "accepted"
+    assert tool_result["status"] == "completed"
+    assert tool_result["result"] == "真实 coder 子任务结果。"
     assert result["messages"][-1].content == "子任务结果已经收到。"

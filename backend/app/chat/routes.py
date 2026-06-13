@@ -112,7 +112,19 @@ async def stream_thread_run(
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
-    uploaded_files = resolve_uploaded_files(body.files, store=get_upload_store(request))
+    upload_store = get_upload_store(request)
+    validate_uploaded_files_exist(body.files, store=upload_store)
+    run = repo.create_run(
+        thread_id,
+        model_name=body.model_name,
+        mode=body.mode,
+        agent_name=body.agent_name,
+    )
+    uploaded_files = stage_uploaded_files(
+        body.files,
+        run_id=run.id,
+        store=upload_store,
+    )
     uploaded_file_metadata = [
         uploaded_file.model_dump(mode="json")
         for uploaded_file in uploaded_files
@@ -127,12 +139,6 @@ async def stream_thread_run(
             "uploaded_files": uploaded_file_metadata,
             "request_metadata": dict(body.metadata),
         },
-    )
-    run = repo.create_run(
-        thread_id,
-        model_name=body.model_name,
-        mode=body.mode,
-        agent_name=body.agent_name,
     )
     bundle = build_run_config(
         thread_id=thread_id,
@@ -215,17 +221,33 @@ def latest_assistant_content(event: BusinessSseEvent) -> str | None:
     return None
 
 
-def resolve_uploaded_files(
+def validate_uploaded_files_exist(
     file_ids: list[str],
     *,
     store: SlotFlowUploadStore,
+) -> None:
+    """Fail before run/message creation if any requested upload is missing."""
+
+    for file_id in file_ids:
+        try:
+            store.get_upload(file_id)
+        except UploadNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="upload not found") from exc
+
+
+def stage_uploaded_files(
+    file_ids: list[str],
+    *,
+    run_id: str,
+    store: SlotFlowUploadStore,
 ) -> list[UploadedFileContext]:
-    """把请求里的 file_id 解析成本次 run 可读取的上传文件元数据。"""
+    """把请求里的 file_id 落位成本次 run 可读取的上传文件元数据。"""
 
     uploaded_files: list[UploadedFileContext] = []
     for file_id in file_ids:
         try:
-            uploaded_files.append(uploaded_file_to_context(store.get_upload(file_id)))
+            staged = store.stage_upload_for_run(file_id, run_id=run_id)
+            uploaded_files.append(uploaded_file_to_context(staged))
         except UploadNotFoundError as exc:
             raise HTTPException(status_code=404, detail="upload not found") from exc
     return uploaded_files

@@ -80,6 +80,22 @@ def test_workspace_read_can_read_uploaded_file_by_workspace_path(tmp_path: Path)
     assert payload["source"] == "slotflow_workspace"
 
 
+def test_upload_store_stages_file_under_run_scoped_path(tmp_path: Path) -> None:
+    """发送消息时上传文件会复制到 uploads/<run_id>/ 下供 agent 读取。"""
+
+    client, store = _client(tmp_path)
+    uploaded = client.post(
+        "/api/uploads",
+        files={"file": ("report.md", b"# report", "text/markdown")},
+    ).json()
+
+    staged = store.stage_upload_for_run(uploaded["id"], run_id="run_abc123abc123")
+
+    assert staged.workspace_path == "uploads/run_abc123abc123/report.md"
+    assert store.get_upload(uploaded["id"]).workspace_path == staged.workspace_path
+    assert store.workspace.resolve_path(staged.workspace_path).read_bytes() == b"# report"
+
+
 def test_upload_rejects_oversized_file(tmp_path: Path) -> None:
     client, _ = _client(tmp_path, max_write_bytes=4)
 
@@ -99,3 +115,21 @@ def test_get_uploaded_file_returns_404_for_unknown_id(tmp_path: Path) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "upload not found"
+
+
+def test_list_artifacts_returns_workspace_artifact_entries(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/summary.md")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("# Summary", encoding="utf-8")
+
+    response = client.get("/api/workspace/artifacts")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "path": "artifacts/summary.md",
+            "kind": "file",
+            "size_bytes": 9,
+        }
+    ]

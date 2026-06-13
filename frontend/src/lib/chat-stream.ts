@@ -41,6 +41,12 @@ export type UploadedFileRecord = {
   created_at: string;
 };
 
+export type WorkspaceEntryRecord = {
+  path: string;
+  kind: "file" | "directory";
+  size_bytes?: number | null;
+};
+
 export type ChatRequestOptions = {
   signal?: AbortSignal;
 };
@@ -127,6 +133,20 @@ export async function uploadFile(
   }
 
   return response.json() as Promise<UploadedFileRecord>;
+}
+
+export async function listArtifacts(
+  options: ChatRequestOptions = {},
+): Promise<WorkspaceEntryRecord[]> {
+  const response = await fetch("/api/workspace/artifacts", {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`list artifacts failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<WorkspaceEntryRecord[]>;
 }
 
 export async function* streamThreadRun(

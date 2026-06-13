@@ -6,6 +6,9 @@
 task_tool
 ```
 
+> 模块 28 已经把这里的第一版“结构化委派结果”升级为真实 subagent agent 调用。
+> 本文保留模块 21 的工具边界说明，但执行语义以模块 28 为准。
+
 它只在本次 run 的 feature 开关启用时注册：
 
 ```txt
@@ -30,7 +33,7 @@ ultra -> subagent_enabled=True
 主 agent 如何表达“把一个子任务交给某个子 agent profile”
 ```
 
-第一版不启动第二个模型，也不引入 DeerFlow 旧调度器。它先把工具协议和注册位置落稳：
+模块 21 先把工具协议和注册位置落稳：
 
 ```txt
 agent 调用 task_tool
@@ -39,8 +42,8 @@ agent 调用 task_tool
 -> 主 agent 继续基于结果回答
 ```
 
-后续要接真实 subagent scheduler 时，可以替换 `SubagentTaskRunner` 内部实现，而不改
-tools registry 和 LangGraph graph 组装边界。
+模块 28 已经替换 `SubagentTaskRunner` 内部实现：`task_tool` 会启动一个真实
+LangChain agent profile，而不是拼接模拟结果。
 
 ## 它在完整链路里的位置
 
@@ -50,8 +53,8 @@ tools registry 和 LangGraph graph 组装边界。
 -> build_run_config()
 -> RunContext.subagent_enabled
 -> features_from_run_context()
--> build_harness_tools()
--> build_subagent_tools()
+-> build_harness_tools(model=..., run_context=...)
+-> build_subagent_tools(model=..., run_context=...)
 -> task_tool
 -> LangGraph create_agent(tools=...)
 ```
@@ -60,7 +63,8 @@ tools registry 和 LangGraph graph 组装边界。
 
 ```txt
 slotflow_context
-workspace_list / workspace_read / workspace_write
+workspace_list / workspace_read / workspace_tree / workspace_search
+artifact_list / workspace_write / artifact_write
 task_tool
 MCP tools
 ```
@@ -99,11 +103,11 @@ reviewer
 
 ```json
 {
-  "status": "accepted",
+  "status": "completed",
   "agent_name": "coder",
   "task": "检查模块 21 的工具注册顺序",
   "context": "SlotFlow harness tests",
-  "result": "Delegated to coder: ...",
+  "result": "真实子 agent 返回的回答文本",
   "source": "slotflow_subagent_task_tool"
 }
 ```
@@ -147,8 +151,8 @@ backend/tests/test_harness_subagents.py
 
 ```txt
 1. flash/pro 不注册 task_tool
-2. ultra 注册 task_tool
-3. task_tool 返回结构化 accepted JSON
+2. ultra 只有在有 model/run_context 时才注册 task_tool
+3. task_tool 通过真实子 agent 返回结构化 completed JSON
 4. 未知子 agent 返回结构化 error JSON
 5. 没有 enabled profile 时不注册 task_tool
 6. 真实 LangGraph graph 能执行 task_tool
@@ -163,10 +167,9 @@ uv run pytest -q tests/test_harness_subagents.py tests/test_harness_tools.py tes
 
 ## 这一模块不做什么
 
-模块 21 明确不做：
+模块 21/28 当前仍然不做：
 
 ```txt
-不启动第二个模型
 不创建后台任务队列
 不实现并发 subagent 调度
 不读写 subagent 专属 workspace
@@ -174,5 +177,5 @@ uv run pytest -q tests/test_harness_subagents.py tests/test_harness_tools.py tes
 不引入 DeerFlow 旧 subagents 包
 ```
 
-当前重点是把主 agent 调用子 agent 的工具协议稳定下来。真正的 scheduler、隔离执行和
-多 agent 状态管理应该在这个工具边界之后再扩展。
+当前重点是让 `task_tool` 进入真实模型执行路径，同时不引入旧项目的大型 scheduler。
+真正的隔离执行、并发调度和多 agent 状态管理应该在这个工具边界之后再扩展。

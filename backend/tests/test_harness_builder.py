@@ -9,7 +9,7 @@ from langchain_core.tools import tool
 
 import app.chat.runtime as runtime_module
 import app.harness.builder as builder_module
-from app.chat.models import ChatStreamRequest
+from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
 from app.chat.runtime import DEFAULT_DEEPSEEK_SYSTEM_PROMPT, SlotFlowRuntimeConfig
 from app.harness.config import SlotFlowHarnessConfig
@@ -73,6 +73,9 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "slotflow_context",
         "workspace_list",
         "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
     ]
     assert [item.name for item in captured["middleware"]] == [
         "SlotFlowToolSafetyMiddleware",
@@ -103,6 +106,44 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
     )
 
     assert captured["tools"] == []
+
+
+def test_harness_builder_adds_uploaded_workspace_paths_to_system_prompt(monkeypatch) -> None:
+    """Uploaded files are visible to the model as workspace-relative paths."""
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_agent_graph(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+
+    request = ChatStreamRequest(message="分析文件", files=["file_abc123abc123"])
+    run_context = build_run_config(
+        thread_id="thread_harness",
+        run_id="run_harness",
+        request=request,
+        uploaded_files=[
+            UploadedFileContext(
+                id="file_abc123abc123",
+                filename="report.md",
+                content_type="text/markdown",
+                size_bytes=8,
+                workspace_path="uploads/run_harness/report.md",
+            )
+        ],
+    ).context
+
+    builder_module.build_slotflow_harness_graph(
+        model=ToolAwareFakeListChatModel(responses=["ok"]),
+        run_context=run_context,
+        harness_config=SlotFlowHarnessConfig(system_prompt="base prompt"),
+    )
+
+    assert "<slotflow-uploaded-files>" in captured["system_prompt"]
+    assert "path=uploads/run_harness/report.md" in captured["system_prompt"]
+    assert "Use workspace_read(path)" in captured["system_prompt"]
 
 
 def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None:
@@ -144,6 +185,9 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
         "slotflow_context",
         "workspace_list",
         "workspace_read",
+        "workspace_tree",
+        "workspace_search",
+        "artifact_list",
         "mcp_fake",
     ]
 

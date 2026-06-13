@@ -37,10 +37,11 @@ import {
   SidebarMenuSkeleton,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { type ThreadRecord } from "@/lib/chat-stream";
+import { type ThreadRecord, type WorkspaceEntryRecord } from "@/lib/chat-stream";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
+  artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
   filteredThreads: ThreadRecord[];
   isLoading: boolean;
@@ -54,6 +55,7 @@ type ThreadSidebarProps = {
 
 export function ThreadSidebar({
   activeThreadId,
+  artifacts,
   disabled,
   filteredThreads,
   isLoading,
@@ -108,7 +110,7 @@ export function ThreadSidebar({
                 <ContextPickerMenu kind="mcp" />
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu kind="artifacts" />
+                <ContextPickerMenu kind="artifacts" artifacts={artifacts} />
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <MoreToolsMenu />
@@ -201,9 +203,17 @@ const contextPickerConfig = {
   }
 >;
 
-function ContextPickerMenu({ kind }: { kind: ContextPickerKind }) {
+function ContextPickerMenu({
+  kind,
+  artifacts = [],
+}: {
+  kind: ContextPickerKind;
+  artifacts?: WorkspaceEntryRecord[];
+}) {
   const item = contextPickerConfig[kind];
   const Icon = item.icon;
+  const isArtifacts = kind === "artifacts";
+  const hasArtifacts = isArtifacts && artifacts.length > 0;
 
   return (
     <DropdownMenu>
@@ -214,10 +224,19 @@ function ContextPickerMenu({ kind }: { kind: ContextPickerKind }) {
         <span>{item.label}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="right" align="start" sideOffset={8} className="w-56">
-        <DropdownMenuItem disabled className="gap-3">
-          <Icon className="size-5" />
-          {item.empty}
-        </DropdownMenuItem>
+        {hasArtifacts ? (
+          artifacts.slice(0, 8).map((artifact) => (
+            <DropdownMenuItem key={artifact.path} disabled className="gap-3">
+              <FileText className="size-5" />
+              <span className="min-w-0 truncate">{artifact.path.replace(/^artifacts\//, "")}</span>
+            </DropdownMenuItem>
+          ))
+        ) : (
+          <DropdownMenuItem disabled className="gap-3">
+            <Icon className="size-5" />
+            {item.empty}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         {item.actions.map((action) => (
           <DropdownMenuItem key={action} disabled className="gap-3">
