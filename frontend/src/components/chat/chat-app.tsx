@@ -15,7 +15,7 @@ import {
   SidebarInset,
   SidebarProvider,
 } from "@/components/ui/sidebar";
-import { useChatStream } from "@/hooks/use-chat-stream";
+import { type ChatUiMessage, useChatStream } from "@/hooks/use-chat-stream";
 import {
   type ChatMode,
   type McpServerRecord,
@@ -28,9 +28,11 @@ import {
   type WorkspaceReadRecord,
   createHttpMcpServer,
   createMemory,
+  deleteArtifact,
   deleteMcpServer,
   deleteMemory,
   deleteSkill,
+  deleteThread,
   installSkill,
   listArtifacts,
   listMcpServers,
@@ -45,7 +47,7 @@ import {
   uploadSkillFolder,
 } from "@/lib/chat-stream";
 
-import { ArtifactWorkspacePanel } from "./artifact-panel";
+import { ArtifactWorkspacePanel, ArtifactWorkspaceToolbar } from "./artifact-panel";
 import { ChatComposer } from "./chat-composer";
 import { makeThreadTitle } from "./chat-format";
 import { ThreadSidebar, UserMenu } from "./chat-sidebar";
@@ -68,6 +70,7 @@ export function ChatApp() {
   const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
   const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
   const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(560);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -173,10 +176,6 @@ export function ChatApp() {
     };
   }, [loadThread, refreshArtifacts, refreshMcpServers, refreshMemories, refreshSkills, refreshThreads]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messages]);
-
   const filteredThreads = useMemo(() => {
     const query = threadQuery.trim().toLowerCase();
     if (!query) {
@@ -208,7 +207,33 @@ export function ChatApp() {
     }
   }
 
-  async function submitMessage(rawText: string): Promise<boolean> {
+  async function handleDeleteThread(targetThread: ThreadRecord) {
+    if (isStreaming) {
+      return;
+    }
+
+    try {
+      await deleteThread(targetThread.id);
+      if (targetThread.id === thread?.id) {
+        resetThread();
+        setAttachments([]);
+      }
+      await refreshThreads();
+      toast.success("聊天记录已删除");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "delete thread failed";
+      toast.error(message);
+    }
+  }
+
+  async function submitMessage(
+    rawText: string,
+    options: {
+      reuseUserMessageId?: string;
+      files?: string[];
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<boolean> {
     const text = rawText.trim();
     if (!text || isStreaming || isUploading) {
       return false;
@@ -216,24 +241,32 @@ export function ChatApp() {
 
     const currentAttachments = attachments;
     const previousArtifactPaths = new Set(artifactFiles.map((artifact) => artifact.path));
-    setAttachments([]);
-
-    const result = await sendMessage(text, {
-      mode: defaultMode,
-      model_name: defaultModelName,
-      agent_name: "default",
-      files: currentAttachments.map((file) => file.id),
-      metadata: {
-        source: "chat-ui",
-        uploaded_file_count: currentAttachments.length,
-        uploaded_files: currentAttachments.map((file) => ({
+    const isReusingUserMessage = Boolean(options.reuseUserMessageId);
+    if (!isReusingUserMessage) {
+      setAttachments([]);
+    }
+    const uploadedFilesMetadata = isReusingUserMessage
+      ? extractUploadedFilesFromMetadata(options.metadata)
+      : currentAttachments.map((file) => ({
           id: file.id,
           filename: file.filename,
           original_filename: file.original_filename,
           content_type: file.content_type,
           size_bytes: file.size_bytes,
-        })),
+        }));
+
+    const result = await sendMessage(text, {
+      mode: defaultMode,
+      model_name: defaultModelName,
+      agent_name: "default",
+      files: options.files ?? currentAttachments.map((file) => file.id),
+      metadata: {
+        source: "chat-ui",
+        ...(options.metadata ?? {}),
+        uploaded_file_count: uploadedFilesMetadata.length,
+        uploaded_files: uploadedFilesMetadata,
       },
+      reuse_user_message_id: options.reuseUserMessageId,
       threadTitle: makeThreadTitle(text),
     });
 
@@ -252,7 +285,9 @@ export function ChatApp() {
         void handlePreviewArtifact(newArtifact);
       }
     } else {
-      setAttachments(currentAttachments);
+      if (!isReusingUserMessage) {
+        setAttachments(currentAttachments);
+      }
     }
     return result.accepted;
   }
@@ -458,6 +493,7 @@ export function ChatApp() {
       return;
     }
 
+    setSelectedArtifactPath(artifact.path);
     setIsArtifactPanelOpen(true);
     setIsLoadingArtifactPreview(true);
     setArtifactPreviewError(null);
@@ -484,6 +520,72 @@ export function ChatApp() {
     if (!artifactPreview) {
       void handlePreviewArtifact(firstFile);
     }
+  }
+
+  async function handleDeleteArtifact(artifact: WorkspaceEntryRecord) {
+    if (artifact.kind !== "file") {
+      return;
+    }
+
+    try {
+      await deleteArtifact(artifact.path);
+      const nextArtifacts = await refreshArtifacts();
+      if (selectedArtifactPath === artifact.path || artifactPreview?.path === artifact.path) {
+        setSelectedArtifactPath(null);
+        setArtifactPreview(null);
+        setArtifactPreviewError(null);
+        const nextFile = nextArtifacts.find((item) => item.kind === "file");
+        if (nextFile && isArtifactPanelOpen) {
+          void handlePreviewArtifact(nextFile);
+        } else if (!nextFile) {
+          setIsArtifactPanelOpen(false);
+        }
+      }
+      toast.success("产物已删除");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "delete artifact failed";
+      toast.error(message);
+    }
+  }
+
+  async function handleCopyMessage(content: string) {
+    if (!content.trim()) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(content);
+      toast.success("已复制");
+    } catch {
+      toast.error("复制失败");
+    }
+  }
+
+  async function handleEditLatestUserMessage(messageId: string, content: string) {
+    if (isStreaming) {
+      return false;
+    }
+    const targetMessage = messages.find((message) => message.id === messageId);
+    return submitMessage(content, {
+      reuseUserMessageId: messageId,
+      files: extractFileIdsFromMessage(targetMessage),
+      metadata: targetMessage?.metadata,
+    });
+  }
+
+  async function handleRetryLatestAssistantMessage() {
+    if (isStreaming) {
+      return;
+    }
+    const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
+    if (!latestUserMessage?.content.trim()) {
+      return;
+    }
+    await submitMessage(latestUserMessage.content, {
+      reuseUserMessageId: latestUserMessage.id,
+      files: extractFileIdsFromMessage(latestUserMessage),
+      metadata: latestUserMessage.metadata,
+    });
   }
 
   function handleRemoveAttachment(fileId: string) {
@@ -534,6 +636,8 @@ export function ChatApp() {
           onDeleteMcpServer={(server) => void handleDeleteMcpServer(server)}
           onDeleteMemory={(memory) => void handleDeleteMemory(memory)}
           onDeleteSkill={(skill) => void handleDeleteSkill(skill)}
+          onDeleteArtifact={(artifact) => void handleDeleteArtifact(artifact)}
+          onDeleteThread={(targetThread) => void handleDeleteThread(targetThread)}
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
           onInstallSkill={() => void handleInstallSkillFromRegistry()}
           onNewThread={handleNewThread}
@@ -549,11 +653,24 @@ export function ChatApp() {
 
       <SidebarInset className="h-dvh min-h-0 overflow-hidden">
         <header className="flex h-14 shrink-0 items-center justify-end bg-background px-3 sm:px-4">
+          {isArtifactPanelOpen && artifactFiles.length > 0 ? (
+            <div
+              className="mr-2 min-w-0 shrink-0"
+              style={{ width: artifactPanelWidth }}
+            >
+              <ArtifactWorkspaceToolbar
+                artifacts={artifactFiles}
+                activePath={selectedArtifactPath ?? artifactPreview?.path ?? null}
+                onClose={() => setIsArtifactPanelOpen(false)}
+                onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
+              />
+            </div>
+          ) : null}
           <UserMenu />
         </header>
 
-        <div className="flex min-h-0 flex-1">
-          <section className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
             {messages.length === 0 ? (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 pb-16 sm:px-6">
                 <div className="w-full max-w-3xl -translate-y-10">
@@ -563,7 +680,16 @@ export function ChatApp() {
               </div>
             ) : (
               <>
-                <MessageList messages={messages} messagesEndRef={messagesEndRef} />
+                <MessageList
+                  messages={messages}
+                  messagesEndRef={messagesEndRef}
+                  isStreaming={isStreaming}
+                  onCopyMessage={(content) => void handleCopyMessage(content)}
+                  onEditLatestUserMessage={(messageId, content) =>
+                    handleEditLatestUserMessage(messageId, content)
+                  }
+                  onRetryLatestAssistantMessage={() => void handleRetryLatestAssistantMessage()}
+                />
                 <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
                   {composer}
                 </div>
@@ -573,13 +699,10 @@ export function ChatApp() {
 
           {isArtifactPanelOpen && artifactFiles.length > 0 ? (
             <ArtifactWorkspacePanel
-              artifacts={artifactFiles}
               preview={artifactPreview}
               previewError={artifactPreviewError}
               isLoadingPreview={isLoadingArtifactPreview}
               width={artifactPanelWidth}
-              onClose={() => setIsArtifactPanelOpen(false)}
-              onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
               onWidthChange={setArtifactPanelWidth}
             />
           ) : null}
@@ -587,4 +710,30 @@ export function ChatApp() {
       </SidebarInset>
     </SidebarProvider>
   );
+}
+
+function extractFileIdsFromMessage(message: ChatUiMessage | undefined): string[] {
+  const files = message?.metadata?.files;
+  if (Array.isArray(files)) {
+    return files.filter((fileId): fileId is string => typeof fileId === "string");
+  }
+
+  return extractUploadedFilesFromMetadata(message?.metadata).flatMap((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "id" in item &&
+      typeof item.id === "string"
+    ) {
+      return [item.id];
+    }
+    return [];
+  });
+}
+
+function extractUploadedFilesFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): unknown[] {
+  const uploadedFiles = metadata?.uploaded_files;
+  return Array.isArray(uploadedFiles) ? uploadedFiles : [];
 }

@@ -3,7 +3,6 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
-  useCallback,
   useEffect,
   useRef,
   useState,
@@ -73,40 +72,13 @@ export function ChatComposer({
   const [input, setInput] = useState("");
   const [isExpanded, setIsExpanded] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const frameRef = useRef<number | null>(null);
   const canSend = Boolean(input.trim()) && !isUploading;
-
-  const syncTextareaSize = useCallback((nextValue: string) => {
-    if (frameRef.current !== null) {
-      window.cancelAnimationFrame(frameRef.current);
-    }
-    frameRef.current = window.requestAnimationFrame(() => {
-      frameRef.current = null;
-      const textarea = textareaRef.current;
-      if (!textarea) {
-        setIsExpanded(nextValue.includes("\n") || nextValue.length > 72);
-        return;
-      }
-
-      textarea.style.height = "auto";
-      const scrollHeight = textarea.scrollHeight;
-      textarea.style.height = `${Math.min(Math.max(32, scrollHeight), 176)}px`;
-      setIsExpanded(scrollHeight > 42 || nextValue.includes("\n"));
-    });
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (frameRef.current !== null) {
-        window.cancelAnimationFrame(frameRef.current);
-      }
-    };
-  }, []);
 
   function handleInputChange(event: ChangeEvent<HTMLTextAreaElement>) {
     const nextValue = event.target.value;
     setInput(nextValue);
-    syncTextareaSize(nextValue);
+    const nextExpanded = shouldUseExpandedComposer(nextValue);
+    setIsExpanded((current) => (current === nextExpanded ? current : nextExpanded));
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -127,11 +99,11 @@ export function ChatComposer({
     }
 
     setInput("");
-    syncTextareaSize("");
+    setIsExpanded(false);
     const accepted = await onSendMessage(text);
     if (!accepted) {
       setInput(text);
-      syncTextareaSize(text);
+      setIsExpanded(shouldUseExpandedComposer(text));
     }
   }
 
@@ -305,12 +277,17 @@ function ComposerTextarea({
       rows={1}
       placeholder="有问题，尽管问"
       onKeyDown={onKeyDown}
+      wrap="soft"
       className={cn(
-        "max-h-44 min-h-8 resize-none overflow-y-auto border-0 bg-transparent px-0 py-0 text-lg leading-7 shadow-none focus-visible:ring-0",
-        compact && "flex-1",
+        "max-h-[min(40dvh,12rem)] min-h-8 min-w-0 resize-none overflow-y-auto border-0 bg-transparent px-0 py-0 text-lg leading-7 shadow-none [overflow-wrap:anywhere] focus-visible:ring-0",
+        compact && "flex-1 break-words",
       )}
     />
   );
+}
+
+function shouldUseExpandedComposer(value: string) {
+  return value.includes("\n") || value.length > 48;
 }
 
 type ComposerToolsProps = {

@@ -30,6 +30,7 @@ export type ChatStreamRequest = {
   agent_name?: string;
   files?: string[];
   metadata?: Record<string, unknown>;
+  reuse_user_message_id?: string | null;
 };
 
 export type UploadedFileRecord = {
@@ -143,6 +144,20 @@ export async function getThread(
   return response.json() as Promise<ThreadRecord>;
 }
 
+export async function deleteThread(
+  threadId: string,
+  options: ChatRequestOptions = {},
+): Promise<void> {
+  const response = await fetch(`/api/chat/threads/${threadId}`, {
+    method: "DELETE",
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`delete thread failed: ${response.status}`);
+  }
+}
+
 export async function listThreadMessages(
   threadId: string,
   options: ChatRequestOptions = {},
@@ -214,6 +229,21 @@ export function resolveArtifactRawUrl(path: string): string {
     resolveChatStreamBaseUrl(),
     `/api/workspace/artifacts/raw?${params.toString()}`,
   );
+}
+
+export async function deleteArtifact(
+  path: string,
+  options: ChatRequestOptions = {},
+): Promise<void> {
+  const params = new URLSearchParams({ path });
+  const response = await fetch(`/api/workspace/artifacts?${params.toString()}`, {
+    method: "DELETE",
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`delete artifact failed: ${response.status}`);
+  }
 }
 
 export async function listSkills(

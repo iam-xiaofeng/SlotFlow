@@ -9,7 +9,6 @@ import {
   Download,
   FileText,
   Folder,
-  History,
   LibraryBig,
   MessageSquarePlus,
   MoreHorizontal,
@@ -57,6 +56,7 @@ import {
   type ThreadRecord,
   type WorkspaceEntryRecord,
 } from "@/lib/chat-stream";
+import { cn } from "@/lib/utils";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
@@ -75,6 +75,8 @@ type ThreadSidebarProps = {
   onDeleteMcpServer: (server: McpServerRecord) => void;
   onDeleteMemory: (memory: MemoryRecord) => void;
   onDeleteSkill: (skill: SkillRecord) => void;
+  onDeleteArtifact: (artifact: WorkspaceEntryRecord) => void;
+  onDeleteThread: (thread: ThreadRecord) => void;
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill: () => void;
   onNewThread: () => void;
@@ -104,6 +106,8 @@ export function ThreadSidebar({
   onDeleteMcpServer,
   onDeleteMemory,
   onDeleteSkill,
+  onDeleteArtifact,
+  onDeleteThread,
   onEditMemory,
   onInstallSkill,
   onNewThread,
@@ -184,6 +188,7 @@ export function ThreadSidebar({
                 <ContextPickerMenu
                   kind="artifacts"
                   artifacts={artifacts}
+                  onDeleteArtifact={onDeleteArtifact}
                   onOpenArtifacts={onOpenArtifacts}
                   onPreviewArtifact={onPreviewArtifact}
                 />
@@ -220,6 +225,7 @@ export function ThreadSidebar({
           query={query}
           threadListError={threadListError}
           onSelectThread={onSelectThread}
+          onDeleteThread={onDeleteThread}
         />
       </SidebarContent>
     </>
@@ -249,6 +255,14 @@ export function UserMenu() {
 }
 
 type ContextPickerKind = "skills" | "mcp" | "memory" | "artifacts";
+
+type ContextRecordAction = {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+  icon?: LucideIcon;
+  variant?: "default" | "destructive";
+};
 
 const contextPickerConfig = {
   skills: {
@@ -296,6 +310,7 @@ function ContextPickerMenu({
   onDeleteMcpServer,
   onDeleteMemory,
   onDeleteSkill,
+  onDeleteArtifact,
   onEditMemory,
   onInstallSkill,
   onOpenArtifacts,
@@ -314,6 +329,7 @@ function ContextPickerMenu({
   onDeleteMcpServer?: (server: McpServerRecord) => void;
   onDeleteMemory?: (memory: MemoryRecord) => void;
   onDeleteSkill?: (skill: SkillRecord) => void;
+  onDeleteArtifact?: (artifact: WorkspaceEntryRecord) => void;
   onEditMemory?: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill?: () => void;
   onOpenArtifacts?: () => void;
@@ -350,9 +366,8 @@ function ContextPickerMenu({
           skills.slice(0, 8).map((skill) => (
             <ManagedContextRow
               key={skill.name}
-              icon={Wrench}
               title={skill.name}
-              description={`${skill.enabled ? "已启用" : "已关闭"} · ${skill.source} · ${skill.description}`}
+              description={skill.description || skill.source}
               enabled={skill.enabled}
               protectedItem={skill.protected}
               onToggle={() => onToggleSkill?.(skill, !skill.enabled)}
@@ -363,9 +378,8 @@ function ContextPickerMenu({
           mcpServers.slice(0, 8).map((server) => (
             <ManagedContextRow
               key={server.name}
-              icon={Plug}
               title={server.name}
-              description={`${server.enabled ? "已启用" : "已关闭"} · ${server.transport ?? "mcp"} · ${server.source}`}
+              description={server.url || server.transport || server.source}
               enabled={server.enabled}
               protectedItem={server.protected}
               onToggle={() => onToggleMcpServer?.(server, !server.enabled)}
@@ -382,13 +396,11 @@ function ContextPickerMenu({
         ) : hasArtifacts ? (
           <ArtifactList
             artifacts={artifacts}
+            onDeleteArtifact={onDeleteArtifact}
             onPreviewArtifact={onPreviewArtifact}
           />
         ) : (
-          <DropdownMenuItem disabled className="gap-3">
-            <Icon className="size-5" />
-            {item.empty}
-          </DropdownMenuItem>
+          <DropdownMenuItem disabled>{item.empty}</DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
         {kind === "skills" ? (
@@ -429,40 +441,43 @@ function ContextPickerMenu({
 
 function ArtifactList({
   artifacts,
+  onDeleteArtifact,
   onPreviewArtifact,
 }: {
   artifacts: WorkspaceEntryRecord[];
+  onDeleteArtifact?: (artifact: WorkspaceEntryRecord) => void;
   onPreviewArtifact?: (artifact: WorkspaceEntryRecord) => void;
 }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex max-h-56 flex-col gap-1 overflow-y-auto">
         {artifacts.slice(0, 12).map((artifact) => {
+          const title = artifact.path.replace(/^artifacts\//, "");
+          const description = [
+            artifact.kind,
+            typeof artifact.size_bytes === "number" ? formatBytes(artifact.size_bytes) : null,
+          ].filter(Boolean).join(" · ");
           return (
-            <DropdownMenuItem
+            <ContextRecordRow
               key={artifact.path}
-              className="gap-3"
+              title={title}
+              description={description}
               disabled={artifact.kind !== "file"}
-              onClick={(event) => {
-                event.preventDefault();
-                if (artifact.kind === "file") {
-                  onPreviewArtifact?.(artifact);
-                }
-              }}
-            >
-              <FileText className="size-5" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate">
-                  {artifact.path.replace(/^artifacts\//, "")}
-                </span>
-                <span className="block truncate text-xs text-muted-foreground">
-                  {artifact.kind}
-                  {typeof artifact.size_bytes === "number"
-                    ? ` · ${formatBytes(artifact.size_bytes)}`
-                    : ""}
-                </span>
-              </span>
-            </DropdownMenuItem>
+              onSelect={() => onPreviewArtifact?.(artifact)}
+              actions={[
+                {
+                  label: "打开",
+                  onSelect: () => onPreviewArtifact?.(artifact),
+                  disabled: artifact.kind !== "file",
+                },
+                {
+                  label: "删除",
+                  variant: "destructive",
+                  onSelect: () => onDeleteArtifact?.(artifact),
+                  disabled: artifact.kind !== "file" || !onDeleteArtifact,
+                },
+              ]}
+            />
           );
         })}
       </div>
@@ -480,10 +495,100 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function ContextRecordRow({
+  actions,
+  description,
+  disabled = false,
+  enabled,
+  isActive = false,
+  title,
+  onSelect,
+}: {
+  actions: ContextRecordAction[];
+  description?: string;
+  disabled?: boolean;
+  enabled?: boolean;
+  isActive?: boolean;
+  title: string;
+  onSelect?: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "group/record flex min-w-0 items-center gap-2 rounded-md px-2 py-2 text-[0.95rem]",
+        enabled === false && "opacity-60",
+        enabled === true && "bg-muted/70",
+        isActive && "bg-accent text-accent-foreground",
+        disabled ? "opacity-50" : "hover:bg-accent hover:text-accent-foreground",
+      )}
+    >
+      <button
+        type="button"
+        disabled={disabled}
+        className="min-w-0 flex-1 text-left disabled:cursor-not-allowed"
+        onClick={onSelect}
+      >
+        <span className="block truncate font-medium" title={title}>
+          {title}
+        </span>
+        {description ? (
+          <span
+            className="block truncate text-xs text-muted-foreground group-hover/record:text-accent-foreground/70"
+            title={description}
+          >
+            {description}
+          </span>
+        ) : null}
+      </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 opacity-70 group-hover/record:opacity-100"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+            />
+          }
+        >
+          <MoreHorizontal className="size-4" />
+          <span className="sr-only">更多操作</span>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" side="right" sideOffset={6} className="w-32">
+          {actions.map((action) => {
+            const ActionIcon = action.icon;
+            return (
+              <DropdownMenuItem
+                key={action.label}
+                disabled={action.disabled}
+                variant={action.variant}
+                className="gap-2"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (!action.disabled) {
+                    action.onSelect();
+                  }
+                }}
+              >
+                {ActionIcon ? <ActionIcon className="size-4" /> : null}
+                {action.label}
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
 function ManagedContextRow({
   description,
   enabled,
-  icon: Icon,
   protectedItem,
   title,
   onDelete,
@@ -491,49 +596,31 @@ function ManagedContextRow({
 }: {
   description: string;
   enabled: boolean;
-  icon: LucideIcon;
   protectedItem: boolean;
   title: string;
   onDelete: () => void;
   onToggle: () => void;
 }) {
-  const ToggleIcon = enabled ? Power : PowerOff;
-
   return (
-    <div className="flex items-center gap-3 rounded-md px-2 py-2 text-[0.95rem] hover:bg-accent">
-      <Icon className="size-5 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{title}</span>
-        <span className="block truncate text-xs text-muted-foreground">{description}</span>
-      </span>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label={enabled ? "关闭" : "启用"}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onToggle();
-        }}
-      >
-        <ToggleIcon className="size-4" />
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label="删除"
-        disabled={protectedItem}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onDelete();
-        }}
-      >
-        <Trash2 className="size-4" />
-      </Button>
-    </div>
+    <ContextRecordRow
+      title={title}
+      description={description}
+      enabled={enabled}
+      actions={[
+        {
+          label: enabled ? "关闭" : "启用",
+          onSelect: onToggle,
+          icon: enabled ? PowerOff : Power,
+        },
+        {
+          label: "删除",
+          variant: "destructive",
+          onSelect: onDelete,
+          icon: Trash2,
+          disabled: protectedItem,
+        },
+      ]}
+    />
   );
 }
 
@@ -700,13 +787,10 @@ function MemorySection({
         memories.map((memory) => {
           const isEditing = editingId === memory.id;
           return (
-            <div
-              key={memory.id}
-              className="grid grid-cols-[minmax(0,1fr)_5.25rem] items-center gap-2 border-t px-3 py-2 first:border-t-0"
-            >
-              <div className="min-w-0">
-                {isEditing ? (
-                  <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-2">
+            <div key={memory.id} className="border-t px-2 py-1.5 first:border-t-0">
+              {isEditing ? (
+                <div className="grid grid-cols-[minmax(0,1fr)_5.25rem] items-center gap-2">
+                  <div className="grid min-w-0 grid-cols-[4.5rem_minmax(0,1fr)] gap-2">
                     <MemoryKindSelect value={editingKind} onChange={onEditingKindChange} />
                     <Input
                       value={editingContent}
@@ -714,18 +798,7 @@ function MemorySection({
                       className="h-8"
                     />
                   </div>
-                ) : (
-                  <>
-                    <div className="break-words text-sm font-medium">{memory.content}</div>
-                    <div className="truncate text-xs text-muted-foreground">
-                      {new Date(memory.updated_at || memory.created_at).toLocaleString()}
-                    </div>
-                  </>
-                )}
-              </div>
-              <div className="flex justify-end gap-1">
-                {isEditing ? (
-                  <>
+                  <div className="flex justify-end gap-1">
                     <Button
                       type="button"
                       variant="ghost"
@@ -744,30 +817,28 @@ function MemorySection({
                     >
                       <X className="size-4" />
                     </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="编辑记忆"
-                      onClick={() => onBeginEdit(memory)}
-                    >
-                      <Pencil className="size-4" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="删除记忆"
-                      onClick={() => onDeleteMemory?.(memory)}
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </>
-                )}
-              </div>
+                  </div>
+                </div>
+              ) : (
+                <ContextRecordRow
+                  title={memory.content}
+                  description={new Date(memory.updated_at || memory.created_at).toLocaleString()}
+                  actions={[
+                    {
+                      label: "编辑",
+                      icon: Pencil,
+                      onSelect: () => onBeginEdit(memory),
+                    },
+                    {
+                      label: "删除",
+                      icon: Trash2,
+                      variant: "destructive",
+                      onSelect: () => onDeleteMemory?.(memory),
+                      disabled: !onDeleteMemory,
+                    },
+                  ]}
+                />
+              )}
             </div>
           );
         })
@@ -832,6 +903,7 @@ type ThreadHistoryProps = {
   query: string;
   threadListError: string | null;
   onSelectThread: (thread: ThreadRecord) => void;
+  onDeleteThread: (thread: ThreadRecord) => void;
 };
 
 function ThreadHistory({
@@ -842,6 +914,7 @@ function ThreadHistory({
   query,
   threadListError,
   onSelectThread,
+  onDeleteThread,
 }: ThreadHistoryProps) {
   return (
     <SidebarGroup className="p-2 pt-1 group-data-[collapsible=icon]:hidden">
@@ -862,17 +935,22 @@ function ThreadHistory({
             ) : (
               filteredThreads.map((item) => (
                 <SidebarMenuItem key={item.id}>
-                  <SidebarMenuButton
-                    type="button"
-                    tooltip={item.title}
+                  <ContextRecordRow
+                    title={item.title}
+                    description={formatThreadTime(item.updated_at)}
                     isActive={item.id === activeThreadId}
                     disabled={disabled}
-                    onClick={() => onSelectThread(item)}
-                    className="h-9"
-                  >
-                    <History className="size-5" />
-                    <span className="truncate">{item.title}</span>
-                  </SidebarMenuButton>
+                    onSelect={() => onSelectThread(item)}
+                    actions={[
+                      {
+                        label: "删除",
+                        variant: "destructive",
+                        icon: Trash2,
+                        disabled,
+                        onSelect: () => onDeleteThread(item),
+                      },
+                    ]}
+                  />
                 </SidebarMenuItem>
               ))
             )}
@@ -883,12 +961,20 @@ function ThreadHistory({
   );
 }
 
+function formatThreadTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString();
+}
+
 function ThreadSkeletons() {
   return (
     <>
       {Array.from({ length: 5 }).map((_, index) => (
         <SidebarMenuItem key={index}>
-          <SidebarMenuSkeleton showIcon />
+          <SidebarMenuSkeleton />
         </SidebarMenuItem>
       ))}
     </>

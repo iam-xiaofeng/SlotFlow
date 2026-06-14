@@ -3,44 +3,91 @@
 import { type PointerEvent } from "react";
 import {
   ExternalLink,
-  FileText,
-  ImageIcon,
   LoaderCircle,
   PanelRightClose,
-  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   type WorkspaceEntryRecord,
   type WorkspaceReadRecord,
   resolveArtifactRawUrl,
 } from "@/lib/chat-stream";
-import { cn } from "@/lib/utils";
 
 type ArtifactWorkspacePanelProps = {
-  artifacts: WorkspaceEntryRecord[];
   preview: WorkspaceReadRecord | null;
   previewError: string | null;
   isLoadingPreview: boolean;
   width: number;
+  onWidthChange: (width: number) => void;
+};
+
+type ArtifactWorkspaceToolbarProps = {
+  artifacts: WorkspaceEntryRecord[];
+  activePath: string | null;
   onClose: () => void;
   onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
-  onWidthChange: (width: number) => void;
 };
 
 const minPanelWidth = 360;
 const maxPanelWidth = 960;
 
-export function ArtifactWorkspacePanel({
+export function ArtifactWorkspaceToolbar({
   artifacts,
+  activePath,
+  onClose,
+  onPreviewArtifact,
+}: ArtifactWorkspaceToolbarProps) {
+  const selectedPath = activePath ?? artifacts[0]?.path ?? "";
+
+  return (
+    <div className="flex h-14 min-w-0 items-center gap-2 border-l px-3">
+      <div className="shrink-0 text-sm font-semibold">产物</div>
+      <Select
+        value={selectedPath}
+        onValueChange={(path) => {
+          const artifact = artifacts.find((item) => item.path === path);
+          if (artifact) {
+            onPreviewArtifact(artifact);
+          }
+        }}
+      >
+        <SelectTrigger className="min-w-0 flex-1" size="sm">
+          <SelectValue placeholder={`${artifacts.length} 个文件`} />
+        </SelectTrigger>
+        <SelectContent align="start" className="max-w-96">
+          <SelectGroup>
+            {artifacts.map((artifact) => (
+              <SelectItem key={artifact.path} value={artifact.path}>
+                <span className="min-w-0 truncate">
+                  {artifact.path.replace(/^artifacts\//, "")}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <Button type="button" variant="ghost" size="icon-sm" title="关闭产物面板" onClick={onClose}>
+        <PanelRightClose className="size-4" />
+        <span className="sr-only">关闭产物面板</span>
+      </Button>
+    </div>
+  );
+}
+
+export function ArtifactWorkspacePanel({
   preview,
   previewError,
   isLoadingPreview,
   width,
-  onClose,
-  onPreviewArtifact,
   onWidthChange,
 }: ArtifactWorkspacePanelProps) {
   function beginResize(event: PointerEvent<HTMLDivElement>) {
@@ -75,25 +122,7 @@ export function ArtifactWorkspacePanel({
         className="absolute inset-y-0 left-0 w-2 -translate-x-1 cursor-col-resize"
         onPointerDown={beginResize}
       />
-      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b px-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">产物</div>
-          <div className="truncate text-xs text-muted-foreground">
-            {preview ? preview.path.replace(/^artifacts\//, "") : `${artifacts.length} 个文件`}
-          </div>
-        </div>
-        <Button type="button" variant="ghost" size="icon-sm" title="关闭产物面板" onClick={onClose}>
-          <PanelRightClose className="size-4" />
-          <span className="sr-only">关闭产物面板</span>
-        </Button>
-      </header>
-
-      <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)]">
-        <ArtifactStrip
-          artifacts={artifacts}
-          activePath={preview?.path ?? null}
-          onPreviewArtifact={onPreviewArtifact}
-        />
+      <div className="grid min-h-0 flex-1">
         <ArtifactStage
           preview={preview}
           previewError={previewError}
@@ -101,61 +130,6 @@ export function ArtifactWorkspacePanel({
         />
       </div>
     </aside>
-  );
-}
-
-function ArtifactStrip({
-  artifacts,
-  activePath,
-  onPreviewArtifact,
-}: {
-  artifacts: WorkspaceEntryRecord[];
-  activePath: string | null;
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
-}) {
-  if (artifacts.length === 0) {
-    return (
-      <div className="border-b px-3 py-3 text-sm text-muted-foreground">
-        暂无产物文件
-      </div>
-    );
-  }
-
-  return (
-    <div className="border-b p-2">
-      <ScrollArea className="max-h-36">
-        <div className="flex flex-col gap-1 pr-2">
-          {artifacts.map((artifact) => {
-            const isActive = artifact.path === activePath;
-            return (
-              <button
-                key={artifact.path}
-                type="button"
-                disabled={artifact.kind !== "file"}
-                className={cn(
-                  "flex min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50",
-                  isActive && "bg-muted",
-                )}
-                onClick={() => onPreviewArtifact(artifact)}
-              >
-                <ArtifactIcon path={artifact.path} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">
-                    {artifact.path.replace(/^artifacts\//, "")}
-                  </span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {artifact.kind}
-                    {typeof artifact.size_bytes === "number"
-                      ? ` · ${formatBytes(artifact.size_bytes)}`
-                      : ""}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </ScrollArea>
-    </div>
   );
 }
 
@@ -250,13 +224,6 @@ function ArtifactStage({
       </pre>
     </div>
   );
-}
-
-function ArtifactIcon({ path }: { path: string }) {
-  if (/\.(png|jpe?g|gif|webp)$/i.test(path)) {
-    return <ImageIcon className="size-5 shrink-0 text-muted-foreground" />;
-  }
-  return <FileText className="size-5 shrink-0 text-muted-foreground" />;
 }
 
 function formatBytes(value: number): string {

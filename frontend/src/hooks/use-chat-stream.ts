@@ -183,8 +183,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         ...defaultMetadata,
         ...(overrides.metadata ?? {}),
       };
+      const reusedUserMessageId = overrides.reuse_user_message_id ?? null;
       const userMessage: ChatUiMessage = {
-        id: makeId("user"),
+        id: reusedUserMessageId ?? makeId("user"),
         role: "user",
         content: text,
         status: "done",
@@ -213,7 +214,32 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           setThread(activeThread);
         }
 
-        setMessages((current) => [...current, userMessage, assistantMessage]);
+        setMessages((current) => {
+          if (!reusedUserMessageId) {
+            return [...current, userMessage, assistantMessage];
+          }
+
+          const targetIndex = current.findIndex(
+            (message) => message.id === reusedUserMessageId && message.role === "user",
+          );
+          if (targetIndex < 0) {
+            return [...current, userMessage, assistantMessage];
+          }
+
+          const targetMessage = current[targetIndex];
+          return [
+            ...current.slice(0, targetIndex),
+            {
+              ...targetMessage,
+              content: text,
+              metadata: {
+                ...targetMessage.metadata,
+                request_metadata: messageMetadata,
+              },
+            },
+            assistantMessage,
+          ];
+        });
         accepted = true;
 
         let failed = false;
@@ -224,6 +250,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           agent_name: overrides.agent_name ?? defaultAgentName,
           files: overrides.files ?? [],
           metadata: messageMetadata,
+          reuse_user_message_id: reusedUserMessageId,
         };
 
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
