@@ -385,6 +385,8 @@ def strip_subject_prefix(content: str) -> str:
     cleaned = content.strip(" ：:")
     replacements = [
         (r"^用户(?:的)?", ""),
+        (r"^(?:偏好|喜好)(?:是|为)?", ""),
+        (r"^(?:资料|事实|近期关注|记录)", ""),
         (r"^我希望", ""),
         (r"^我更喜欢", "喜欢"),
         (r"^我喜欢", "喜欢"),

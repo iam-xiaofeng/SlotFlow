@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from dataclasses import replace
+import json
 import re
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from app.chat.models import RunContext
@@ -105,6 +106,12 @@ class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
     ) -> dict[str, Any] | None:
         context = runtime.context
         if context is None:
+            return None
+
+        if memory_save_tool_used_for_run(
+            list(state.get("messages") or []),
+            run_id=context.run_id,
+        ):
             return None
 
         candidate = build_turn_memory_candidate(list(state.get("messages") or []))
@@ -282,6 +289,49 @@ def message_role(message: Any) -> str | None:
         return str(role) if role is not None else None
     role = getattr(message, "role", None) or getattr(message, "type", None)
     return str(role) if role is not None else None
+
+
+def memory_save_tool_used_for_run(messages: list[Any], *, run_id: str | None) -> bool:
+    for message in messages:
+        name = tool_message_name(message)
+        if name != "memory_save":
+            continue
+
+        if run_id is None:
+            return True
+
+        payload = parse_json_object(message_text(message))
+        if payload is None:
+            return True
+
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            payload_run_id = metadata.get("run_id")
+            if payload_run_id is None or payload_run_id == run_id:
+                return True
+    return False
+
+
+def tool_message_name(message: Any) -> str | None:
+    if isinstance(message, ToolMessage):
+        return message.name
+    if isinstance(message, dict):
+        name = message.get("name")
+        role = message.get("role") or message.get("type")
+        if role == "tool" and name is not None:
+            return str(name)
+    if message_role(message) == "tool":
+        name = getattr(message, "name", None)
+        return str(name) if name is not None else None
+    return None
+
+
+def parse_json_object(value: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def message_text(message: Any) -> str:

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from app.chat.models import ChatStreamRequest
@@ -90,6 +90,39 @@ def test_memory_middleware_saves_latest_turn(tmp_path: Path) -> None:
     assert saved["kind"] == "preference"
     assert saved["content"] == "用户的偏好是：喜欢中文。"
     assert store.list_memories(thread_id="thread_memory")[0].id == saved["id"]
+
+
+def test_memory_middleware_skips_auto_save_after_memory_save_tool(tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    context = _context()
+    tools = {
+        item.name: item
+        for item in build_memory_tools(memory_store=store, run_context=context)
+    }
+    tool_result = tools["memory_save"].invoke(
+        {"content": "我喜欢中文", "kind": "preference"}
+    )
+    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
+
+    update = middleware.after_agent(
+        {
+            "messages": [
+                HumanMessage(content="记住我喜欢中文"),
+                ToolMessage(
+                    content=tool_result,
+                    name="memory_save",
+                    tool_call_id="call_memory_save",
+                ),
+                AIMessage(content="已记住。"),
+            ]
+        },
+        Runtime(context=context),
+    )
+
+    assert update is None
+    records = store.list_memories(thread_id="thread_memory")
+    assert len(records) == 1
+    assert records[0].content == "用户的偏好是：喜欢中文。"
 
 
 def test_memory_middleware_injects_relevant_memories_into_model_request(tmp_path: Path) -> None:
