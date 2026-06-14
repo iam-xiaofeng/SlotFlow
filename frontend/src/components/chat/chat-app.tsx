@@ -2,8 +2,6 @@
 
 import {
   type ChangeEvent,
-  type FormEvent,
-  type KeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -43,10 +41,11 @@ import {
   setMcpServerEnabled,
   setSkillEnabled,
   updateMemory,
-  uploadSkillFolder,
   uploadFile,
+  uploadSkillFolder,
 } from "@/lib/chat-stream";
 
+import { ArtifactWorkspacePanel } from "./artifact-panel";
 import { ChatComposer } from "./chat-composer";
 import { makeThreadTitle } from "./chat-format";
 import { ThreadSidebar, UserMenu } from "./chat-sidebar";
@@ -56,7 +55,6 @@ const defaultModelName = "deepseek-v4-flash";
 const defaultMode: ChatMode = "pro";
 
 export function ChatApp() {
-  const [input, setInput] = useState("");
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [threadQuery, setThreadQuery] = useState("");
   const [threadListError, setThreadListError] = useState<string | null>(null);
@@ -69,11 +67,11 @@ export function ChatApp() {
   const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
   const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
   const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
+  const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
+  const [artifactPanelWidth, setArtifactPanelWidth] = useState(560);
   const [isUploading, setIsUploading] = useState(false);
-  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const skillFolderInputRef = useRef<HTMLInputElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const {
@@ -112,9 +110,12 @@ export function ChatApp() {
 
   const refreshArtifacts = useCallback(async () => {
     try {
-      setArtifacts(await listArtifacts());
+      const nextArtifacts = await listArtifacts();
+      setArtifacts(nextArtifacts);
+      return nextArtifacts;
     } catch {
       setArtifacts([]);
+      return [];
     }
   }, []);
 
@@ -176,23 +177,6 @@ export function ChatApp() {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
-  const syncComposerSize = useCallback((nextValue: string) => {
-    const textarea = textareaRef.current;
-    if (!textarea) {
-      setIsComposerExpanded(nextValue.includes("\n") || nextValue.length > 72);
-      return;
-    }
-
-    textarea.style.height = "auto";
-    const nextHeight = Math.min(textarea.scrollHeight, 176);
-    textarea.style.height = `${Math.max(28, nextHeight)}px`;
-    setIsComposerExpanded(textarea.scrollHeight > 38 || nextValue.includes("\n"));
-  }, []);
-
-  useEffect(() => {
-    syncComposerSize(input);
-  }, [input, syncComposerSize]);
-
   const filteredThreads = useMemo(() => {
     const query = threadQuery.trim().toLowerCase();
     if (!query) {
@@ -201,22 +185,10 @@ export function ChatApp() {
     return threads.filter((item) => item.title.toLowerCase().includes(query));
   }, [threadQuery, threads]);
 
-  function handleInputChange(event: ChangeEvent<HTMLTextAreaElement>) {
-    const nextValue = event.target.value;
-    setInput(nextValue);
-    syncComposerSize(nextValue);
-  }
-
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.nativeEvent.isComposing) {
-      return;
-    }
-
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void submitMessage();
-    }
-  }
+  const artifactFiles = useMemo(
+    () => artifacts.filter((artifact) => artifact.kind === "file"),
+    [artifacts],
+  );
 
   async function handleSelectThread(nextThread: ThreadRecord) {
     if (isStreaming || nextThread.id === thread?.id) {
@@ -232,19 +204,18 @@ export function ChatApp() {
 
   function handleNewThread() {
     if (resetThread()) {
-      setInput("");
       setAttachments([]);
     }
   }
 
-  async function submitMessage() {
-    const text = input.trim();
+  async function submitMessage(rawText: string): Promise<boolean> {
+    const text = rawText.trim();
     if (!text || isStreaming || isUploading) {
-      return;
+      return false;
     }
 
     const currentAttachments = attachments;
-    setInput("");
+    const previousArtifactPaths = new Set(artifactFiles.map((artifact) => artifact.path));
     setAttachments([]);
 
     const result = await sendMessage(text, {
@@ -267,22 +238,23 @@ export function ChatApp() {
     });
 
     if (result.accepted) {
-      await Promise.all([
+      const [, nextArtifacts] = await Promise.all([
         refreshThreads(),
         refreshArtifacts(),
         refreshSkills(),
         refreshMcpServers(),
         refreshMemories(),
       ]);
+      const newArtifact = nextArtifacts.find(
+        (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
+      );
+      if (newArtifact) {
+        void handlePreviewArtifact(newArtifact);
+      }
     } else {
-      setInput(text);
       setAttachments(currentAttachments);
     }
-  }
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await submitMessage();
+    return result.accepted;
   }
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -486,6 +458,7 @@ export function ChatApp() {
       return;
     }
 
+    setIsArtifactPanelOpen(true);
     setIsLoadingArtifactPreview(true);
     setArtifactPreviewError(null);
     try {
@@ -500,6 +473,19 @@ export function ChatApp() {
     }
   }
 
+  function handleOpenArtifactPanel() {
+    const firstFile = artifactFiles[0];
+    if (!firstFile) {
+      toast.info("暂无产物");
+      return;
+    }
+
+    setIsArtifactPanelOpen(true);
+    if (!artifactPreview) {
+      void handlePreviewArtifact(firstFile);
+    }
+  }
+
   function handleRemoveAttachment(fileId: string) {
     setAttachments((current) => current.filter((item) => item.id !== fileId));
   }
@@ -507,23 +493,16 @@ export function ChatApp() {
   const composer = (
     <ChatComposer
       attachments={attachments}
-      canSend={Boolean(input.trim()) && !isUploading}
       error={error}
       fileInputRef={fileInputRef}
-      input={input}
-      isExpanded={isComposerExpanded}
       isStreaming={isStreaming}
       isUploading={isUploading}
-      textareaRef={textareaRef}
       onAttachFiles={() => fileInputRef.current?.click()}
       onCancel={cancelStream}
       onClearError={clearError}
       onFileChange={handleFileChange}
-      onInputChange={handleInputChange}
-      onKeyDown={handleComposerKeyDown}
       onRemoveAttachment={handleRemoveAttachment}
-      onSend={() => void submitMessage()}
-      onSubmit={handleSubmit}
+      onSendMessage={submitMessage}
     />
   );
 
@@ -543,12 +522,9 @@ export function ChatApp() {
           disabled={isStreaming}
           filteredThreads={filteredThreads}
           artifacts={artifacts}
-          artifactPreview={artifactPreview}
-          artifactPreviewError={artifactPreviewError}
           skills={skills}
           mcpServers={mcpServers}
           memories={memories}
-          isLoadingArtifactPreview={isLoadingArtifactPreview}
           isLoading={isLoadingThreads}
           query={threadQuery}
           threadListError={threadListError}
@@ -561,6 +537,7 @@ export function ChatApp() {
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
           onInstallSkill={() => void handleInstallSkillFromRegistry()}
           onNewThread={handleNewThread}
+          onOpenArtifacts={handleOpenArtifactPanel}
           onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
           onQueryChange={setThreadQuery}
           onToggleMcpServer={(server, enabled) => void handleToggleMcpServer(server, enabled)}
@@ -575,21 +552,38 @@ export function ChatApp() {
           <UserMenu />
         </header>
 
-        {messages.length === 0 ? (
-          <section className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 pb-16 sm:px-6">
-            <div className="w-full max-w-3xl -translate-y-10">
-              <EmptyState />
-              {composer}
-            </div>
+        <div className="flex min-h-0 flex-1">
+          <section className="flex min-w-0 flex-1 flex-col">
+            {messages.length === 0 ? (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 pb-16 sm:px-6">
+                <div className="w-full max-w-3xl -translate-y-10">
+                  <EmptyState />
+                  {composer}
+                </div>
+              </div>
+            ) : (
+              <>
+                <MessageList messages={messages} messagesEndRef={messagesEndRef} />
+                <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
+                  {composer}
+                </div>
+              </>
+            )}
           </section>
-        ) : (
-          <>
-            <MessageList messages={messages} messagesEndRef={messagesEndRef} />
-            <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
-              {composer}
-            </div>
-          </>
-        )}
+
+          {isArtifactPanelOpen && artifactFiles.length > 0 ? (
+            <ArtifactWorkspacePanel
+              artifacts={artifactFiles}
+              preview={artifactPreview}
+              previewError={artifactPreviewError}
+              isLoadingPreview={isLoadingArtifactPreview}
+              width={artifactPanelWidth}
+              onClose={() => setIsArtifactPanelOpen(false)}
+              onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
+              onWidthChange={setArtifactPanelWidth}
+            />
+          ) : null}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

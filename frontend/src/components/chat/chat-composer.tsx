@@ -3,6 +3,10 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
 } from "react";
 import {
   ArrowUp,
@@ -41,47 +45,104 @@ import { displayFileName, formatFileSize } from "./chat-format";
 
 type ChatComposerProps = {
   attachments: UploadedFileRecord[];
-  canSend: boolean;
   error: string | null;
   fileInputRef: RefObject<HTMLInputElement | null>;
-  input: string;
-  isExpanded: boolean;
   isStreaming: boolean;
   isUploading: boolean;
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
   onAttachFiles: () => void;
   onCancel: () => void;
   onClearError: () => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void | Promise<void>;
-  onInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
-  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onRemoveAttachment: (fileId: string) => void;
-  onSend: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  onSendMessage: (message: string) => Promise<boolean>;
 };
 
 export function ChatComposer({
   attachments,
-  canSend,
   error,
   fileInputRef,
-  input,
-  isExpanded,
   isStreaming,
   isUploading,
-  textareaRef,
   onAttachFiles,
   onCancel,
   onClearError,
   onFileChange,
-  onInputChange,
-  onKeyDown,
   onRemoveAttachment,
-  onSend,
-  onSubmit,
+  onSendMessage,
 }: ChatComposerProps) {
+  const [input, setInput] = useState("");
+  const [isExpanded, setIsExpanded] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const canSend = Boolean(input.trim()) && !isUploading;
+
+  const syncTextareaSize = useCallback((nextValue: string) => {
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+    }
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      const textarea = textareaRef.current;
+      if (!textarea) {
+        setIsExpanded(nextValue.includes("\n") || nextValue.length > 72);
+        return;
+      }
+
+      textarea.style.height = "auto";
+      const scrollHeight = textarea.scrollHeight;
+      textarea.style.height = `${Math.min(Math.max(32, scrollHeight), 176)}px`;
+      setIsExpanded(scrollHeight > 42 || nextValue.includes("\n"));
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+      }
+    };
+  }, []);
+
+  function handleInputChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    const nextValue = event.target.value;
+    setInput(nextValue);
+    syncTextareaSize(nextValue);
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitCurrentInput();
+    }
+  }
+
+  async function submitCurrentInput() {
+    const text = input.trim();
+    if (!text || isStreaming || isUploading) {
+      return;
+    }
+
+    setInput("");
+    syncTextareaSize("");
+    const accepted = await onSendMessage(text);
+    if (!accepted) {
+      setInput(text);
+      syncTextareaSize(text);
+    }
+  }
+
   return (
-    <form onSubmit={(event) => void onSubmit(event)} className="w-full">
+    <form
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        void submitCurrentInput();
+      }}
+      className="w-full"
+    >
       <div className="mx-auto w-full max-w-3xl">
         {error ? (
           <ComposerError message={error} onDismiss={onClearError} />
@@ -114,8 +175,8 @@ export function ChatComposer({
                 input={input}
                 isStreaming={isStreaming}
                 textareaRef={textareaRef}
-                onInputChange={onInputChange}
-                onKeyDown={onKeyDown}
+                onInputChange={handleInputChange}
+                onKeyDown={handleKeyDown}
               />
               <div className="mt-3 flex items-center justify-between gap-2">
                 <ComposerTools
@@ -127,7 +188,7 @@ export function ChatComposer({
                   canSend={canSend}
                   isStreaming={isStreaming}
                   onCancel={onCancel}
-                  onSend={onSend}
+                  onSend={() => void submitCurrentInput()}
                 />
               </div>
             </>
@@ -144,14 +205,14 @@ export function ChatComposer({
                 input={input}
                 isStreaming={isStreaming}
                 textareaRef={textareaRef}
-                onInputChange={onInputChange}
-                onKeyDown={onKeyDown}
+                onInputChange={handleInputChange}
+                onKeyDown={handleKeyDown}
               />
               <ComposerActions
                 canSend={canSend}
                 isStreaming={isStreaming}
                 onCancel={onCancel}
-                onSend={onSend}
+                onSend={() => void submitCurrentInput()}
               />
             </>
           )}

@@ -56,17 +56,13 @@ import {
   type SkillRecord,
   type ThreadRecord,
   type WorkspaceEntryRecord,
-  type WorkspaceReadRecord,
 } from "@/lib/chat-stream";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
-  artifactPreview: WorkspaceReadRecord | null;
-  artifactPreviewError: string | null;
   artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
   filteredThreads: ThreadRecord[];
-  isLoadingArtifactPreview: boolean;
   isLoading: boolean;
   memories: MemoryRecord[];
   mcpServers: McpServerRecord[];
@@ -82,6 +78,7 @@ type ThreadSidebarProps = {
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill: () => void;
   onNewThread: () => void;
+  onOpenArtifacts: () => void;
   onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onQueryChange: (query: string) => void;
   onSelectThread: (thread: ThreadRecord) => void;
@@ -92,12 +89,9 @@ type ThreadSidebarProps = {
 
 export function ThreadSidebar({
   activeThreadId,
-  artifactPreview,
-  artifactPreviewError,
   artifacts,
   disabled,
   filteredThreads,
-  isLoadingArtifactPreview,
   isLoading,
   memories,
   mcpServers,
@@ -113,6 +107,7 @@ export function ThreadSidebar({
   onEditMemory,
   onInstallSkill,
   onNewThread,
+  onOpenArtifacts,
   onPreviewArtifact,
   onQueryChange,
   onSelectThread,
@@ -188,10 +183,8 @@ export function ThreadSidebar({
               <SidebarMenuItem>
                 <ContextPickerMenu
                   kind="artifacts"
-                  artifactPreview={artifactPreview}
-                  artifactPreviewError={artifactPreviewError}
                   artifacts={artifacts}
-                  isLoadingArtifactPreview={isLoadingArtifactPreview}
+                  onOpenArtifacts={onOpenArtifacts}
                   onPreviewArtifact={onPreviewArtifact}
                 />
               </SidebarMenuItem>
@@ -294,10 +287,7 @@ const contextPickerConfig = {
 
 function ContextPickerMenu({
   kind,
-  artifactPreview,
-  artifactPreviewError,
   artifacts = [],
-  isLoadingArtifactPreview = false,
   memories = [],
   skills = [],
   mcpServers = [],
@@ -308,16 +298,14 @@ function ContextPickerMenu({
   onDeleteSkill,
   onEditMemory,
   onInstallSkill,
+  onOpenArtifacts,
   onPreviewArtifact,
   onToggleMcpServer,
   onToggleSkill,
   onUploadSkill,
 }: {
   kind: ContextPickerKind;
-  artifactPreview?: WorkspaceReadRecord | null;
-  artifactPreviewError?: string | null;
   artifacts?: WorkspaceEntryRecord[];
-  isLoadingArtifactPreview?: boolean;
   memories?: MemoryRecord[];
   skills?: SkillRecord[];
   mcpServers?: McpServerRecord[];
@@ -328,6 +316,7 @@ function ContextPickerMenu({
   onDeleteSkill?: (skill: SkillRecord) => void;
   onEditMemory?: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill?: () => void;
+  onOpenArtifacts?: () => void;
   onPreviewArtifact?: (artifact: WorkspaceEntryRecord) => void;
   onToggleMcpServer?: (server: McpServerRecord, enabled: boolean) => void;
   onToggleSkill?: (skill: SkillRecord, enabled: boolean) => void;
@@ -393,9 +382,6 @@ function ContextPickerMenu({
         ) : hasArtifacts ? (
           <ArtifactList
             artifacts={artifacts}
-            preview={artifactPreview ?? null}
-            previewError={artifactPreviewError ?? null}
-            isLoadingPreview={isLoadingArtifactPreview}
             onPreviewArtifact={onPreviewArtifact}
           />
         ) : (
@@ -423,6 +409,11 @@ function ContextPickerMenu({
           </DropdownMenuItem>
         ) : kind === "memory" ? (
           null
+        ) : kind === "artifacts" ? (
+          <DropdownMenuItem onClick={onOpenArtifacts} className="gap-3">
+            <FileText className="size-5" />
+            打开产物面板
+          </DropdownMenuItem>
         ) : (
           item.actions.map((action) => (
             <DropdownMenuItem key={action} disabled className="gap-3">
@@ -438,27 +429,19 @@ function ContextPickerMenu({
 
 function ArtifactList({
   artifacts,
-  preview,
-  previewError,
-  isLoadingPreview,
   onPreviewArtifact,
 }: {
   artifacts: WorkspaceEntryRecord[];
-  preview: WorkspaceReadRecord | null;
-  previewError: string | null;
-  isLoadingPreview: boolean;
   onPreviewArtifact?: (artifact: WorkspaceEntryRecord) => void;
 }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex max-h-56 flex-col gap-1 overflow-y-auto">
         {artifacts.slice(0, 12).map((artifact) => {
-          const active = preview?.path === artifact.path;
           return (
             <DropdownMenuItem
               key={artifact.path}
               className="gap-3"
-              data-active={active || undefined}
               disabled={artifact.kind !== "file"}
               onClick={(event) => {
                 event.preventDefault();
@@ -483,65 +466,6 @@ function ArtifactList({
           );
         })}
       </div>
-      <ArtifactPreview
-        preview={preview}
-        previewError={previewError}
-        isLoadingPreview={isLoadingPreview}
-      />
-    </div>
-  );
-}
-
-function ArtifactPreview({
-  preview,
-  previewError,
-  isLoadingPreview,
-}: {
-  preview: WorkspaceReadRecord | null;
-  previewError: string | null;
-  isLoadingPreview: boolean;
-}) {
-  if (isLoadingPreview) {
-    return (
-      <div className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
-        正在读取产物...
-      </div>
-    );
-  }
-
-  if (previewError) {
-    return (
-      <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
-        {previewError}
-      </div>
-    );
-  }
-
-  if (!preview) {
-    return (
-      <div className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
-        点击一个产物查看内容
-      </div>
-    );
-  }
-
-  const body = preview.content?.trim()
-    ? preview.content
-    : preview.warning || JSON.stringify(preview.metadata, null, 2);
-
-  return (
-    <div className="rounded-md border bg-muted/30">
-      <div className="border-b px-3 py-2">
-        <div className="truncate text-sm font-medium">
-          {preview.path.replace(/^artifacts\//, "")}
-        </div>
-        <div className="truncate text-xs text-muted-foreground">
-          {preview.kind} · {preview.media_type} · {formatBytes(preview.size_bytes)}
-        </div>
-      </div>
-      <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 text-xs leading-5">
-        {body}
-      </pre>
     </div>
   );
 }
@@ -623,6 +547,16 @@ const memoryKindLabels: Record<MemoryKind, string> = {
   fact: "事实",
 };
 
+const memoryKindSections: MemoryKind[] = ["profile", "preference", "topic", "fact", "manual"];
+
+const memoryKindSectionTitles: Record<MemoryKind, string> = {
+  manual: "手动记忆",
+  preference: "偏好",
+  profile: "用户资料",
+  topic: "近期话题",
+  fact: "事实",
+};
+
 function MemoryTable({
   memories,
   onAddMemory,
@@ -639,7 +573,16 @@ function MemoryTable({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [editingKind, setEditingKind] = useState<MemoryKind>("manual");
-  const visibleMemories = useMemo(() => memories.slice(0, 12), [memories]);
+  const groupedMemories = useMemo(
+    () =>
+      Object.fromEntries(
+        memoryKindSections.map((kind) => [
+          kind,
+          memories.filter((memory) => memory.kind === kind).slice(0, 8),
+        ]),
+      ) as Record<MemoryKind, MemoryRecord[]>,
+    [memories],
+  );
 
   function beginEdit(memory: MemoryRecord) {
     setEditingId(memory.id);
@@ -674,94 +617,23 @@ function MemoryTable({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="grid grid-cols-[4.5rem_minmax(0,1fr)_5.25rem] items-center gap-2 px-2 py-1 text-xs font-medium text-muted-foreground">
-        <span>类别</span>
-        <span>内容</span>
-        <span className="text-right">操作</span>
-      </div>
-      <div className="max-h-80 overflow-y-auto rounded-md border">
-        {visibleMemories.length === 0 ? (
-          <div className="px-3 py-4 text-sm text-muted-foreground">暂无长期记忆</div>
-        ) : (
-          visibleMemories.map((memory) => {
-            const isEditing = editingId === memory.id;
-            return (
-              <div
-                key={memory.id}
-                className="grid grid-cols-[4.5rem_minmax(0,1fr)_5.25rem] items-center gap-2 border-b px-2 py-2 last:border-b-0"
-              >
-                {isEditing ? (
-                  <MemoryKindSelect value={editingKind} onChange={setEditingKind} />
-                ) : (
-                  <span className="rounded-md bg-muted px-2 py-1 text-center text-xs">
-                    {memoryKindLabels[memory.kind]}
-                  </span>
-                )}
-                <div className="min-w-0">
-                  {isEditing ? (
-                    <Input
-                      value={editingContent}
-                      onChange={(event) => setEditingContent(event.target.value)}
-                      className="h-8"
-                    />
-                  ) : (
-                    <>
-                      <div className="truncate text-sm font-medium">{memory.content}</div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {new Date(memory.updated_at || memory.created_at).toLocaleString()}
-                      </div>
-                    </>
-                  )}
-                </div>
-                <div className="flex justify-end gap-1">
-                  {isEditing ? (
-                    <>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="保存记忆"
-                        onClick={() => submitEdit(memory)}
-                      >
-                        <Check className="size-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="取消编辑"
-                        onClick={resetEdit}
-                      >
-                        <X className="size-4" />
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="编辑记忆"
-                        onClick={() => beginEdit(memory)}
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="删除记忆"
-                        onClick={() => onDeleteMemory?.(memory)}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })
-        )}
+      <div className="max-h-96 overflow-y-auto rounded-md border">
+        {memoryKindSections.map((kind) => (
+          <MemorySection
+            key={kind}
+            kind={kind}
+            memories={groupedMemories[kind]}
+            editingId={editingId}
+            editingContent={editingContent}
+            editingKind={editingKind}
+            onBeginEdit={beginEdit}
+            onCancelEdit={resetEdit}
+            onDeleteMemory={onDeleteMemory}
+            onEditingContentChange={setEditingContent}
+            onEditingKindChange={setEditingKind}
+            onSubmitEdit={submitEdit}
+          />
+        ))}
       </div>
       <div className="grid grid-cols-[4.5rem_minmax(0,1fr)_2.25rem] items-center gap-2">
         <MemoryKindSelect value={draftKind} onChange={setDraftKind} />
@@ -788,6 +660,119 @@ function MemoryTable({
         </Button>
       </div>
     </div>
+  );
+}
+
+function MemorySection({
+  kind,
+  memories,
+  editingId,
+  editingContent,
+  editingKind,
+  onBeginEdit,
+  onCancelEdit,
+  onDeleteMemory,
+  onEditingContentChange,
+  onEditingKindChange,
+  onSubmitEdit,
+}: {
+  kind: MemoryKind;
+  memories: MemoryRecord[];
+  editingId: string | null;
+  editingContent: string;
+  editingKind: MemoryKind;
+  onBeginEdit: (memory: MemoryRecord) => void;
+  onCancelEdit: () => void;
+  onDeleteMemory?: (memory: MemoryRecord) => void;
+  onEditingContentChange: (content: string) => void;
+  onEditingKindChange: (kind: MemoryKind) => void;
+  onSubmitEdit: (memory: MemoryRecord) => void;
+}) {
+  return (
+    <section className="border-b last:border-b-0">
+      <div className="flex items-center justify-between bg-muted/50 px-3 py-2">
+        <span className="text-xs font-medium">{memoryKindSectionTitles[kind]}</span>
+        <span className="text-xs text-muted-foreground">{memories.length}</span>
+      </div>
+      {memories.length === 0 ? (
+        <div className="px-3 py-3 text-xs text-muted-foreground">暂无{memoryKindLabels[kind]}记忆</div>
+      ) : (
+        memories.map((memory) => {
+          const isEditing = editingId === memory.id;
+          return (
+            <div
+              key={memory.id}
+              className="grid grid-cols-[minmax(0,1fr)_5.25rem] items-center gap-2 border-t px-3 py-2 first:border-t-0"
+            >
+              <div className="min-w-0">
+                {isEditing ? (
+                  <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-2">
+                    <MemoryKindSelect value={editingKind} onChange={onEditingKindChange} />
+                    <Input
+                      value={editingContent}
+                      onChange={(event) => onEditingContentChange(event.target.value)}
+                      className="h-8"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="break-words text-sm font-medium">{memory.content}</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {new Date(memory.updated_at || memory.created_at).toLocaleString()}
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="flex justify-end gap-1">
+                {isEditing ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="保存记忆"
+                      onClick={() => onSubmitEdit(memory)}
+                    >
+                      <Check className="size-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="取消编辑"
+                      onClick={onCancelEdit}
+                    >
+                      <X className="size-4" />
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="编辑记忆"
+                      onClick={() => onBeginEdit(memory)}
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="删除记忆"
+                      onClick={() => onDeleteMemory?.(memory)}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </section>
   );
 }
 
