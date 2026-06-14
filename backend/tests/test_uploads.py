@@ -212,3 +212,22 @@ def test_raw_artifact_serves_html_inline(tmp_path: Path) -> None:
     assert response.headers["content-type"].startswith("text/html")
     assert response.headers["content-disposition"] == "inline"
     assert response.text == "<button>zoom</button>"
+
+
+def test_delete_artifact_removes_file(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/chart.html")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("<button>zoom</button>", encoding="utf-8")
+
+    response = client.delete(
+        "/api/workspace/artifacts",
+        params={"path": "artifacts/chart.html"},
+    )
+
+    assert response.status_code == 204
+    assert not artifact_path.exists()
+    assert client.get(
+        "/api/workspace/artifacts/raw",
+        params={"path": "artifacts/chart.html"},
+    ).status_code == 404
