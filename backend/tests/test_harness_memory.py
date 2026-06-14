@@ -50,6 +50,27 @@ def test_memory_store_adds_lists_searches_and_dedupes_by_run(tmp_path: Path) -> 
     assert store.search_memories(query="怎么回答更简洁", thread_id="thread_b")[0].id == first.id
 
 
+def test_memory_store_canonicalizes_common_user_facts(tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+
+    profile = store.add_memory(
+        kind="profile",
+        content="中记住事实:我叫肖峰 控制工程硕士",
+    )
+    preference = store.add_memory(
+        kind="preference",
+        content="记住我希望以后回答更简洁",
+    )
+    birthday = store.add_memory(
+        kind="fact",
+        content="再记住:农历9月30日是我的生日",
+    )
+
+    assert profile.content == "用户的姓名是肖峰。用户的职业是研究生。用户的专业是控制工程。"
+    assert preference.content == "用户的偏好是：以后回答更简洁。"
+    assert birthday.content == "用户的生日是农历9月30日。"
+
+
 def test_memory_middleware_saves_latest_turn(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
@@ -67,7 +88,7 @@ def test_memory_middleware_saves_latest_turn(tmp_path: Path) -> None:
     saved = update["slotflow"]["long_term_memory_saved"]
     assert saved["thread_id"] == "thread_memory"
     assert saved["kind"] == "preference"
-    assert saved["content"] == "我喜欢中文"
+    assert saved["content"] == "用户的偏好是：喜欢中文。"
     assert store.list_memories(thread_id="thread_memory")[0].id == saved["id"]
 
 
@@ -96,7 +117,7 @@ def test_memory_middleware_injects_relevant_memories_into_model_request(tmp_path
     system_content = captured["request"].system_message.content
     assert "base system" in system_content
     assert "<slotflow-long-term-memory>" in system_content
-    assert "用户喜欢简洁回答" in system_content
+    assert "用户记录：用户喜欢简洁回答。" in system_content
 
 
 def test_memory_middleware_injects_capability_prompt_without_matches(tmp_path: Path) -> None:
@@ -149,7 +170,7 @@ async def test_memory_middleware_injects_relevant_memories_in_async_model_reques
     system_content = captured["request"].system_message.content
     assert "base system" in system_content
     assert "<slotflow-long-term-memory>" in system_content
-    assert "用户喜欢简洁回答" in system_content
+    assert "用户记录：用户喜欢简洁回答。" in system_content
 
 
 def test_build_turn_memory_content_ignores_generic_turns() -> None:
@@ -186,8 +207,8 @@ def test_memory_tools_save_and_list_memories(tmp_path: Path) -> None:
     save_result = tools["memory_save"].invoke({"content": "用户喜欢中文回答"})
     list_result = tools["memory_list"].invoke({"query": "中文", "limit": 5})
 
-    assert "用户喜欢中文回答" in save_result
-    assert "用户喜欢中文回答" in list_result
+    assert "用户记录：用户喜欢中文回答。" in save_result
+    assert "用户记录：用户喜欢中文回答。" in list_result
 
 
 def test_memory_api_create_update_and_delete(tmp_path: Path) -> None:
@@ -209,7 +230,7 @@ def test_memory_api_create_update_and_delete(tmp_path: Path) -> None:
     )
 
     assert update_response.status_code == 200
-    assert update_response.json()["content"] == "用户喜欢更简洁的中文回答"
+    assert update_response.json()["content"] == "用户资料：喜欢更简洁的中文回答。"
     assert update_response.json()["kind"] == "profile"
     assert client.get("/api/memory").json()[0]["id"] == memory_id
 
