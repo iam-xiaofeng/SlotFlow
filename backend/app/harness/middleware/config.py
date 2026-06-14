@@ -11,3 +11,4 @@ class SlotFlowMiddlewareConfig:
 
     runtime_summary_enabled: bool = True
     tool_safety_enabled: bool = True
+    long_term_memory_enabled: bool = True

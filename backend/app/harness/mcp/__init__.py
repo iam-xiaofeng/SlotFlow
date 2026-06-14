@@ -10,12 +10,20 @@ from app.harness.mcp.loader import (
     ensure_mcp_tools_loaded,
     load_mcp_tools,
 )
+from app.harness.mcp.store import (
+    McpServerNotFoundError,
+    ProtectedMcpServerError,
+    SlotFlowMcpConfigStore,
+)
 
 __all__ = [
     "AsyncMcpToolProvider",
     "EmptyMcpToolProvider",
+    "McpServerNotFoundError",
     "McpToolProvider",
     "MultiServerMcpToolProvider",
+    "ProtectedMcpServerError",
+    "SlotFlowMcpConfigStore",
     "SlotFlowMcpConfig",
     "SlotFlowMcpServerConfig",
     "build_multi_server_mcp_connections",

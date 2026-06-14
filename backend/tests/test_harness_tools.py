@@ -60,7 +60,7 @@ def test_slotflow_context_tool_is_read_only_and_json_shaped() -> None:
 
 
 def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
-    """registry 是后续 builtin/workspace/MCP/subagent 工具的统一入口。"""
+    """registry 是 builtin/workspace/network/customization 等工具的统一入口。"""
 
     @tool("slotflow_context")
     def replacement_context_tool() -> str:
@@ -80,6 +80,12 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         "workspace_tree",
         "workspace_search",
         "artifact_list",
+        "web_fetch",
+        "web_search",
+        "find-skills",
+        "skill_list",
+        "skill_install",
+        "mcp_add_http",
     ]
     assert tools[0] is replacement_context_tool
 

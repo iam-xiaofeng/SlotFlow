@@ -51,6 +51,10 @@ def build_slotflow_harness_graph(
             extra_tools=tools,
             mcp_config=harness_config.mcp_config,
             mcp_tool_provider=harness_config.mcp_tool_provider,
+            mcp_config_store=harness_config.mcp_config_store,
+            skills_root=harness_config.skills_root,
+            skills_config_store=harness_config.skills_config_store,
+            memory_store=harness_config.memory_store,
             sandbox_config=harness_config.sandbox_config,
             subagent_config=harness_config.subagent_config,
         ),
@@ -59,6 +63,7 @@ def build_slotflow_harness_graph(
     selected_middleware = build_harness_middleware(
         features=features,
         config=harness_config.middleware_config,
+        memory_store=harness_config.memory_store,
         extra_middleware=middleware,
     )
 
@@ -120,6 +125,30 @@ def build_system_prompt(
         f"subagent_enabled={features.subagent_enabled}",
         "</slotflow-runtime>",
     ]
+    sections.extend(
+        [
+            "",
+            "<slotflow-long-term-memory-status>",
+            f"enabled={harness_config.memory_store is not None}",
+            "When enabled, you can use memory_list, memory_save, memory_update, and memory_delete to explicitly manage durable user memories.",
+            "The automatic memory middleware can also recall and save compact turn memories without the user explicitly asking.",
+            "Do not claim you lack long-term memory; if no relevant memory is available, say no relevant memory was found.",
+            "</slotflow-long-term-memory-status>",
+        ]
+    )
+    sections.extend(
+        [
+            "",
+            "<slotflow-extension-tools>",
+            "Use web_search/web_fetch for public web access when current information is needed.",
+            "Use find-skills to search installable Skills. find-skills is a callable tool, not only a prompt skill.",
+            "Use skill_install only when a concrete package_url and skill_name are known or the user explicitly asks for that exact install.",
+            "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
+            "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",
+            "</slotflow-extension-tools>",
+        ]
+    )
+    sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
     if run_context.uploaded_files:
         sections.extend(["", "<slotflow-uploaded-files>"])
         for uploaded_file in run_context.uploaded_files:
@@ -142,6 +171,34 @@ def build_system_prompt(
     if skills_prompt:
         sections.extend(["", skills_prompt])
     return "\n".join(sections)
+
+
+def build_mcp_status_prompt(mcp_config) -> list[str]:
+    """Describe configured MCP servers in the system prompt."""
+
+    sections = [
+        "",
+        "<slotflow-mcp-status>",
+        f"enabled={mcp_config.enabled}",
+    ]
+    if not mcp_config.servers:
+        sections.append("servers=[]")
+    else:
+        sections.append("servers:")
+        for server in mcp_config.servers:
+            sections.append(
+                "- "
+                f"name={server.name}; "
+                f"enabled={server.enabled}; "
+                f"transport={server.config.get('transport', 'unknown') if server.config else 'unknown'}"
+            )
+    sections.extend(
+        [
+            "Enabled MCP servers are loaded as tools when their connection succeeds.",
+            "</slotflow-mcp-status>",
+        ]
+    )
+    return sections
 
 
 def _create_agent_graph(

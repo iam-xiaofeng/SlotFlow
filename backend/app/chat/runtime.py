@@ -32,13 +32,16 @@ from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 from app.harness.mcp import (
     McpToolProvider,
+    SlotFlowMcpConfigStore,
     MultiServerMcpToolProvider,
     SlotFlowMcpConfig,
     SlotFlowMcpServerConfig,
     ensure_mcp_tools_loaded,
 )
+from app.harness.memory import SlotFlowMemoryStore
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
+from app.harness.skills import SlotFlowSkillsConfigStore, load_enabled_skills
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -49,6 +52,10 @@ CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = "你是 SlotFlow 的学习版助手，回答要简洁、具体。"
 DEFAULT_CHECKPOINTER_SQLITE_PATH = Path(".slotflow/checkpoints.sqlite3")
+DEFAULT_SKILLS_ROOT = Path(".slotflow/skills")
+DEFAULT_SKILLS_CONFIG_PATH = Path(".slotflow/skills.json")
+DEFAULT_MEMORY_SQLITE_PATH = Path(".slotflow/memory.sqlite3")
+DEFAULT_MCP_CONFIG_PATH = Path(".slotflow/mcp.json")
 
 
 @dataclass(slots=True)
@@ -66,8 +73,11 @@ class SlotFlowRuntimeConfig:
     system_prompt: str = DEFAULT_DEEPSEEK_SYSTEM_PROMPT
     skills_root: Path | None = None
     enabled_skills: set[str] | None = None
+    skills_config_store: SlotFlowSkillsConfigStore | None = field(default=None, compare=False)
+    memory_store: SlotFlowMemoryStore | None = field(default=None, compare=False)
     mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
     mcp_tool_provider: McpToolProvider | None = None
+    mcp_config_store: SlotFlowMcpConfigStore | None = field(default=None, compare=False)
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
 
@@ -111,6 +121,7 @@ class RuntimeBackedAgentAdapter:
     ) -> AsyncIterator[AgentEvent]:
         model_name = bundle.context.model_name or self._runtime_config.model_name
         checkpointer = await self._ensure_checkpointer()
+        refresh_runtime_skills_config(self._runtime_config)
         await self._ensure_mcp_tools_loaded()
         graph = create_langgraph_agent_graph(
             model=self._model_factory(model_name),
@@ -131,6 +142,7 @@ class RuntimeBackedAgentAdapter:
         return self._checkpointer
 
     async def _ensure_mcp_tools_loaded(self) -> None:
+        refresh_runtime_mcp_config(self._runtime_config)
         await ensure_mcp_tools_loaded(
             config=self._runtime_config.mcp_config,
             provider=self._runtime_config.mcp_tool_provider,
@@ -152,7 +164,13 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
             f"got {checkpointer_backend!r}",
         )
 
-    mcp_config = load_mcp_config_from_env()
+    middleware_config = load_middleware_config_from_env()
+    env_mcp_config = load_mcp_config_from_env()
+    mcp_config_store = build_mcp_config_store_from_env(env_mcp_config)
+    mcp_config = mcp_config_store.load_config()
+    skills_root = load_path_from_env("SLOTFLOW_SKILLS_ROOT", default=DEFAULT_SKILLS_ROOT)
+    skills_config_store = build_skills_config_store_from_env(skills_root)
+    skills_config_store.ensure_default_find_skills()
 
     return SlotFlowRuntimeConfig(
         model_name=os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash"),
@@ -169,11 +187,14 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
             default=True,
         ),
         system_prompt=os.environ.get("SLOTFLOW_SYSTEM_PROMPT", DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
-        skills_root=load_optional_path_from_env("SLOTFLOW_SKILLS_ROOT"),
+        skills_root=skills_root,
         enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
+        skills_config_store=skills_config_store,
+        memory_store=build_memory_store_from_env(middleware_config),
         mcp_config=mcp_config,
         mcp_tool_provider=build_mcp_tool_provider(mcp_config),
-        middleware_config=load_middleware_config_from_env(),
+        mcp_config_store=mcp_config_store,
+        middleware_config=middleware_config,
         sandbox_config=load_sandbox_config_from_env(),
     )
 
@@ -190,7 +211,77 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_TOOL_SAFETY_MIDDLEWARE",
             default=True,
         ),
+        long_term_memory_enabled=load_bool_from_env(
+            "SLOTFLOW_LONG_TERM_MEMORY_ENABLED",
+            default=True,
+        ),
     )
+
+
+def build_memory_store_from_env(
+    middleware_config: SlotFlowMiddlewareConfig,
+) -> SlotFlowMemoryStore | None:
+    """Create the local long-term memory store when the middleware is enabled."""
+
+    if not middleware_config.long_term_memory_enabled:
+        return None
+    return SlotFlowMemoryStore(
+        load_path_from_env(
+            "SLOTFLOW_MEMORY_SQLITE_PATH",
+            default=DEFAULT_MEMORY_SQLITE_PATH,
+        )
+    )
+
+
+def build_mcp_config_store_from_env(
+    base_config: SlotFlowMcpConfig,
+) -> SlotFlowMcpConfigStore:
+    """Create the persistent user MCP config store."""
+
+    return SlotFlowMcpConfigStore(
+        load_path_from_env("SLOTFLOW_MCP_CONFIG_PATH", default=DEFAULT_MCP_CONFIG_PATH),
+        base_config=base_config,
+    )
+
+
+def build_skills_config_store_from_env(
+    skills_root: Path,
+) -> SlotFlowSkillsConfigStore:
+    """Create the persistent user skill config store."""
+
+    return SlotFlowSkillsConfigStore(
+        load_path_from_env("SLOTFLOW_SKILLS_CONFIG_PATH", default=DEFAULT_SKILLS_CONFIG_PATH),
+        skills_root=skills_root,
+    )
+
+
+def refresh_runtime_skills_config(runtime_config: SlotFlowRuntimeConfig) -> set[str] | None:
+    """Refresh enabled skills from the persistent config store."""
+
+    if runtime_config.skills_root is None or runtime_config.skills_config_store is None:
+        return runtime_config.enabled_skills
+
+    runtime_config.skills_config_store.ensure_default_find_skills()
+    all_skills = load_enabled_skills(
+        skills_root=runtime_config.skills_root,
+        enabled_names=None,
+    )
+    discovered_names = {skill.name for skill in all_skills}
+    runtime_config.enabled_skills = runtime_config.skills_config_store.enabled_skill_names(discovered_names)
+    return runtime_config.enabled_skills
+
+
+def refresh_runtime_mcp_config(runtime_config: SlotFlowRuntimeConfig) -> SlotFlowMcpConfig:
+    """Refresh user-managed MCP config without restarting the backend."""
+
+    if runtime_config.mcp_config_store is None:
+        return runtime_config.mcp_config
+
+    next_config = runtime_config.mcp_config_store.load_config()
+    if next_config != runtime_config.mcp_config:
+        runtime_config.mcp_config = next_config
+        runtime_config.mcp_tool_provider = build_mcp_tool_provider(next_config)
+    return runtime_config.mcp_config
 
 
 def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
@@ -209,6 +300,22 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
         max_write_bytes=load_positive_int_from_env(
             "SLOTFLOW_WORKSPACE_MAX_WRITE_BYTES",
             default=SlotFlowSandboxConfig().max_write_bytes,
+        ),
+        network_enabled=load_bool_from_env(
+            "SLOTFLOW_NETWORK_ENABLED",
+            default=True,
+        ),
+        allow_private_network=load_bool_from_env(
+            "SLOTFLOW_NETWORK_ALLOW_PRIVATE",
+            default=False,
+        ),
+        max_fetch_bytes=load_positive_int_from_env(
+            "SLOTFLOW_NETWORK_MAX_FETCH_BYTES",
+            default=SlotFlowSandboxConfig().max_fetch_bytes,
+        ),
+        network_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_NETWORK_TIMEOUT_SECONDS",
+            default=SlotFlowSandboxConfig().network_timeout_seconds,
         ),
     )
 
@@ -505,8 +612,11 @@ def create_langgraph_agent_graph(
             system_prompt=runtime_config.system_prompt,
             skills_root=runtime_config.skills_root,
             enabled_skills=runtime_config.enabled_skills,
+            skills_config_store=runtime_config.skills_config_store,
+            memory_store=runtime_config.memory_store,
             mcp_config=runtime_config.mcp_config,
             mcp_tool_provider=runtime_config.mcp_tool_provider,
+            mcp_config_store=runtime_config.mcp_config_store,
             middleware_config=runtime_config.middleware_config,
             sandbox_config=runtime_config.sandbox_config,
         ),

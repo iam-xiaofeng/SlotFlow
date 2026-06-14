@@ -11,6 +11,9 @@ from app.chat.runtime import (
     build_agent_adapter,
     load_runtime_config_from_env,
 )
+from app.mcp.routes import router as mcp_router
+from app.memory.routes import router as memory_router
+from app.skills.routes import router as skills_router
 from app.uploads import SlotFlowUploadStore
 from app.uploads.routes import router as upload_router
 from app.workspace.routes import router as workspace_router
@@ -55,6 +58,11 @@ def create_app(
     )
     app.state.chat_repo = chat_repo or build_chat_repository()
     app.state.runtime_config = resolved_runtime_config
+    app.state.memory_store = (
+        resolved_runtime_config.memory_store
+        if resolved_runtime_config is not None
+        else None
+    )
     app.state.upload_store = upload_store or SlotFlowUploadStore(
         resolved_runtime_config.sandbox_config if resolved_runtime_config is not None else None
     )
@@ -65,6 +73,9 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(chat_router)
+    app.include_router(memory_router)
+    app.include_router(skills_router)
+    app.include_router(mcp_router)
     app.include_router(upload_router)
     app.include_router(workspace_router)
     return app

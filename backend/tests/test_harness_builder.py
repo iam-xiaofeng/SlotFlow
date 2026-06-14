@@ -76,6 +76,12 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "workspace_tree",
         "workspace_search",
         "artifact_list",
+        "web_fetch",
+        "web_search",
+        "find-skills",
+        "skill_list",
+        "skill_install",
+        "mcp_add_http",
     ]
     assert [item.name for item in captured["middleware"]] == [
         "SlotFlowToolSafetyMiddleware",
@@ -188,6 +194,12 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
         "workspace_tree",
         "workspace_search",
         "artifact_list",
+        "web_fetch",
+        "web_search",
+        "find-skills",
+        "skill_list",
+        "skill_install",
+        "mcp_add_http",
         "mcp_fake",
     ]
 

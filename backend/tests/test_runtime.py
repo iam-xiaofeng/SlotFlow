@@ -63,7 +63,16 @@ class AsyncCapturingMcpToolProvider:
         return []
 
 
-def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+def isolate_user_config_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SLOTFLOW_MCP_CONFIG_PATH", str(tmp_path / "mcp.json"))
+    monkeypatch.setenv("SLOTFLOW_SKILLS_ROOT", str(tmp_path / "skills"))
+    monkeypatch.setenv("SLOTFLOW_SKILLS_CONFIG_PATH", str(tmp_path / "skills.json"))
+
+
+def test_load_runtime_config_from_env_uses_small_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """默认配置只描述真实 runtime，不再携带测试/静态模式。"""
 
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_BACKEND", raising=False)
@@ -72,13 +81,15 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_SETUP", raising=False)
     monkeypatch.delenv("SLOTFLOW_DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("SLOTFLOW_SYSTEM_PROMPT", raising=False)
-    monkeypatch.delenv("SLOTFLOW_SKILLS_ROOT", raising=False)
+    isolate_user_config_paths(monkeypatch, tmp_path)
     monkeypatch.delenv("SLOTFLOW_ENABLED_SKILLS", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_CONFIG_JSON", raising=False)
     monkeypatch.delenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_TOOL_SAFETY_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_LONG_TERM_MEMORY_ENABLED", raising=False)
+    monkeypatch.delenv("SLOTFLOW_MEMORY_SQLITE_PATH", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_WRITES_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_MAX_READ_BYTES", raising=False)
@@ -90,6 +101,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(monkeypatch: pytest.Mo
         model_name="deepseek-v4-flash",
         checkpointer_backend="memory",
         checkpointer_sqlite_path=DEFAULT_CHECKPOINTER_SQLITE_PATH,
+        skills_root=tmp_path / "skills",
     )
 
 
@@ -116,9 +128,13 @@ def test_load_runtime_config_from_env_reads_checkpointer_config(
     assert config.checkpointer_setup is False
 
 
-def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_runtime_config_from_env_reads_mcp_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Runtime only reads MCP config; actual tool loading remains in harness."""
 
+    isolate_user_config_paths(monkeypatch, tmp_path)
     monkeypatch.setenv("SLOTFLOW_MCP_ENABLED", "true")
     monkeypatch.setenv("SLOTFLOW_MCP_SERVERS", "filesystem, search")
     monkeypatch.delenv("SLOTFLOW_MCP_CONFIG_JSON", raising=False)
@@ -137,9 +153,11 @@ def test_load_runtime_config_from_env_reads_mcp_config(monkeypatch: pytest.Monke
 
 def test_load_runtime_config_from_env_reads_real_mcp_json_config(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Full MCP JSON config enables the real MultiServerMCPClient provider."""
 
+    isolate_user_config_paths(monkeypatch, tmp_path)
     monkeypatch.delenv("SLOTFLOW_MCP_ENABLED", raising=False)
     monkeypatch.setenv(
         "SLOTFLOW_MCP_CONFIG_JSON",

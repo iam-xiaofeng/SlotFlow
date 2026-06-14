@@ -6,8 +6,10 @@ from langchain.agents.middleware import AgentMiddleware
 
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
+from app.harness.memory import SlotFlowMemoryStore
 from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
 from app.harness.middleware.config import SlotFlowMiddlewareConfig
+from app.harness.middleware.long_term_memory import SlotFlowLongTermMemoryMiddleware
 from app.harness.middleware.tool_safety import SlotFlowToolSafetyMiddleware
 from app.harness.state import SlotFlowAgentState
 
@@ -19,6 +21,7 @@ def build_harness_middleware(
     *,
     features: SlotFlowHarnessFeatures,
     config: SlotFlowMiddlewareConfig | None = None,
+    memory_store: SlotFlowMemoryStore | None = None,
     extra_middleware: list[SlotFlowAgentMiddleware] | None = None,
 ) -> list[SlotFlowAgentMiddleware]:
     """Assemble middleware for the current graph."""
@@ -28,6 +31,9 @@ def build_harness_middleware(
 
     if resolved.tool_safety_enabled:
         middleware.append(SlotFlowToolSafetyMiddleware())
+
+    if resolved.long_term_memory_enabled and memory_store is not None:
+        middleware.append(SlotFlowLongTermMemoryMiddleware(memory_store=memory_store))
 
     if resolved.runtime_summary_enabled:
         middleware.append(SlotFlowRuntimeSummaryMiddleware(features=features))
