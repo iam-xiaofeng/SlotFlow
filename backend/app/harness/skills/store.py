@@ -15,6 +15,7 @@ from app.harness.skills.parser import SKILL_FILE_NAME, parse_skill_file
 
 DEFAULT_FIND_SKILLS_NAME = "find-skills"
 DEFAULT_FIND_SKILLS_PACKAGE = "https://github.com/vercel-labs/skills"
+_UNSET = object()
 
 
 class SkillNotFoundError(KeyError):
@@ -31,6 +32,9 @@ class SkillConfig:
     protected: bool = False
     source: str = "user"
     package_url: str | None = None
+    order: int = 0
+    pinned: bool = False
+    parent: str | None = None
 
 
 class SlotFlowSkillsConfigStore:
@@ -55,6 +59,9 @@ class SlotFlowSkillsConfigStore:
             protected=True,
             source="skills.sh",
             package_url=DEFAULT_FIND_SKILLS_PACKAGE,
+            order=0,
+            pinned=True,
+            parent=None,
         )
 
     def configs(self) -> dict[str, SkillConfig]:
@@ -71,11 +78,17 @@ class SlotFlowSkillsConfigStore:
             protected = raw_config.get("protected", False)
             source = raw_config.get("source", "user")
             package_url = raw_config.get("package_url")
+            order = raw_config.get("order", 0)
+            pinned = raw_config.get("pinned", False)
+            parent = raw_config.get("parent")
             configs[name] = SkillConfig(
                 enabled=enabled if isinstance(enabled, bool) else True,
                 protected=protected if isinstance(protected, bool) else False,
                 source=source if isinstance(source, str) else "user",
                 package_url=package_url if isinstance(package_url, str) else None,
+                order=order if isinstance(order, int) else 0,
+                pinned=pinned if isinstance(pinned, bool) else False,
+                parent=parent if isinstance(parent, str) and parent.strip() else None,
             )
         return configs
 
@@ -98,14 +111,24 @@ class SlotFlowSkillsConfigStore:
     def set_enabled(self, name: str, enabled: bool) -> SkillConfig:
         configs = self.configs()
         current = configs.get(name, SkillConfig())
-        configs[name] = SkillConfig(
-            enabled=enabled,
-            protected=current.protected,
-            source=current.source,
-            package_url=current.package_url,
-        )
+        configs[name] = replace_skill_config(current, enabled=enabled)
         self._write_configs(configs)
         return configs[name]
+
+    def set_pinned(self, name: str, pinned: bool) -> SkillConfig:
+        configs = self.configs()
+        current = configs.get(name, SkillConfig())
+        configs[name] = replace_skill_config(current, pinned=pinned)
+        self._write_configs(configs)
+        return configs[name]
+
+    def reorder_skills(self, ordered_names: list[str]) -> dict[str, SkillConfig]:
+        configs = self.configs()
+        for index, name in enumerate(dict.fromkeys(ordered_names)):
+            current = configs.get(name, SkillConfig())
+            configs[name] = replace_skill_config(current, order=index)
+        self._write_configs(configs)
+        return configs
 
     def mark_skill(
         self,
@@ -115,14 +138,23 @@ class SlotFlowSkillsConfigStore:
         protected: bool = False,
         source: str = "user",
         package_url: str | None = None,
+        order: int | None = None,
+        pinned: bool | None = None,
+        parent: Any = _UNSET,
     ) -> SkillConfig:
         configs = self.configs()
         current = configs.get(name)
+        next_parent = current.parent if parent is _UNSET and current else None
+        if parent is not _UNSET:
+            next_parent = parent
         configs[name] = SkillConfig(
             enabled=enabled if current is None else current.enabled,
             protected=protected,
             source=source,
             package_url=package_url,
+            order=order if order is not None else (current.order if current else next_skill_order(configs)),
+            pinned=pinned if pinned is not None else (current.pinned if current else False),
+            parent=next_parent,
         )
         self._write_configs(configs)
         return configs[name]
@@ -132,6 +164,17 @@ class SlotFlowSkillsConfigStore:
         if configs.get(name, SkillConfig()).protected:
             raise ProtectedSkillError(name)
         configs.pop(name, None)
+        self._write_configs(configs)
+
+    def remove_skill_tree_config(self, name: str) -> None:
+        configs = self.configs()
+        if configs.get(name, SkillConfig()).protected:
+            raise ProtectedSkillError(name)
+        for skill_name, config in list(configs.items()):
+            if skill_name == name or config.parent == name:
+                if config.protected:
+                    raise ProtectedSkillError(skill_name)
+                configs.pop(skill_name, None)
         self._write_configs(configs)
 
     def install_skill_from_registry(
@@ -172,7 +215,8 @@ class SlotFlowSkillsConfigStore:
             if completed.returncode != 0:
                 raise RuntimeError((completed.stderr or completed.stdout).strip() or "skills install failed")
 
-            source_dir = temp_path / ".agents" / "skills" / skill_name
+            source_root = temp_path / ".agents" / "skills"
+            source_dir = source_root / skill_name
             skill_file = source_dir / SKILL_FILE_NAME
             if parse_skill_file(skill_file) is None:
                 raise RuntimeError("installed skill is missing a valid SKILL.md")
@@ -183,13 +227,37 @@ class SlotFlowSkillsConfigStore:
             target_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source_dir, target_dir)
 
+            dependency_records: list[tuple[str, Path]] = []
+            for child_dir in sorted(source_root.iterdir() if source_root.is_dir() else []):
+                if child_dir == source_dir or not child_dir.is_dir():
+                    continue
+                child_skill = parse_skill_file(child_dir / SKILL_FILE_NAME)
+                if child_skill is None:
+                    continue
+                child_target = target_dir / "dependencies" / child_dir.name
+                if child_target.exists():
+                    shutil.rmtree(child_target)
+                child_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(child_dir, child_target)
+                dependency_records.append((child_skill.name, child_target))
+
         self.mark_skill(
             skill_name,
             enabled=True,
             protected=False,
             source="skills.sh",
             package_url=package_url,
+            parent=None,
         )
+        for child_name, _ in dependency_records:
+            self.mark_skill(
+                child_name,
+                enabled=True,
+                protected=False,
+                source="skills.sh dependency",
+                package_url=package_url,
+                parent=skill_name,
+            )
         return self.skills_root / skill_name
 
     def _read_data(self) -> dict[str, Any]:
@@ -209,9 +277,12 @@ class SlotFlowSkillsConfigStore:
                     "enabled": config.enabled,
                     "protected": config.protected,
                     "source": config.source,
+                    "order": config.order,
+                    "pinned": config.pinned,
                     **({"package_url": config.package_url} if config.package_url else {}),
+                    **({"parent": config.parent} if config.parent else {}),
                 }
-                for name, config in sorted(configs.items())
+                for name, config in sorted(configs.items(), key=skill_config_sort_key)
             }
         }
         self.path.write_text(
@@ -225,6 +296,31 @@ def validate_install_request(*, package_url: str, skill_name: str) -> None:
         raise ValueError("package_url must start with http:// or https://")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", skill_name):
         raise ValueError("skill_name must use letters, numbers, dots, underscores, or hyphens")
+
+
+def replace_skill_config(config: SkillConfig, **updates: Any) -> SkillConfig:
+    values = {
+        "enabled": config.enabled,
+        "protected": config.protected,
+        "source": config.source,
+        "package_url": config.package_url,
+        "order": config.order,
+        "pinned": config.pinned,
+        "parent": config.parent,
+    }
+    values.update(updates)
+    return SkillConfig(**values)
+
+
+def next_skill_order(configs: dict[str, SkillConfig]) -> int:
+    if not configs:
+        return 0
+    return max(config.order for config in configs.values()) + 1
+
+
+def skill_config_sort_key(item: tuple[str, SkillConfig]) -> tuple[bool, int, str]:
+    name, config = item
+    return (not config.pinned, config.order, name)
 
 
 def default_find_skills_content() -> str:

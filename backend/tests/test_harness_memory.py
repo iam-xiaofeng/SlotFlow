@@ -71,6 +71,29 @@ def test_memory_store_canonicalizes_common_user_facts(tmp_path: Path) -> None:
     assert birthday.content == "用户的生日是农历9月30日。"
 
 
+def test_memory_store_touches_existing_kind_content_instead_of_adding(tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+
+    first = store.add_memory(
+        thread_id="thread_a",
+        kind="preference",
+        content="记住我喜欢中文",
+    )
+    duplicate = store.add_memory(
+        thread_id="thread_b",
+        source_run_id="run_b",
+        kind="preference",
+        content="我喜欢中文",
+        metadata={"source": "memory_save"},
+    )
+
+    assert duplicate.id == first.id
+    assert duplicate.thread_id == "thread_b"
+    assert duplicate.source_run_id == "run_b"
+    assert duplicate.metadata["source"] == "memory_save"
+    assert [item.id for item in store.list_memories(limit=10)] == [first.id]
+
+
 def test_memory_middleware_saves_latest_turn(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)

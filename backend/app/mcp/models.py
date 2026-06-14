@@ -18,10 +18,17 @@ class McpServerRecord(BaseModel):
     url: str | None = None
     source: McpServerSource
     protected: bool = False
+    order: int = 0
+    pinned: bool = False
 
 
 class McpServerUpdateRequest(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    pinned: bool | None = None
+
+
+class McpServerReorderRequest(BaseModel):
+    names: list[str] = Field(default_factory=list)
 
 
 class McpHttpServerCreateRequest(BaseModel):

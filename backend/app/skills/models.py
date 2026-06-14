@@ -14,10 +14,18 @@ class SkillRecord(BaseModel):
     enabled: bool = True
     protected: bool = False
     source: str = "user"
+    order: int = 0
+    pinned: bool = False
+    parent: str | None = None
 
 
 class SkillUpdateRequest(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    pinned: bool | None = None
+
+
+class SkillReorderRequest(BaseModel):
+    names: list[str] = Field(default_factory=list)
 
 
 class SkillInstallRequest(BaseModel):

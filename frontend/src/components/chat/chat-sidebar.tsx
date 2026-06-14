@@ -6,13 +6,18 @@ import {
   Brain,
   Boxes,
   Check,
+  ChevronDown,
+  ChevronRight,
   Download,
   FileText,
   Folder,
+  GripVertical,
   LibraryBig,
   MessageSquarePlus,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   Plug,
   Plus,
   Power,
@@ -81,8 +86,12 @@ type ThreadSidebarProps = {
   onInstallSkill: () => void;
   onNewThread: () => void;
   onOpenArtifacts: () => void;
+  onPinMcpServer: (server: McpServerRecord, pinned: boolean) => void;
+  onPinSkill: (skill: SkillRecord, pinned: boolean) => void;
   onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onQueryChange: (query: string) => void;
+  onReorderMcpServers: (names: string[]) => void;
+  onReorderSkills: (names: string[]) => void;
   onSelectThread: (thread: ThreadRecord) => void;
   onToggleMcpServer: (server: McpServerRecord, enabled: boolean) => void;
   onToggleSkill: (skill: SkillRecord, enabled: boolean) => void;
@@ -112,8 +121,12 @@ export function ThreadSidebar({
   onInstallSkill,
   onNewThread,
   onOpenArtifacts,
+  onPinMcpServer,
+  onPinSkill,
   onPreviewArtifact,
   onQueryChange,
+  onReorderMcpServers,
+  onReorderSkills,
   onSelectThread,
   onToggleMcpServer,
   onToggleSkill,
@@ -162,6 +175,8 @@ export function ThreadSidebar({
                   skills={skills}
                   onDeleteSkill={onDeleteSkill}
                   onInstallSkill={onInstallSkill}
+                  onPinSkill={onPinSkill}
+                  onReorderSkills={onReorderSkills}
                   onToggleSkill={onToggleSkill}
                   onUploadSkill={onUploadSkill}
                 />
@@ -172,6 +187,8 @@ export function ThreadSidebar({
                   mcpServers={mcpServers}
                   onAddHttpMcpServer={onAddHttpMcpServer}
                   onDeleteMcpServer={onDeleteMcpServer}
+                  onPinMcpServer={onPinMcpServer}
+                  onReorderMcpServers={onReorderMcpServers}
                   onToggleMcpServer={onToggleMcpServer}
                 />
               </SidebarMenuItem>
@@ -314,7 +331,11 @@ function ContextPickerMenu({
   onEditMemory,
   onInstallSkill,
   onOpenArtifacts,
+  onPinMcpServer,
+  onPinSkill,
   onPreviewArtifact,
+  onReorderMcpServers,
+  onReorderSkills,
   onToggleMcpServer,
   onToggleSkill,
   onUploadSkill,
@@ -333,7 +354,11 @@ function ContextPickerMenu({
   onEditMemory?: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill?: () => void;
   onOpenArtifacts?: () => void;
+  onPinMcpServer?: (server: McpServerRecord, pinned: boolean) => void;
+  onPinSkill?: (skill: SkillRecord, pinned: boolean) => void;
   onPreviewArtifact?: (artifact: WorkspaceEntryRecord) => void;
+  onReorderMcpServers?: (names: string[]) => void;
+  onReorderSkills?: (names: string[]) => void;
   onToggleMcpServer?: (server: McpServerRecord, enabled: boolean) => void;
   onToggleSkill?: (skill: SkillRecord, enabled: boolean) => void;
   onUploadSkill?: () => void;
@@ -363,29 +388,21 @@ function ContextPickerMenu({
         className={kind === "memory" ? "w-[36rem] p-2" : "w-80 p-2"}
       >
         {hasSkills ? (
-          skills.slice(0, 8).map((skill) => (
-            <ManagedContextRow
-              key={skill.name}
-              title={skill.name}
-              description={skill.description || skill.source}
-              enabled={skill.enabled}
-              protectedItem={skill.protected}
-              onToggle={() => onToggleSkill?.(skill, !skill.enabled)}
-              onDelete={() => onDeleteSkill?.(skill)}
-            />
-          ))
+          <SkillContextList
+            skills={skills}
+            onDeleteSkill={onDeleteSkill}
+            onPinSkill={onPinSkill}
+            onReorderSkills={onReorderSkills}
+            onToggleSkill={onToggleSkill}
+          />
         ) : hasMcpServers ? (
-          mcpServers.slice(0, 8).map((server) => (
-            <ManagedContextRow
-              key={server.name}
-              title={server.name}
-              description={server.url || server.transport || server.source}
-              enabled={server.enabled}
-              protectedItem={server.protected}
-              onToggle={() => onToggleMcpServer?.(server, !server.enabled)}
-              onDelete={() => onDeleteMcpServer?.(server)}
-            />
-          ))
+          <McpContextList
+            servers={mcpServers}
+            onDeleteMcpServer={onDeleteMcpServer}
+            onPinMcpServer={onPinMcpServer}
+            onReorderMcpServers={onReorderMcpServers}
+            onToggleMcpServer={onToggleMcpServer}
+          />
         ) : isMemory ? (
           <MemoryTable
             memories={memories}
@@ -437,6 +454,188 @@ function ContextPickerMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function SkillContextList({
+  skills,
+  onDeleteSkill,
+  onPinSkill,
+  onReorderSkills,
+  onToggleSkill,
+}: {
+  skills: SkillRecord[];
+  onDeleteSkill?: (skill: SkillRecord) => void;
+  onPinSkill?: (skill: SkillRecord, pinned: boolean) => void;
+  onReorderSkills?: (names: string[]) => void;
+  onToggleSkill?: (skill: SkillRecord, enabled: boolean) => void;
+}) {
+  const [draggedName, setDraggedName] = useState<string | null>(null);
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(
+    () => new Set(["find-skills"]),
+  );
+  const skillsByName = useMemo(
+    () => new Map(skills.map((skill) => [skill.name, skill])),
+    [skills],
+  );
+  const childrenByParent = useMemo(() => {
+    const groups = new Map<string, SkillRecord[]>();
+    for (const skill of skills) {
+      if (!skill.parent || !skillsByName.has(skill.parent)) {
+        continue;
+      }
+      groups.set(skill.parent, [...(groups.get(skill.parent) ?? []), skill]);
+    }
+    return groups;
+  }, [skills, skillsByName]);
+  const topLevelSkills = skills.filter(
+    (skill) => !skill.parent || !skillsByName.has(skill.parent),
+  );
+
+  function toggleExpanded(parentName: string) {
+    setExpandedParents((current) => {
+      const next = new Set(current);
+      if (next.has(parentName)) {
+        next.delete(parentName);
+      } else {
+        next.add(parentName);
+      }
+      return next;
+    });
+  }
+
+  function reorder(targetName: string) {
+    if (!draggedName || draggedName === targetName) {
+      return;
+    }
+    onReorderSkills?.(moveName(skills.map((skill) => skill.name), draggedName, targetName));
+  }
+
+  return (
+    <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+      {topLevelSkills.map((skill) => {
+        const children = childrenByParent.get(skill.name) ?? [];
+        const isExpanded = expandedParents.has(skill.name);
+        return (
+          <div key={skill.name} className="flex flex-col gap-1">
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem] items-center gap-1">
+              <ManagedContextRow
+                title={skill.name}
+                description={skill.description || skill.source}
+                enabled={skill.enabled}
+                pinned={skill.pinned}
+                protectedItem={skill.protected}
+                draggable
+                isDragging={draggedName === skill.name}
+                onDragEnd={() => setDraggedName(null)}
+                onDragStart={() => setDraggedName(skill.name)}
+                onDrop={() => reorder(skill.name)}
+                onPin={() => onPinSkill?.(skill, !skill.pinned)}
+                onSelect={children.length > 0 ? () => toggleExpanded(skill.name) : undefined}
+                onToggle={() => onToggleSkill?.(skill, !skill.enabled)}
+                onDelete={() => onDeleteSkill?.(skill)}
+              />
+              {children.length > 0 ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={isExpanded ? "收起依赖 Skills" : "展开依赖 Skills"}
+                  onClick={() => toggleExpanded(skill.name)}
+                >
+                  {isExpanded ? (
+                    <ChevronDown className="size-4" />
+                  ) : (
+                    <ChevronRight className="size-4" />
+                  )}
+                </Button>
+              ) : (
+                <span />
+              )}
+            </div>
+            {isExpanded && children.length > 0 ? (
+              <div className="ml-5 flex flex-col gap-1 border-l pl-2">
+                {children.map((child) => (
+                  <ManagedContextRow
+                    key={child.name}
+                    title={child.name}
+                    description={child.description || child.source}
+                    enabled={child.enabled}
+                    pinned={child.pinned}
+                    protectedItem={child.protected}
+                    draggable
+                    className="py-1.5"
+                    isDragging={draggedName === child.name}
+                    onDragEnd={() => setDraggedName(null)}
+                    onDragStart={() => setDraggedName(child.name)}
+                    onDrop={() => reorder(child.name)}
+                    onPin={() => onPinSkill?.(child, !child.pinned)}
+                    onToggle={() => onToggleSkill?.(child, !child.enabled)}
+                    onDelete={() => onDeleteSkill?.(child)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function McpContextList({
+  servers,
+  onDeleteMcpServer,
+  onPinMcpServer,
+  onReorderMcpServers,
+  onToggleMcpServer,
+}: {
+  servers: McpServerRecord[];
+  onDeleteMcpServer?: (server: McpServerRecord) => void;
+  onPinMcpServer?: (server: McpServerRecord, pinned: boolean) => void;
+  onReorderMcpServers?: (names: string[]) => void;
+  onToggleMcpServer?: (server: McpServerRecord, enabled: boolean) => void;
+}) {
+  const [draggedName, setDraggedName] = useState<string | null>(null);
+
+  function reorder(targetName: string) {
+    if (!draggedName || draggedName === targetName) {
+      return;
+    }
+    onReorderMcpServers?.(moveName(servers.map((server) => server.name), draggedName, targetName));
+  }
+
+  return (
+    <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+      {servers.map((server) => (
+        <ManagedContextRow
+          key={server.name}
+          title={server.name}
+          description={server.url || server.transport || server.source}
+          enabled={server.enabled}
+          pinned={server.pinned}
+          protectedItem={server.protected}
+          draggable
+          isDragging={draggedName === server.name}
+          onDragEnd={() => setDraggedName(null)}
+          onDragStart={() => setDraggedName(server.name)}
+          onDrop={() => reorder(server.name)}
+          onPin={() => onPinMcpServer?.(server, !server.pinned)}
+          onToggle={() => onToggleMcpServer?.(server, !server.enabled)}
+          onDelete={() => onDeleteMcpServer?.(server)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function moveName(names: string[], draggedName: string, targetName: string): string[] {
+  const next = names.filter((name) => name !== draggedName);
+  const targetIndex = next.indexOf(targetName);
+  if (targetIndex === -1) {
+    return names;
+  }
+  next.splice(targetIndex, 0, draggedName);
+  return next;
 }
 
 function ArtifactList({
@@ -497,31 +696,74 @@ function formatBytes(value: number): string {
 
 function ContextRecordRow({
   actions,
+  className,
   description,
   disabled = false,
+  draggable = false,
   enabled,
   isActive = false,
+  isDragging = false,
   title,
+  onDragEnd,
+  onDragOver,
+  onDragStart,
+  onDrop,
   onSelect,
 }: {
   actions: ContextRecordAction[];
+  className?: string;
   description?: string;
   disabled?: boolean;
+  draggable?: boolean;
   enabled?: boolean;
   isActive?: boolean;
+  isDragging?: boolean;
   title: string;
+  onDragEnd?: () => void;
+  onDragOver?: () => void;
+  onDragStart?: () => void;
+  onDrop?: () => void;
   onSelect?: () => void;
 }) {
   return (
     <div
+      draggable={draggable && !disabled}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => {
+        if (!draggable || disabled) {
+          return;
+        }
+        event.preventDefault();
+        onDragOver?.();
+      }}
+      onDragStart={(event) => {
+        if (!draggable || disabled) {
+          return;
+        }
+        event.dataTransfer.effectAllowed = "move";
+        onDragStart?.();
+      }}
+      onDrop={(event) => {
+        if (!draggable || disabled) {
+          return;
+        }
+        event.preventDefault();
+        onDrop?.();
+      }}
       className={cn(
         "group/record flex min-w-0 items-center gap-2 rounded-md px-2 py-2 text-[0.95rem]",
         enabled === false && "opacity-60",
         enabled === true && "bg-muted/70",
         isActive && "bg-accent text-accent-foreground",
+        draggable && !disabled && "cursor-grab active:cursor-grabbing",
+        isDragging && "ring-1 ring-ring",
         disabled ? "opacity-50" : "hover:bg-accent hover:text-accent-foreground",
+        className,
       )}
     >
+      {draggable ? (
+        <GripVertical className="shrink-0 text-muted-foreground opacity-70 group-hover/record:text-accent-foreground/70" />
+      ) : null}
       <button
         type="button"
         disabled={disabled}
@@ -587,26 +829,59 @@ function ContextRecordRow({
 }
 
 function ManagedContextRow({
+  className,
   description,
+  draggable,
   enabled,
+  isDragging,
+  pinned,
   protectedItem,
   title,
+  onDragEnd,
+  onDragOver,
+  onDragStart,
   onDelete,
+  onDrop,
+  onPin,
+  onSelect,
   onToggle,
 }: {
+  className?: string;
   description: string;
+  draggable?: boolean;
   enabled: boolean;
+  isDragging?: boolean;
+  pinned: boolean;
   protectedItem: boolean;
   title: string;
+  onDragEnd?: () => void;
+  onDragOver?: () => void;
+  onDragStart?: () => void;
   onDelete: () => void;
+  onDrop?: () => void;
+  onPin: () => void;
+  onSelect?: () => void;
   onToggle: () => void;
 }) {
   return (
     <ContextRecordRow
       title={title}
       description={description}
+      className={className}
+      draggable={draggable}
       enabled={enabled}
+      isDragging={isDragging}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDragStart={onDragStart}
+      onDrop={onDrop}
+      onSelect={onSelect}
       actions={[
+        {
+          label: pinned ? "取消置顶" : "置顶",
+          onSelect: onPin,
+          icon: pinned ? PinOff : Pin,
+        },
         {
           label: enabled ? "关闭" : "启用",
           onSelect: onToggle,

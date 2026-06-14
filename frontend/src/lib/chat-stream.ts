@@ -67,6 +67,9 @@ export type SkillRecord = {
   enabled: boolean;
   protected: boolean;
   source: string;
+  order: number;
+  pinned: boolean;
+  parent?: string | null;
 };
 
 export type McpServerRecord = {
@@ -76,6 +79,8 @@ export type McpServerRecord = {
   url?: string | null;
   source: "environment" | "user";
   protected: boolean;
+  order: number;
+  pinned: boolean;
 };
 
 export type MemoryRecord = {
@@ -307,9 +312,12 @@ export async function installSkill(
   return response.json() as Promise<SkillRecord>;
 }
 
-export async function setSkillEnabled(
+async function updateSkillState(
   skillName: string,
-  enabled: boolean,
+  body: {
+    enabled?: boolean;
+    pinned?: boolean;
+  },
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord> {
   const response = await fetch(`/api/skills/${encodeURIComponent(skillName)}`, {
@@ -317,7 +325,7 @@ export async function setSkillEnabled(
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(body),
     signal: options.signal,
   });
 
@@ -326,6 +334,42 @@ export async function setSkillEnabled(
   }
 
   return response.json() as Promise<SkillRecord>;
+}
+
+export async function setSkillEnabled(
+  skillName: string,
+  enabled: boolean,
+  options: ChatRequestOptions = {},
+): Promise<SkillRecord> {
+  return updateSkillState(skillName, { enabled }, options);
+}
+
+export async function setSkillPinned(
+  skillName: string,
+  pinned: boolean,
+  options: ChatRequestOptions = {},
+): Promise<SkillRecord> {
+  return updateSkillState(skillName, { pinned }, options);
+}
+
+export async function reorderSkills(
+  names: string[],
+  options: ChatRequestOptions = {},
+): Promise<SkillRecord[]> {
+  const response = await fetch("/api/skills/reorder", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ names }),
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`reorder skills failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<SkillRecord[]>;
 }
 
 export async function deleteSkill(
@@ -379,9 +423,12 @@ export async function createHttpMcpServer(
   return response.json() as Promise<McpServerRecord>;
 }
 
-export async function setMcpServerEnabled(
+async function updateMcpServerState(
   serverName: string,
-  enabled: boolean,
+  body: {
+    enabled?: boolean;
+    pinned?: boolean;
+  },
   options: ChatRequestOptions = {},
 ): Promise<McpServerRecord> {
   const response = await fetch(`/api/mcp/servers/${encodeURIComponent(serverName)}`, {
@@ -389,7 +436,7 @@ export async function setMcpServerEnabled(
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(body),
     signal: options.signal,
   });
 
@@ -398,6 +445,42 @@ export async function setMcpServerEnabled(
   }
 
   return response.json() as Promise<McpServerRecord>;
+}
+
+export async function setMcpServerEnabled(
+  serverName: string,
+  enabled: boolean,
+  options: ChatRequestOptions = {},
+): Promise<McpServerRecord> {
+  return updateMcpServerState(serverName, { enabled }, options);
+}
+
+export async function setMcpServerPinned(
+  serverName: string,
+  pinned: boolean,
+  options: ChatRequestOptions = {},
+): Promise<McpServerRecord> {
+  return updateMcpServerState(serverName, { pinned }, options);
+}
+
+export async function reorderMcpServers(
+  names: string[],
+  options: ChatRequestOptions = {},
+): Promise<McpServerRecord[]> {
+  const response = await fetch("/api/mcp/servers/reorder", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ names }),
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`reorder MCP servers failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<McpServerRecord[]>;
 }
 
 export async function deleteMcpServer(

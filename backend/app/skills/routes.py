@@ -16,7 +16,12 @@ from app.chat.runtime import (
 )
 from app.harness.skills import load_enabled_skills
 from app.harness.skills.store import ProtectedSkillError, SlotFlowSkillsConfigStore
-from app.skills.models import SkillInstallRequest, SkillRecord, SkillUpdateRequest
+from app.skills.models import (
+    SkillInstallRequest,
+    SkillRecord,
+    SkillReorderRequest,
+    SkillUpdateRequest,
+)
 
 
 router = APIRouter(prefix="/api/skills", tags=["Skills"])
@@ -37,7 +42,7 @@ async def list_skills(request: Request) -> list[SkillRecord]:
         skills_root=root,
         enabled_names=None,
     )
-    return [skill_to_record(root, skill, store=store) for skill in skills]
+    return sort_skill_records([skill_to_record(root, skill, store=store) for skill in skills])
 
 
 @router.post("/upload", response_model=list[SkillRecord])
@@ -73,14 +78,28 @@ async def upload_skill(
     if not skills:
         raise HTTPException(status_code=400, detail="uploaded folder must contain a valid SKILL.md")
 
+    inferred_parents = infer_uploaded_skill_parents(skills)
+    skill_names = {skill.name for skill in skills}
+    relocate_uploaded_skill_dependencies(root=root, skills=skills, parents=inferred_parents)
+    skills = [
+        skill
+        for skill in load_enabled_skills(skills_root=root, enabled_names=None)
+        if skill.name in skill_names
+    ]
     for skill in skills:
         if store is not None and store.is_protected(skill.name):
             raise HTTPException(status_code=403, detail="protected skill cannot be overwritten")
         if store is not None:
-            store.mark_skill(skill.name, enabled=True, protected=False, source="user")
+            store.mark_skill(
+                skill.name,
+                enabled=True,
+                protected=False,
+                source="user",
+                parent=inferred_parents.get(skill.name),
+            )
         enable_skill_for_runtime(request, skill.name)
     refresh_runtime_skills_config(get_runtime_config(request))
-    return [skill_to_record(root, skill, store=store) for skill in skills]
+    return sort_skill_records([skill_to_record(root, skill, store=store) for skill in skills])
 
 
 @router.post("/install", response_model=SkillRecord)
@@ -120,7 +139,7 @@ async def update_skill(
     body: SkillUpdateRequest,
     request: Request,
 ) -> SkillRecord:
-    """Enable or disable one skill."""
+    """Enable, disable, pin, or unpin one skill."""
 
     root = get_skills_root(request)
     store = get_skills_config_store(request)
@@ -130,9 +149,41 @@ async def update_skill(
     if skill is None:
         raise HTTPException(status_code=404, detail="skill not found")
 
-    store.set_enabled(skill.name, body.enabled)
+    if body.enabled is None and body.pinned is None:
+        raise HTTPException(status_code=400, detail="no skill update fields provided")
+    if body.enabled is not None:
+        store.set_enabled(skill.name, body.enabled)
+    if body.pinned is not None:
+        store.set_pinned(skill.name, body.pinned)
     refresh_runtime_skills_config(get_runtime_config(request))
     return skill_to_record(root, skill, store=store)
+
+
+@router.post("/reorder", response_model=list[SkillRecord])
+async def reorder_skills(
+    body: SkillReorderRequest,
+    request: Request,
+) -> list[SkillRecord]:
+    """Persist user-visible skill ordering."""
+
+    root = get_skills_root(request)
+    store = get_skills_config_store(request)
+    if store is None:
+        raise HTTPException(status_code=503, detail="skills config store is not configured")
+
+    known_names = {skill.name for skill in load_enabled_skills(skills_root=root, enabled_names=None)}
+    unknown_names = [name for name in body.names if name not in known_names]
+    if unknown_names:
+        raise HTTPException(status_code=404, detail=f"skill not found: {unknown_names[0]}")
+
+    store.reorder_skills(body.names)
+    refresh_runtime_skills_config(get_runtime_config(request))
+    return sort_skill_records(
+        [
+            skill_to_record(root, skill, store=store)
+            for skill in load_enabled_skills(skills_root=root, enabled_names=None)
+        ]
+    )
 
 
 @router.delete("/{skill_name}", status_code=204)
@@ -155,12 +206,13 @@ async def delete_skill(skill_name: str, request: Request) -> Response:
     shutil.rmtree(resolved_dir)
     if store is not None:
         try:
-            store.remove_skill_config(skill.name)
+            store.remove_skill_tree_config(skill.name)
         except ProtectedSkillError as exc:
             raise HTTPException(status_code=403, detail="protected skill cannot be deleted") from exc
     runtime_config = get_runtime_config(request)
     if runtime_config.enabled_skills is not None:
         runtime_config.enabled_skills.discard(skill.name)
+    refresh_runtime_skills_config(runtime_config)
     return Response(status_code=204)
 
 
@@ -240,4 +292,80 @@ def skill_to_record(
         enabled=config.enabled if config is not None else skill.enabled,
         protected=config.protected if config is not None else False,
         source=config.source if config is not None else "user",
+        order=config.order if config is not None else 0,
+        pinned=config.pinned if config is not None else False,
+        parent=config.parent if config is not None else None,
     )
+
+
+def infer_uploaded_skill_parents(skills) -> dict[str, str | None]:
+    """Group secondary uploaded skills under the first/main uploaded skill."""
+
+    if len(skills) <= 1:
+        return {skill.name: None for skill in skills}
+
+    parent_by_name: dict[str, str | None] = {skill.name: None for skill in skills}
+    skills_by_dir = {skill.skill_dir.resolve(): skill for skill in skills}
+    for skill in skills:
+        current_dir = skill.skill_dir.resolve()
+        ancestor_parent = next(
+            (
+                parent_skill.name
+                for parent_dir, parent_skill in skills_by_dir.items()
+                if parent_dir != current_dir and parent_dir in current_dir.parents
+            ),
+            None,
+        )
+        if ancestor_parent is not None:
+            parent_by_name[skill.name] = ancestor_parent
+
+    top_level_skills = [
+        skill
+        for skill in sorted(skills, key=lambda item: str(item.skill_dir))
+        if parent_by_name[skill.name] is None
+    ]
+    if len(top_level_skills) <= 1:
+        return parent_by_name
+
+    primary = top_level_skills[0]
+    for skill in top_level_skills[1:]:
+        parent_by_name[skill.name] = primary.name
+    return parent_by_name
+
+
+def relocate_uploaded_skill_dependencies(
+    *,
+    root: Path,
+    skills,
+    parents: dict[str, str | None],
+) -> None:
+    """Move secondary uploaded skills below their primary skill directory."""
+
+    skills_by_name = {skill.name: skill for skill in skills}
+    resolved_root = root.resolve()
+    for skill_name, parent_name in parents.items():
+        if parent_name is None:
+            continue
+        skill = skills_by_name.get(skill_name)
+        parent = skills_by_name.get(parent_name)
+        if skill is None or parent is None:
+            continue
+
+        child_dir = skill.skill_dir.resolve()
+        parent_dir = parent.skill_dir.resolve()
+        if parent_dir in child_dir.parents:
+            continue
+        if resolved_root not in child_dir.parents or resolved_root not in parent_dir.parents:
+            continue
+
+        target_dir = parent.skill_dir / "dependencies" / skill.skill_dir.name
+        if target_dir.resolve() == child_dir:
+            continue
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(skill.skill_dir), str(target_dir))
+
+
+def sort_skill_records(records: list[SkillRecord]) -> list[SkillRecord]:
+    return sorted(records, key=lambda record: (not record.pinned, record.order, record.name))

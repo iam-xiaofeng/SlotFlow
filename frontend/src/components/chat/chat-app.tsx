@@ -40,8 +40,12 @@ import {
   listSkills,
   listThreads,
   readArtifact,
+  reorderMcpServers,
+  reorderSkills,
   setMcpServerEnabled,
+  setMcpServerPinned,
   setSkillEnabled,
+  setSkillPinned,
   updateMemory,
   uploadFile,
   uploadSkillFolder,
@@ -55,6 +59,14 @@ import { EmptyState, MessageList } from "./message-list";
 
 const defaultModelName = "deepseek-v4-flash";
 const defaultMode: ChatMode = "pro";
+
+type QueuedChatMessage = {
+  id: string;
+  text: string;
+  files: string[];
+  metadata: Record<string, unknown>;
+  attachmentCount: number;
+};
 
 export function ChatApp() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
@@ -73,9 +85,12 @@ export function ChatApp() {
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(560);
   const [isUploading, setIsUploading] = useState(false);
+  const [isQueueDraining, setIsQueueDraining] = useState(false);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const skillFolderInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const isDrainingQueueRef = useRef(false);
 
   const {
     thread,
@@ -188,15 +203,99 @@ export function ChatApp() {
     () => artifacts.filter((artifact) => artifact.kind === "file"),
     [artifacts],
   );
+  const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
+
+  const sendPreparedMessage = useCallback(
+    async (
+      prepared: {
+        text: string;
+        files: string[];
+        metadata: Record<string, unknown>;
+        threadTitle: string;
+        reuseUserMessageId?: string;
+      },
+      options: {
+        restoreAttachments?: UploadedFileRecord[];
+      } = {},
+    ): Promise<boolean> => {
+      const previousArtifactPaths = new Set(artifactFiles.map((artifact) => artifact.path));
+      const result = await sendMessage(prepared.text, {
+        mode: defaultMode,
+        model_name: defaultModelName,
+        agent_name: "default",
+        files: prepared.files,
+        metadata: prepared.metadata,
+        reuse_user_message_id: prepared.reuseUserMessageId,
+        threadTitle: prepared.threadTitle,
+      });
+
+      if (result.accepted) {
+        const [, nextArtifacts] = await Promise.all([
+          refreshThreads(),
+          refreshArtifacts(),
+          refreshSkills(),
+          refreshMcpServers(),
+          refreshMemories(),
+        ]);
+        const newArtifact = nextArtifacts.find(
+          (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
+        );
+        if (newArtifact) {
+          void handlePreviewArtifact(newArtifact);
+        }
+      } else if (options.restoreAttachments) {
+        setAttachments(options.restoreAttachments);
+      }
+      return result.accepted;
+    },
+    [
+      artifactFiles,
+      refreshArtifacts,
+      refreshMcpServers,
+      refreshMemories,
+      refreshSkills,
+      refreshThreads,
+      sendMessage,
+    ],
+  );
+
+  useEffect(() => {
+    if (
+      isStreaming ||
+      isUploading ||
+      isQueueDraining ||
+      isDrainingQueueRef.current ||
+      queuedMessages.length === 0
+    ) {
+      return;
+    }
+
+    const nextMessage = queuedMessages[0];
+    isDrainingQueueRef.current = true;
+    setIsQueueDraining(true);
+    setQueuedMessages((current) =>
+      current[0]?.id === nextMessage.id ? current.slice(1) : current,
+    );
+    void sendPreparedMessage({
+      text: nextMessage.text,
+      files: nextMessage.files,
+      metadata: nextMessage.metadata,
+      threadTitle: makeThreadTitle(nextMessage.text),
+    }).finally(() => {
+      isDrainingQueueRef.current = false;
+      setIsQueueDraining(false);
+    });
+  }, [isQueueDraining, isStreaming, isUploading, queuedMessages, sendPreparedMessage]);
 
   async function handleSelectThread(nextThread: ThreadRecord) {
-    if (isStreaming || nextThread.id === thread?.id) {
+    if (isConversationBusy || nextThread.id === thread?.id) {
       return;
     }
 
     const loaded = await loadThread(nextThread);
     if (loaded) {
       setAttachments([]);
+      setQueuedMessages([]);
       clearError();
     }
   }
@@ -204,11 +303,12 @@ export function ChatApp() {
   function handleNewThread() {
     if (resetThread()) {
       setAttachments([]);
+      setQueuedMessages([]);
     }
   }
 
   async function handleDeleteThread(targetThread: ThreadRecord) {
-    if (isStreaming) {
+    if (isConversationBusy) {
       return;
     }
 
@@ -217,6 +317,7 @@ export function ChatApp() {
       if (targetThread.id === thread?.id) {
         resetThread();
         setAttachments([]);
+        setQueuedMessages([]);
       }
       await refreshThreads();
       toast.success("聊天记录已删除");
@@ -235,13 +336,17 @@ export function ChatApp() {
     } = {},
   ): Promise<boolean> {
     const text = rawText.trim();
-    if (!text || isStreaming || isUploading) {
+    if (!text || isUploading) {
       return false;
     }
 
     const currentAttachments = attachments;
-    const previousArtifactPaths = new Set(artifactFiles.map((artifact) => artifact.path));
     const isReusingUserMessage = Boolean(options.reuseUserMessageId);
+    if (isReusingUserMessage && isConversationBusy) {
+      return false;
+    }
+
+    const files = options.files ?? currentAttachments.map((file) => file.id);
     if (!isReusingUserMessage) {
       setAttachments([]);
     }
@@ -254,42 +359,39 @@ export function ChatApp() {
           content_type: file.content_type,
           size_bytes: file.size_bytes,
         }));
+    const metadata = {
+      source: "chat-ui",
+      ...(options.metadata ?? {}),
+      uploaded_file_count: uploadedFilesMetadata.length,
+      uploaded_files: uploadedFilesMetadata,
+    };
 
-    const result = await sendMessage(text, {
-      mode: defaultMode,
-      model_name: defaultModelName,
-      agent_name: "default",
-      files: options.files ?? currentAttachments.map((file) => file.id),
-      metadata: {
-        source: "chat-ui",
-        ...(options.metadata ?? {}),
-        uploaded_file_count: uploadedFilesMetadata.length,
-        uploaded_files: uploadedFilesMetadata,
-      },
-      reuse_user_message_id: options.reuseUserMessageId,
-      threadTitle: makeThreadTitle(text),
-    });
-
-    if (result.accepted) {
-      const [, nextArtifacts] = await Promise.all([
-        refreshThreads(),
-        refreshArtifacts(),
-        refreshSkills(),
-        refreshMcpServers(),
-        refreshMemories(),
+    if (isStreaming || isQueueDraining || queuedMessages.length > 0) {
+      setQueuedMessages((current) => [
+        ...current,
+        {
+          id: makeQueueId(),
+          text,
+          files,
+          metadata,
+          attachmentCount: files.length,
+        },
       ]);
-      const newArtifact = nextArtifacts.find(
-        (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
-      );
-      if (newArtifact) {
-        void handlePreviewArtifact(newArtifact);
-      }
-    } else {
-      if (!isReusingUserMessage) {
-        setAttachments(currentAttachments);
-      }
+      return true;
     }
-    return result.accepted;
+
+    return sendPreparedMessage(
+      {
+        text,
+        files,
+        metadata,
+        reuseUserMessageId: options.reuseUserMessageId,
+        threadTitle: makeThreadTitle(text),
+      },
+      {
+        restoreAttachments: isReusingUserMessage ? undefined : currentAttachments,
+      },
+    );
   }
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -383,6 +485,27 @@ export function ChatApp() {
     }
   }
 
+  async function handlePinSkill(skill: SkillRecord, pinned: boolean) {
+    try {
+      await setSkillPinned(skill.name, pinned);
+      await refreshSkills();
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "update skill failed";
+      toast.error(message);
+    }
+  }
+
+  async function handleReorderSkills(names: string[]) {
+    setSkills((current) => sortRecordsByNames(current, names));
+    try {
+      setSkills(await reorderSkills(names));
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "reorder skills failed";
+      toast.error(message);
+      await refreshSkills();
+    }
+  }
+
   async function handleDeleteSkill(skill: SkillRecord) {
     if (skill.protected) {
       return;
@@ -428,6 +551,27 @@ export function ChatApp() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "update MCP server failed";
       toast.error(message);
+    }
+  }
+
+  async function handlePinMcpServer(server: McpServerRecord, pinned: boolean) {
+    try {
+      await setMcpServerPinned(server.name, pinned);
+      await refreshMcpServers();
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "update MCP server failed";
+      toast.error(message);
+    }
+  }
+
+  async function handleReorderMcpServers(names: string[]) {
+    setMcpServers((current) => sortRecordsByNames(current, names));
+    try {
+      setMcpServers(await reorderMcpServers(names));
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "reorder MCP servers failed";
+      toast.error(message);
+      await refreshMcpServers();
     }
   }
 
@@ -562,7 +706,7 @@ export function ChatApp() {
   }
 
   async function handleEditLatestUserMessage(messageId: string, content: string) {
-    if (isStreaming) {
+    if (isConversationBusy) {
       return false;
     }
     const targetMessage = messages.find((message) => message.id === messageId);
@@ -574,7 +718,7 @@ export function ChatApp() {
   }
 
   async function handleRetryLatestAssistantMessage() {
-    if (isStreaming) {
+    if (isConversationBusy) {
       return;
     }
     const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
@@ -592,6 +736,10 @@ export function ChatApp() {
     setAttachments((current) => current.filter((item) => item.id !== fileId));
   }
 
+  function handleRemoveQueuedMessage(messageId: string) {
+    setQueuedMessages((current) => current.filter((message) => message.id !== messageId));
+  }
+
   const composer = (
     <ChatComposer
       attachments={attachments}
@@ -599,11 +747,18 @@ export function ChatApp() {
       fileInputRef={fileInputRef}
       isStreaming={isStreaming}
       isUploading={isUploading}
+      queuedMessages={queuedMessages.map((message, index) => ({
+        id: message.id,
+        text: message.text,
+        attachmentCount: message.attachmentCount,
+        position: index + 1,
+      }))}
       onAttachFiles={() => fileInputRef.current?.click()}
       onCancel={cancelStream}
       onClearError={clearError}
       onFileChange={handleFileChange}
       onRemoveAttachment={handleRemoveAttachment}
+      onRemoveQueuedMessage={handleRemoveQueuedMessage}
       onSendMessage={submitMessage}
     />
   );
@@ -621,7 +776,7 @@ export function ChatApp() {
       <Sidebar collapsible="icon" className="border-r-0">
         <ThreadSidebar
           activeThreadId={thread?.id ?? null}
-          disabled={isStreaming}
+          disabled={isConversationBusy}
           filteredThreads={filteredThreads}
           artifacts={artifacts}
           skills={skills}
@@ -644,6 +799,10 @@ export function ChatApp() {
           onOpenArtifacts={handleOpenArtifactPanel}
           onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
           onQueryChange={setThreadQuery}
+          onPinMcpServer={(server, pinned) => void handlePinMcpServer(server, pinned)}
+          onPinSkill={(skill, pinned) => void handlePinSkill(skill, pinned)}
+          onReorderMcpServers={(names) => void handleReorderMcpServers(names)}
+          onReorderSkills={(names) => void handleReorderSkills(names)}
           onToggleMcpServer={(server, enabled) => void handleToggleMcpServer(server, enabled)}
           onToggleSkill={(skill, enabled) => void handleToggleSkill(skill, enabled)}
           onUploadSkill={() => skillFolderInputRef.current?.click()}
@@ -736,4 +895,17 @@ function extractUploadedFilesFromMetadata(
 ): unknown[] {
   const uploadedFiles = metadata?.uploaded_files;
   return Array.isArray(uploadedFiles) ? uploadedFiles : [];
+}
+
+function makeQueueId() {
+  return `queued_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sortRecordsByNames<T extends { name: string }>(records: T[], names: string[]): T[] {
+  const position = new Map(names.map((name, index) => [name, index]));
+  return [...records].sort(
+    (left, right) =>
+      (position.get(left.name) ?? records.length) -
+      (position.get(right.name) ?? records.length),
+  );
 }

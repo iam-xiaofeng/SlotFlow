@@ -32,11 +32,12 @@ from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 from app.harness.mcp import (
     McpToolProvider,
-    SlotFlowMcpConfigStore,
     MultiServerMcpToolProvider,
+    SlotFlowMcpConfigStore,
     SlotFlowMcpConfig,
     SlotFlowMcpServerConfig,
     ensure_mcp_tools_loaded,
+    is_removed_default_mcp_server,
 )
 from app.harness.memory import SlotFlowMemoryStore
 from app.harness.middleware import SlotFlowMiddlewareConfig
@@ -331,7 +332,11 @@ def load_mcp_config_from_env() -> SlotFlowMcpConfig:
             servers=tuple(load_mcp_servers_from_json(raw_config)),
         )
 
-    server_names = load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
+    server_names = [
+        name
+        for name in load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
+        if not is_removed_default_mcp_server(name)
+    ]
     return SlotFlowMcpConfig(
         enabled=enabled,
         servers=tuple(SlotFlowMcpServerConfig(name=name) for name in server_names),
@@ -353,6 +358,8 @@ def load_mcp_servers_from_json(raw_config: str) -> list[SlotFlowMcpServerConfig]
     for name, raw_server_config in data.items():
         if not isinstance(name, str) or not name.strip():
             raise ValueError("SLOTFLOW_MCP_CONFIG_JSON server names must be non-empty strings")
+        if is_removed_default_mcp_server(name):
+            continue
         if not isinstance(raw_server_config, dict):
             raise ValueError(f"MCP server {name!r} config must be an object")
 

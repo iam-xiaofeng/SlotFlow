@@ -34,7 +34,7 @@ class SlotFlowMemoryStore:
         source_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> MemoryRecord:
-        """Insert a memory record, returning the existing item for duplicate runs."""
+        """Insert a memory record, touching existing equivalent memories."""
 
         validated_kind = validate_memory_kind(kind)
         normalized_content = normalize_memory_content(content, kind=validated_kind)
@@ -44,6 +44,15 @@ class SlotFlowMemoryStore:
         existing = self.get_by_source_run_id(source_run_id) if source_run_id else None
         if existing is not None:
             return existing
+
+        existing = self.get_by_kind_content(validated_kind, normalized_content)
+        if existing is not None:
+            return self._touch_memory(
+                existing,
+                thread_id=thread_id,
+                source_run_id=source_run_id,
+                metadata=metadata,
+            )
 
         now = utc_now()
         record = MemoryRecord(
@@ -74,6 +83,63 @@ class SlotFlowMemoryStore:
             ),
         )
         return record
+
+    def get_by_kind_content(
+        self,
+        kind: MemoryKind,
+        content: str,
+    ) -> MemoryRecord | None:
+        """Return an existing memory with the same normalized kind and content."""
+
+        validated_kind = validate_memory_kind(kind)
+        normalized_content = normalize_memory_content(
+            content,
+            kind=validated_kind,
+        )
+        if not normalized_content:
+            return None
+        rows = self._fetchall(
+            "select * from memories where kind = ? and content = ? order by updated_at desc limit 1",
+            (validated_kind, normalized_content),
+        )
+        return row_to_memory(rows[0]) if rows else None
+
+    def _touch_memory(
+        self,
+        existing: MemoryRecord,
+        *,
+        thread_id: str | None,
+        source_run_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> MemoryRecord:
+        """Refresh metadata for an existing semantic duplicate without inserting."""
+
+        now = utc_now()
+        next_metadata = dict(existing.metadata)
+        if metadata:
+            next_metadata.update(metadata)
+        if source_run_id and source_run_id != existing.source_run_id:
+            next_metadata["last_source_run_id"] = source_run_id
+
+        next_source_run_id = existing.source_run_id
+        if next_source_run_id is None and source_run_id:
+            next_source_run_id = source_run_id
+
+        self._execute(
+            """
+            update memories
+            set thread_id = ?, source_run_id = ?, metadata_json = ?, updated_at = ?
+            where id = ?
+            """,
+            (
+                thread_id or existing.thread_id,
+                next_source_run_id,
+                json.dumps(next_metadata, ensure_ascii=False),
+                now.isoformat(),
+                existing.id,
+            ),
+        )
+        return self.get_memory(existing.id)
 
     def list_memories(
         self,

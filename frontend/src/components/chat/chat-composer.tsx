@@ -48,12 +48,21 @@ type ChatComposerProps = {
   fileInputRef: RefObject<HTMLInputElement | null>;
   isStreaming: boolean;
   isUploading: boolean;
+  queuedMessages: ComposerQueuedMessage[];
   onAttachFiles: () => void;
   onCancel: () => void;
   onClearError: () => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void | Promise<void>;
   onRemoveAttachment: (fileId: string) => void;
+  onRemoveQueuedMessage: (messageId: string) => void;
   onSendMessage: (message: string) => Promise<boolean>;
+};
+
+export type ComposerQueuedMessage = {
+  id: string;
+  text: string;
+  attachmentCount: number;
+  position: number;
 };
 
 export function ChatComposer({
@@ -62,11 +71,13 @@ export function ChatComposer({
   fileInputRef,
   isStreaming,
   isUploading,
+  queuedMessages,
   onAttachFiles,
   onCancel,
   onClearError,
   onFileChange,
   onRemoveAttachment,
+  onRemoveQueuedMessage,
   onSendMessage,
 }: ChatComposerProps) {
   const [input, setInput] = useState("");
@@ -94,7 +105,7 @@ export function ChatComposer({
 
   async function submitCurrentInput() {
     const text = input.trim();
-    if (!text || isStreaming || isUploading) {
+    if (!text || isUploading) {
       return;
     }
 
@@ -118,6 +129,13 @@ export function ChatComposer({
       <div className="mx-auto w-full max-w-3xl">
         {error ? (
           <ComposerError message={error} onDismiss={onClearError} />
+        ) : null}
+
+        {queuedMessages.length > 0 ? (
+          <ComposerQueue
+            messages={queuedMessages}
+            onRemoveQueuedMessage={onRemoveQueuedMessage}
+          />
         ) : null}
 
         {attachments.length > 0 ? (
@@ -145,14 +163,13 @@ export function ChatComposer({
             <>
               <ComposerTextarea
                 input={input}
-                isStreaming={isStreaming}
                 textareaRef={textareaRef}
                 onInputChange={handleInputChange}
                 onKeyDown={handleKeyDown}
               />
               <div className="mt-3 flex items-center justify-between gap-2">
                 <ComposerTools
-                  disabled={isStreaming || isUploading}
+                  disabled={isUploading}
                   isUploading={isUploading}
                   onAttachFiles={onAttachFiles}
                 />
@@ -168,14 +185,13 @@ export function ChatComposer({
             <>
               <ComposerTools
                 compact
-                disabled={isStreaming || isUploading}
+                disabled={isUploading}
                 isUploading={isUploading}
                 onAttachFiles={onAttachFiles}
               />
               <ComposerTextarea
                 compact
                 input={input}
-                isStreaming={isStreaming}
                 textareaRef={textareaRef}
                 onInputChange={handleInputChange}
                 onKeyDown={handleKeyDown}
@@ -191,6 +207,48 @@ export function ChatComposer({
         </div>
       </div>
     </form>
+  );
+}
+
+function ComposerQueue({
+  messages,
+  onRemoveQueuedMessage,
+}: {
+  messages: ComposerQueuedMessage[];
+  onRemoveQueuedMessage: (messageId: string) => void;
+}) {
+  return (
+    <div className="mb-3 flex max-h-36 flex-col gap-1 overflow-y-auto rounded-2xl border bg-muted/30 p-2">
+      {messages.map((message) => (
+        <div
+          key={message.id}
+          className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 text-sm"
+        >
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {message.position}
+          </span>
+          <span className="min-w-0 flex-1 truncate" title={message.text}>
+            {message.text}
+          </span>
+          {message.attachmentCount > 0 ? (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {message.attachmentCount} 个附件
+            </span>
+          ) : null}
+          <span className="shrink-0 text-xs text-muted-foreground">排队中</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            title="移出队列"
+            onClick={() => onRemoveQueuedMessage(message.id)}
+          >
+            <X className="size-4" />
+            <span className="sr-only">移出队列</span>
+          </Button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -256,14 +314,12 @@ function ComposerAttachments({
 function ComposerTextarea({
   compact = false,
   input,
-  isStreaming,
   textareaRef,
   onInputChange,
   onKeyDown,
 }: {
   compact?: boolean;
   input: string;
-  isStreaming: boolean;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -273,7 +329,6 @@ function ComposerTextarea({
       ref={textareaRef}
       value={input}
       onChange={onInputChange}
-      disabled={isStreaming}
       rows={1}
       placeholder="有问题，尽管问"
       onKeyDown={onKeyDown}
@@ -402,17 +457,32 @@ function ComposerActions({
       </Button>
 
       {isStreaming ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          title="停止"
-          onClick={onCancel}
-          className="size-11 rounded-full bg-muted text-foreground hover:bg-muted/80"
-        >
-          <Square className="size-4 fill-current" />
-          <span className="sr-only">停止</span>
-        </Button>
+        <>
+          {canSend ? (
+            <Button
+              type="button"
+              size="icon"
+              title="加入队列"
+              disabled={!canSend}
+              onClick={onSend}
+              className="size-11 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:bg-muted disabled:text-muted-foreground"
+            >
+              <ArrowUp className="size-6" />
+              <span className="sr-only">加入队列</span>
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            title="停止"
+            onClick={onCancel}
+            className="size-11 rounded-full bg-muted text-foreground hover:bg-muted/80"
+          >
+            <Square className="size-4 fill-current" />
+            <span className="sr-only">停止</span>
+          </Button>
+        </>
       ) : (
         <Button
           type="button"

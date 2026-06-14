@@ -143,10 +143,7 @@ def test_load_runtime_config_from_env_reads_mcp_config(
 
     assert config.mcp_config == SlotFlowMcpConfig(
         enabled=True,
-        servers=(
-            SlotFlowMcpServerConfig(name="filesystem"),
-            SlotFlowMcpServerConfig(name="search"),
-        ),
+        servers=(SlotFlowMcpServerConfig(name="search"),),
     )
     assert config.mcp_tool_provider is None
 
@@ -168,6 +165,11 @@ def test_load_runtime_config_from_env_reads_real_mcp_json_config(
                 "command": "python",
                 "args": ["-m", "fake_server"]
             },
+            "search": {
+                "transport": "stdio",
+                "command": "python",
+                "args": ["-m", "search_server"]
+            },
             "disabled": {
                 "enabled": false,
                 "transport": "streamable_http",
@@ -183,11 +185,11 @@ def test_load_runtime_config_from_env_reads_real_mcp_json_config(
         enabled=True,
         servers=(
             SlotFlowMcpServerConfig(
-                name="filesystem",
+                name="search",
                 config={
                     "transport": "stdio",
                     "command": "python",
-                    "args": ["-m", "fake_server"],
+                    "args": ["-m", "search_server"],
                 },
             ),
             SlotFlowMcpServerConfig(

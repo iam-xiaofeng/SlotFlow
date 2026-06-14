@@ -14,6 +14,7 @@ from app.harness.mcp.store import (
     McpServerNotFoundError,
     ProtectedMcpServerError,
     SlotFlowMcpConfigStore,
+    is_removed_default_mcp_server,
 )
 
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     "SlotFlowMcpServerConfig",
     "build_multi_server_mcp_connections",
     "ensure_mcp_tools_loaded",
+    "is_removed_default_mcp_server",
     "load_mcp_tools",
 ]
