@@ -18,6 +18,7 @@ HTTP 请求
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
@@ -153,39 +154,43 @@ async def stream_thread_run(
         snapshot_message_content: str | None = None
         completed = False
 
-        events = adapter.stream_events(request=body, bundle=bundle)
-        async for event in iter_business_events(events):
-            if event.event == "message.delta":
-                delta = event.data.get("delta")
-                if isinstance(delta, str):
-                    assistant_text_parts.append(delta)
+        try:
+            events = adapter.stream_events(request=body, bundle=bundle)
+            async for event in iter_business_events(events):
+                if event.event == "message.delta":
+                    delta = event.data.get("delta")
+                    if isinstance(delta, str):
+                        assistant_text_parts.append(delta)
 
-            if event.event == "state.snapshot":
-                snapshot_message_content = latest_assistant_content(event)
+                if event.event == "state.snapshot":
+                    snapshot_message_content = latest_assistant_content(event)
 
-            if event.event == "run.error":
-                repo.update_run_status(
-                    run.id,
-                    status="failed",
-                    error=str(event.data.get("message", "agent stream failed")),
-                )
-                yield encode_sse_event(event)
-                return
-
-            if event.event == "run.finished":
-                content = snapshot_message_content or "".join(assistant_text_parts)
-                if content:
-                    repo.add_message(
-                        thread_id,
-                        role="assistant",
-                        content=content,
-                        run_id=run.id,
-                        metadata={"source": "agent"},
+                if event.event == "run.error":
+                    repo.update_run_status(
+                        run.id,
+                        status="failed",
+                        error=str(event.data.get("message", "agent stream failed")),
                     )
-                repo.update_run_status(run.id, status="completed")
-                completed = True
+                    yield encode_sse_event(event)
+                    return
 
-            yield encode_sse_event(event)
+                if event.event == "run.finished":
+                    content = snapshot_message_content or "".join(assistant_text_parts)
+                    if content:
+                        repo.add_message(
+                            thread_id,
+                            role="assistant",
+                            content=content,
+                            run_id=run.id,
+                            metadata={"source": "agent"},
+                        )
+                    repo.update_run_status(run.id, status="completed")
+                    completed = True
+
+                yield encode_sse_event(event)
+        except asyncio.CancelledError:
+            repo.update_run_status(run.id, status="cancelled")
+            raise
 
         if not completed:
             repo.update_run_status(run.id, status="completed")

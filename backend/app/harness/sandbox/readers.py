@@ -64,7 +64,7 @@ class WorkspaceReadResult:
 def read_workspace_file(path: Path, *, relative_path: str) -> WorkspaceReadResult:
     """Read a workspace file as structured text/metadata for tool output."""
 
-    extension = path.suffix.lower()
+    extension = detect_workspace_file_extension(path)
     size_bytes = path.stat().st_size
 
     if extension in TEXT_EXTENSIONS:
@@ -252,6 +252,37 @@ def media_type_for_extension(extension: str) -> str:
         ".yaml": "application/yaml",
         ".yml": "application/yaml",
     }.get(extension, "application/octet-stream")
+
+
+def detect_workspace_file_extension(path: Path) -> str:
+    """Detect the file type from extension first, then from file content."""
+
+    extension = path.suffix.lower()
+    if extension:
+        return extension
+
+    with path.open("rb") as file:
+        header = file.read(32)
+    if header.startswith(b"%PDF-"):
+        return ".pdf"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header.startswith(b"\xff\xd8"):
+        return ".jpg"
+    if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+        return ".gif"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return ".webp"
+
+    if zipfile.is_zipfile(path):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                if "word/document.xml" in archive.namelist():
+                    return ".docx"
+        except zipfile.BadZipFile:
+            return ""
+
+    return ""
 
 
 def plain_text_excerpt(value: str, *, max_chars: int = 240) -> str:

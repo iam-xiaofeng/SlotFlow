@@ -37,7 +37,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { type UploadedFileRecord } from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
 
-import { formatFileSize } from "./chat-format";
+import { displayFileName, formatFileSize } from "./chat-format";
 
 type ChatComposerProps = {
   attachments: UploadedFileRecord[];
@@ -201,7 +201,7 @@ function ComposerAttachments({
           className="h-8 max-w-full gap-1.5 rounded-md pr-1"
         >
           <FileText className="size-4 shrink-0" />
-          <span className="max-w-52 truncate">{file.filename}</span>
+          <span className="max-w-52 truncate">{displayFileName(file)}</span>
           <span className="text-muted-foreground">
             {formatFileSize(file.size_bytes)}
           </span>

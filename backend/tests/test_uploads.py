@@ -12,6 +12,7 @@ from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.tools.workspace import build_workspace_tools
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
+from app.uploads.storage import normalize_upload_display_filename, sanitize_upload_filename
 
 
 def _client(tmp_path: Path, *, max_write_bytes: int = 1024) -> tuple[TestClient, SlotFlowUploadStore]:
@@ -45,6 +46,28 @@ def test_upload_file_stores_bytes_and_metadata_under_workspace(tmp_path: Path) -
 
     assert stored_path.read_bytes() == b"hello"
     assert json.loads(metadata_path.read_text(encoding="utf-8"))["id"] == body["id"]
+
+
+def test_sanitize_upload_filename_preserves_suffix_for_chinese_docx_name() -> None:
+    filename = "一种俯视监控视角下无骨架依赖的小目标相似行人跟踪方法.docx"
+
+    assert sanitize_upload_filename(filename) == "upload.docx"
+    assert normalize_upload_display_filename(filename) == filename
+
+
+def test_upload_response_keeps_original_filename_for_display(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    filename = "实时交通视频分析系统.pdf"
+
+    response = client.post(
+        "/api/uploads",
+        files={"file": (filename, b"%PDF-1.4", "application/pdf")},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["filename"] == "upload.pdf"
+    assert body["original_filename"] == filename
 
 
 def test_get_uploaded_file_returns_metadata(tmp_path: Path) -> None:

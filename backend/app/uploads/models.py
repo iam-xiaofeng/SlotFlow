@@ -14,6 +14,7 @@ class UploadedFileRecord(BaseModel):
 
     id: str
     filename: str
+    original_filename: str | None = None
     content_type: str | None = None
     size_bytes: int
     workspace_path: str

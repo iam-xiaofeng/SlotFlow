@@ -127,6 +127,7 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
     root = tmp_path / "workspace"
     root.mkdir()
     create_docx(root / "note.docx", "Docx hello")
+    create_docx(root / "docx", "No suffix docx hello")
     create_blank_pdf(root / "blank.pdf")
     (root / "photo.jpg").write_bytes(tiny_jpeg_bytes(width=2, height=1))
     tools = {
@@ -135,11 +136,17 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
     }
 
     docx = json.loads(tools["workspace_read"].invoke({"path": "note.docx"}))
+    no_suffix_docx = json.loads(tools["workspace_read"].invoke({"path": "docx"}))
     pdf = json.loads(tools["workspace_read"].invoke({"path": "blank.pdf"}))
     image = json.loads(tools["workspace_read"].invoke({"path": "photo.jpg"}))
 
     assert docx["kind"] == "document"
     assert docx["content"] == "Docx hello"
+    assert no_suffix_docx["kind"] == "document"
+    assert no_suffix_docx["content"] == "No suffix docx hello"
+    assert no_suffix_docx["media_type"] == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
     assert pdf["kind"] == "pdf"
     assert pdf["metadata"]["pages"] == 1
     assert pdf["warning"] == "pdf text extraction returned no text"

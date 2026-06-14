@@ -52,6 +52,7 @@ class SlotFlowUploadStore:
             )
 
         file_id = new_file_id()
+        original_filename = normalize_upload_display_filename(filename)
         safe_filename = sanitize_upload_filename(filename)
         workspace_path = f"uploads/{file_id}/{safe_filename}"
         target = self.workspace.resolve_path(workspace_path)
@@ -63,6 +64,7 @@ class SlotFlowUploadStore:
         record = UploadedFileRecord(
             id=file_id,
             filename=safe_filename,
+            original_filename=original_filename,
             content_type=content_type,
             size_bytes=len(data),
             workspace_path=workspace_path,
@@ -153,9 +155,14 @@ def sanitize_upload_filename(filename: str | None) -> str:
     if not raw:
         raw = "upload.bin"
 
-    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
-    if not sanitized:
-        sanitized = "upload.bin"
+    raw_stem, dot, raw_suffix = raw.rpartition(".")
+    if dot and raw_stem and re.fullmatch(r"[A-Za-z0-9]{1,16}", raw_suffix):
+        suffix = raw_suffix.lower()
+        stem = sanitize_filename_stem(raw_stem) or "upload"
+        sanitized = f"{stem}.{suffix}"
+    else:
+        sanitized = sanitize_filename_stem(raw) or "upload.bin"
+
     if len(sanitized) <= 128:
         return sanitized
 
@@ -163,6 +170,28 @@ def sanitize_upload_filename(filename: str | None) -> str:
     if dot and suffix:
         return f"{stem[: 127 - len(suffix)]}.{suffix}"[:128]
     return sanitized[:128]
+
+
+def sanitize_filename_stem(value: str) -> str:
+    """Sanitize the filename stem without accidentally deleting the suffix."""
+
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+
+
+def normalize_upload_display_filename(filename: str | None) -> str:
+    """Keep a user-facing filename without allowing path separators/control bytes."""
+
+    raw = (filename or "").replace("\\", "/").split("/")[-1].strip()
+    raw = raw.replace("\x00", "")
+    raw = re.sub(r"[\r\n\t]+", " ", raw).strip()
+    if not raw:
+        return "upload.bin"
+    if len(raw) <= 255:
+        return raw
+    stem, dot, suffix = raw.rpartition(".")
+    if dot and suffix:
+        return f"{stem[: 254 - len(suffix)]}.{suffix}"[:255]
+    return raw[:255]
 
 
 def validate_upload_id(file_id: str) -> None:

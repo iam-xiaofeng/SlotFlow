@@ -35,6 +35,7 @@ export type ChatStreamRequest = {
 export type UploadedFileRecord = {
   id: string;
   filename: string;
+  original_filename?: string | null;
   content_type?: string | null;
   size_bytes: number;
   workspace_path: string;

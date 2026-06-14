@@ -123,10 +123,12 @@ def build_system_prompt(
     if run_context.uploaded_files:
         sections.extend(["", "<slotflow-uploaded-files>"])
         for uploaded_file in run_context.uploaded_files:
+            display_name = uploaded_file.original_filename or uploaded_file.filename
             sections.append(
                 "- "
                 f"path={uploaded_file.workspace_path}; "
-                f"filename={uploaded_file.filename}; "
+                f"filename={display_name}; "
+                f"stored_filename={uploaded_file.filename}; "
                 f"content_type={uploaded_file.content_type or 'unknown'}; "
                 f"size_bytes={uploaded_file.size_bytes}"
             )

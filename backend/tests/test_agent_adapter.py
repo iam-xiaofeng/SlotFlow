@@ -21,7 +21,7 @@ from app.chat.agent_adapter import (
     normalize_values_snapshot,
     projection_item_to_agent_event,
 )
-from app.chat.models import ChatStreamRequest
+from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
 
 
@@ -50,6 +50,34 @@ def test_build_agent_input_uses_langchain_messages_shape() -> None:
             }
         ]
     }
+
+
+def test_build_agent_input_makes_current_uploads_unambiguous() -> None:
+    request = ChatStreamRequest(message="完整输出这个文件内容", files=["file_pdf"])
+    bundle = build_run_config(
+        thread_id="thread_test",
+        run_id="run_test",
+        request=request,
+        uploaded_files=[
+            UploadedFileContext(
+                id="file_pdf",
+                filename="upload.pdf",
+                original_filename="交通视频分析系统.pdf",
+                content_type="application/pdf",
+                size_bytes=8787636,
+                workspace_path="uploads/run_test/upload.pdf",
+            )
+        ],
+    )
+
+    payload = build_agent_input(request, bundle=bundle)
+    content = payload["messages"][0]["content"]
+
+    assert "完整输出这个文件内容" in content
+    assert "<slotflow-current-uploaded-files>" in content
+    assert "path=uploads/run_test/upload.pdf" in content
+    assert "filename=交通视频分析系统.pdf" in content
+    assert "Do not answer from previous uploaded files" in content
 
 
 @pytest.mark.parametrize(

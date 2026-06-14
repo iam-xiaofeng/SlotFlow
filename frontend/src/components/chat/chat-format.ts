@@ -3,6 +3,7 @@ import { type ChatUiMessage } from "@/hooks/use-chat-stream";
 export type MessageFile = {
   id: string;
   filename: string;
+  original_filename?: string | null;
   size_bytes?: number;
 };
 
@@ -65,6 +66,12 @@ export function getMessageFiles(message: ChatUiMessage): MessageFile[] {
         {
           id: item.id,
           filename: item.filename,
+          original_filename:
+            "original_filename" in item &&
+            (typeof item.original_filename === "string" ||
+              item.original_filename === null)
+              ? item.original_filename
+              : undefined,
           size_bytes:
             "size_bytes" in item && typeof item.size_bytes === "number"
               ? item.size_bytes
@@ -74,4 +81,11 @@ export function getMessageFiles(message: ChatUiMessage): MessageFile[] {
     }
     return [];
   });
+}
+
+export function displayFileName(file: {
+  filename: string;
+  original_filename?: string | null;
+}) {
+  return file.original_filename || file.filename;
 }

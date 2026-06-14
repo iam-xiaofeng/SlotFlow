@@ -92,7 +92,7 @@ class LangGraphEventAgentAdapter:
 
         yield make_prepared_event(bundle=bundle)
 
-        stream_input = build_agent_input(request)
+        stream_input = build_agent_input(request, bundle=bundle)
 
         projection_stream = await self._graph.astream_events(
             stream_input,
@@ -224,7 +224,11 @@ async def flatten_message_projection_items(item: Any) -> AsyncIterator[Any]:
     yield item
 
 
-def build_agent_input(request: ChatStreamRequest) -> dict[str, Any]:
+def build_agent_input(
+    request: ChatStreamRequest,
+    *,
+    bundle: RunConfigBundle | None = None,
+) -> dict[str, Any]:
     """把 SlotFlow 请求体整理成 LangChain agent 输入。
 
     LangChain agent 的标准输入是 `{"messages": [...]}`。这里先只放一条 user
@@ -235,10 +239,43 @@ def build_agent_input(request: ChatStreamRequest) -> dict[str, Any]:
         "messages": [
             {
                 "role": "user",
-                "content": request.message,
+                "content": build_user_message_content(request=request, bundle=bundle),
             }
         ]
     }
+
+
+def build_user_message_content(
+    *,
+    request: ChatStreamRequest,
+    bundle: RunConfigBundle | None,
+) -> str:
+    """Make current attachments unambiguous inside the actual user message."""
+
+    if bundle is None or not bundle.context.uploaded_files:
+        return request.message
+
+    lines = [
+        request.message,
+        "",
+        "<slotflow-current-uploaded-files>",
+        "The following files are attached to the current user message.",
+        "If the user says this file/这个文件, it refers only to these current files.",
+        "For file-content questions, call workspace_read(path) on the current file path before answering.",
+        "Do not answer from previous uploaded files unless the user explicitly asks about history.",
+    ]
+    for uploaded_file in bundle.context.uploaded_files:
+        display_name = uploaded_file.original_filename or uploaded_file.filename
+        lines.append(
+            "- "
+            f"path={uploaded_file.workspace_path}; "
+            f"filename={display_name}; "
+            f"stored_filename={uploaded_file.filename}; "
+            f"content_type={uploaded_file.content_type or 'unknown'}; "
+            f"size_bytes={uploaded_file.size_bytes}"
+        )
+    lines.append("</slotflow-current-uploaded-files>")
+    return "\n".join(lines)
 
 
 def make_prepared_event(*, bundle: RunConfigBundle) -> AgentEvent:

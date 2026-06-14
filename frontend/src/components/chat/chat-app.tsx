@@ -203,6 +203,7 @@ export function ChatApp() {
         uploaded_files: currentAttachments.map((file) => ({
           id: file.id,
           filename: file.filename,
+          original_filename: file.original_filename,
           content_type: file.content_type,
           size_bytes: file.size_bytes,
         })),
@@ -248,7 +249,7 @@ export function ChatApp() {
         setAttachments((current) => [...current, ...uploadedFiles]);
         toast.success(
           uploadedFiles.length === 1
-            ? `${uploadedFiles[0].filename} uploaded`
+            ? `${uploadedFiles[0].original_filename ?? uploadedFiles[0].filename} uploaded`
             : `${uploadedFiles.length} files uploaded`,
         );
       }

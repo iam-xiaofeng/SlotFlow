@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import {
   formatFileSize,
   getMessageFiles,
+  displayFileName,
   type MessageFile,
   normalizeMathForMarkdown,
 } from "./chat-format";
@@ -104,7 +105,7 @@ function MessageAttachments({ files }: { files: MessageFile[] }) {
             <FileText className="size-5" />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{file.filename}</div>
+            <div className="truncate text-sm font-medium">{displayFileName(file)}</div>
             {typeof file.size_bytes === "number" ? (
               <div className="text-xs text-muted-foreground">
                 {formatFileSize(file.size_bytes)}
