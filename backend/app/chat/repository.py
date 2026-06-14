@@ -64,6 +64,10 @@ class RunNotFoundError(ChatRepositoryError):
     """请求的 run 不存在。"""
 
 
+class MessageNotFoundError(ChatRepositoryError):
+    """请求的 message 不存在。"""
+
+
 class ChatRepository(Protocol):
     """聊天仓库的最小业务边界。
 
@@ -77,6 +81,8 @@ class ChatRepository(Protocol):
 
     def get_thread(self, thread_id: str) -> ThreadRecord: ...
 
+    def delete_thread(self, thread_id: str) -> None: ...
+
     def add_message(
         self,
         thread_id: str,
@@ -88,6 +94,16 @@ class ChatRepository(Protocol):
     ) -> MessageRecord: ...
 
     def list_messages(self, thread_id: str) -> list[MessageRecord]: ...
+
+    def update_message_content(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        content: str,
+    ) -> MessageRecord: ...
+
+    def delete_messages_after(self, thread_id: str, message_id: str) -> int: ...
 
     def create_run(
         self,
@@ -165,6 +181,17 @@ class InMemoryChatRepository:
         with self._lock:
             return self._copy_thread(self._require_thread(thread_id))
 
+    def delete_thread(self, thread_id: str) -> None:
+        """删除一条 thread 以及它下面的 messages / runs。"""
+
+        with self._lock:
+            self._require_thread(thread_id)
+            for run_id in self._run_ids_by_thread.get(thread_id, []):
+                self._runs.pop(run_id, None)
+            self._run_ids_by_thread.pop(thread_id, None)
+            self._messages_by_thread.pop(thread_id, None)
+            self._threads.pop(thread_id, None)
+
     def add_message(
         self,
         thread_id: str,
@@ -200,6 +227,39 @@ class InMemoryChatRepository:
         with self._lock:
             self._require_thread(thread_id)
             return [self._copy_message(message) for message in self._messages_by_thread[thread_id]]
+
+    def update_message_content(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        content: str,
+    ) -> MessageRecord:
+        """更新一条已有消息正文。"""
+
+        with self._lock:
+            self._require_thread(thread_id)
+            for message in self._messages_by_thread[thread_id]:
+                if message.id == message_id:
+                    message.content = content
+                    self._touch_thread(thread_id)
+                    return self._copy_message(message)
+        raise MessageNotFoundError(f"message not found: {message_id}")
+
+    def delete_messages_after(self, thread_id: str, message_id: str) -> int:
+        """删除某条消息之后的所有消息，保留锚点消息。"""
+
+        with self._lock:
+            self._require_thread(thread_id)
+            messages = self._messages_by_thread[thread_id]
+            for index, message in enumerate(messages):
+                if message.id == message_id:
+                    deleted_count = len(messages) - index - 1
+                    if deleted_count:
+                        del messages[index + 1 :]
+                        self._touch_thread(thread_id)
+                    return deleted_count
+        raise MessageNotFoundError(f"message not found: {message_id}")
 
     def create_run(
         self,
@@ -384,6 +444,16 @@ class SQLiteChatRepository:
         with self._lock:
             return self._row_to_thread(self._fetch_thread_row(thread_id))
 
+    def delete_thread(self, thread_id: str) -> None:
+        """删除一条 thread，SQLite 外键会级联删除 messages / runs。"""
+
+        with self._lock, self._connection:
+            self._fetch_thread_row(thread_id)
+            self._connection.execute(
+                "DELETE FROM threads WHERE id = ?",
+                (thread_id,),
+            )
+
     def add_message(
         self,
         thread_id: str,
@@ -440,6 +510,45 @@ class SQLiteChatRepository:
                 (thread_id,),
             ).fetchall()
             return [self._row_to_message(row) for row in rows]
+
+    def update_message_content(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        content: str,
+    ) -> MessageRecord:
+        """更新一条已有消息正文，并推进 thread 更新时间。"""
+
+        with self._lock, self._connection:
+            self._fetch_message_row(thread_id, message_id)
+            self._connection.execute(
+                """
+                UPDATE messages
+                SET content = ?
+                WHERE thread_id = ? AND id = ?
+                """,
+                (content, thread_id, message_id),
+            )
+            self._touch_thread(thread_id)
+            return self._row_to_message(self._fetch_message_row(thread_id, message_id))
+
+    def delete_messages_after(self, thread_id: str, message_id: str) -> int:
+        """删除某条消息之后的所有消息，保留锚点消息。"""
+
+        with self._lock, self._connection:
+            row = self._fetch_message_row(thread_id, message_id)
+            cursor = self._connection.execute(
+                """
+                DELETE FROM messages
+                WHERE thread_id = ? AND sequence > ?
+                """,
+                (thread_id, row["sequence"]),
+            )
+            deleted_count = cursor.rowcount if cursor.rowcount is not None else 0
+            if deleted_count:
+                self._touch_thread(thread_id)
+            return deleted_count
 
     def create_run(
         self,
@@ -604,6 +713,20 @@ class SQLiteChatRepository:
         ).fetchone()
         if row is None:
             raise RunNotFoundError(f"run not found: {run_id}")
+        return row
+
+    def _fetch_message_row(self, thread_id: str, message_id: str) -> sqlite3.Row:
+        self._fetch_thread_row(thread_id)
+        row = self._connection.execute(
+            """
+            SELECT sequence, id, thread_id, role, content, run_id, metadata_json, created_at
+            FROM messages
+            WHERE thread_id = ? AND id = ?
+            """,
+            (thread_id, message_id),
+        ).fetchone()
+        if row is None:
+            raise MessageNotFoundError(f"message not found: {message_id}")
         return row
 
     def _touch_thread(self, thread_id: str) -> None:

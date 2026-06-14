@@ -92,6 +92,33 @@ def test_add_and_list_messages_keep_write_order(repo: ChatRepository) -> None:
     assert messages[1].metadata == {"source": "fake-agent"}
 
 
+def test_update_message_and_delete_later_messages(repo: ChatRepository) -> None:
+    """编辑最后一条用户消息时，可以覆盖正文并删除它后面的旧回复。"""
+
+    thread = repo.create_thread()
+    first_user = repo.add_message(thread.id, role="user", content="第一问")
+    first_assistant = repo.add_message(thread.id, role="assistant", content="第一答")
+    second_user = repo.add_message(thread.id, role="user", content="旧问题")
+    repo.add_message(thread.id, role="assistant", content="旧回答")
+
+    updated = repo.update_message_content(
+        thread.id,
+        second_user.id,
+        content="新问题",
+    )
+    deleted_count = repo.delete_messages_after(thread.id, second_user.id)
+    messages = repo.list_messages(thread.id)
+
+    assert updated.content == "新问题"
+    assert deleted_count == 1
+    assert [message.id for message in messages] == [
+        first_user.id,
+        first_assistant.id,
+        second_user.id,
+    ]
+    assert messages[-1].content == "新问题"
+
+
 def test_message_operations_fail_for_missing_thread(repo: ChatRepository) -> None:
     """不存在的 thread 不能悄悄创建，否则调用方很难发现传错了 ID。"""
 
@@ -100,6 +127,29 @@ def test_message_operations_fail_for_missing_thread(repo: ChatRepository) -> Non
 
     with pytest.raises(ThreadNotFoundError, match="thread not found"):
         repo.list_messages("thread_missing")
+
+
+def test_delete_thread_removes_messages_and_runs(repo: ChatRepository) -> None:
+    """删除 thread 时，其消息和 run 也不能再被读取。"""
+
+    thread = repo.create_thread()
+    run = repo.create_run(
+        thread.id,
+        model_name="fake-model",
+        mode="pro",
+        agent_name="default",
+    )
+    repo.add_message(thread.id, role="user", content="hello")
+
+    repo.delete_thread(thread.id)
+
+    assert repo.list_threads() == []
+    with pytest.raises(ThreadNotFoundError):
+        repo.get_thread(thread.id)
+    with pytest.raises(ThreadNotFoundError):
+        repo.list_messages(thread.id)
+    with pytest.raises(RunNotFoundError):
+        repo.get_run(run.id)
 
 
 def test_create_list_get_and_update_run(repo: ChatRepository) -> None:

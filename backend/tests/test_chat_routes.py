@@ -202,6 +202,11 @@ def test_thread_routes_create_list_get_and_list_messages() -> None:
     assert messages_response.status_code == 200
     assert messages_response.json() == []
 
+    delete_response = client.delete(f"/api/chat/threads/{thread['id']}")
+
+    assert delete_response.status_code == 204
+    assert client.get(f"/api/chat/threads/{thread['id']}").status_code == 404
+
 
 def test_missing_thread_routes_return_404() -> None:
     """不存在的 thread 要返回 404，而不是在仓库里悄悄创建。"""
@@ -273,6 +278,37 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
     assert runs[0].status == "completed"
     assert runs[0].model_name == "deepseek-v4-flash"
     assert runs[0].mode == "pro"
+
+
+def test_stream_run_can_reuse_user_message_for_edit_or_retry() -> None:
+    """编辑/重试最后一轮时，应覆盖 user message 并替换它后面的 assistant。"""
+
+    repo = InMemoryChatRepository()
+    client = _client(repo)
+    thread = client.post("/api/chat/threads", json={"title": "编辑测试"}).json()
+
+    first_response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "旧问题"},
+    )
+    original_user = repo.list_messages(thread["id"])[0]
+
+    second_response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={
+            "message": "新问题",
+            "reuse_user_message_id": original_user.id,
+        },
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    messages = repo.list_messages(thread["id"])
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[0].id == original_user.id
+    assert messages[0].content == "新问题"
+    assert "新问题" in messages[1].content
+    assert "旧问题" not in messages[1].content
 
 
 def test_stream_run_rejects_unknown_uploaded_file_without_persisting(

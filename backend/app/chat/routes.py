@@ -32,7 +32,7 @@ from app.chat.models import (
     ThreadRecord,
     UploadedFileContext,
 )
-from app.chat.repository import ChatRepository, ThreadNotFoundError
+from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotFoundError
 from app.chat.run_config import build_run_config
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
 from app.uploads.models import UploadedFileRecord
@@ -70,6 +70,17 @@ async def get_thread(thread_id: str, request: Request) -> ThreadRecord:
     repo = get_repo(request)
     try:
         return repo.get_thread(thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="thread not found") from exc
+
+
+@router.delete("/threads/{thread_id}", status_code=204)
+async def delete_thread(thread_id: str, request: Request) -> None:
+    """删除一条会话及其消息记录。"""
+
+    repo = get_repo(request)
+    try:
+        repo.delete_thread(thread_id)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
@@ -115,6 +126,13 @@ async def stream_thread_run(
 
     upload_store = get_upload_store(request)
     validate_uploaded_files_exist(body.files, store=upload_store)
+    if body.reuse_user_message_id:
+        reuse_user_message(
+            repo,
+            thread_id=thread_id,
+            message_id=body.reuse_user_message_id,
+            content=body.message,
+        )
     run = repo.create_run(
         thread_id,
         model_name=body.model_name,
@@ -131,16 +149,17 @@ async def stream_thread_run(
         for uploaded_file in uploaded_files
     ]
 
-    repo.add_message(
-        thread_id,
-        role="user",
-        content=body.message,
-        metadata={
-            "files": list(body.files),
-            "uploaded_files": uploaded_file_metadata,
-            "request_metadata": dict(body.metadata),
-        },
-    )
+    if body.reuse_user_message_id is None:
+        repo.add_message(
+            thread_id,
+            role="user",
+            content=body.message,
+            metadata={
+                "files": list(body.files),
+                "uploaded_files": uploaded_file_metadata,
+                "request_metadata": dict(body.metadata),
+            },
+        )
     bundle = build_run_config(
         thread_id=thread_id,
         run_id=run.id,
@@ -238,6 +257,36 @@ def validate_uploaded_files_exist(
             store.get_upload(file_id)
         except UploadNotFoundError as exc:
             raise HTTPException(status_code=404, detail="upload not found") from exc
+
+
+def reuse_user_message(
+    repo: ChatRepository,
+    *,
+    thread_id: str,
+    message_id: str,
+    content: str,
+) -> None:
+    """Overwrite a user message and remove later messages before regenerating."""
+
+    try:
+        target = next(
+            message
+            for message in repo.list_messages(thread_id)
+            if message.id == message_id
+        )
+    except StopIteration as exc:
+        raise HTTPException(status_code=404, detail="message not found") from exc
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="thread not found") from exc
+
+    if target.role != "user":
+        raise HTTPException(status_code=400, detail="message must be a user message")
+
+    try:
+        repo.update_message_content(thread_id, message_id, content=content)
+        repo.delete_messages_after(thread_id, message_id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="message not found") from exc
 
 
 def stage_uploaded_files(

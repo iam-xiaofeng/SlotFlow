@@ -89,6 +89,10 @@ class ChatStreamRequest(BaseModel):
     agent_name: str = "default"
     files: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    reuse_user_message_id: str | None = Field(
+        default=None,
+        description="可选：复用并覆盖一条已有 user message，用于编辑或重试最后一轮。",
+    )
 
     @field_validator("message")
     @classmethod
