@@ -195,3 +195,20 @@ def test_read_artifact_rejects_non_artifact_paths(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "artifact path must be under artifacts/"
+
+
+def test_raw_artifact_serves_html_inline(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/chart.html")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("<button>zoom</button>", encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/raw",
+        params={"path": "artifacts/chart.html"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-disposition"] == "inline"
+    assert response.text == "<button>zoom</button>"

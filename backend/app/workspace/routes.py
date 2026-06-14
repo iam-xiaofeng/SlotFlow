@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import mimetypes
+
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 
 from app.harness.sandbox import WorkspacePathError
 from app.uploads.storage import SlotFlowUploadStore
@@ -49,6 +52,32 @@ async def read_artifact(
         raise HTTPException(status_code=404, detail="artifact not found") from exc
 
     return WorkspaceReadRecord.model_validate(result.model_dump())
+
+
+@router.get("/artifacts/raw")
+async def raw_artifact(
+    request: Request,
+    path: str = Query(min_length=1),
+) -> FileResponse:
+    """Serve one generated artifact for browser preview."""
+
+    if path == "artifacts" or not path.startswith("artifacts/"):
+        raise HTTPException(status_code=400, detail="artifact path must be under artifacts/")
+
+    workspace = get_upload_store(request).workspace
+    try:
+        target = workspace.resolve_path(path)
+    except WorkspacePathError as exc:
+        raise HTTPException(status_code=404, detail="artifact not found") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 def get_upload_store(request: Request) -> SlotFlowUploadStore:

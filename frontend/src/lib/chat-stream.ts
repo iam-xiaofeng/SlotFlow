@@ -208,6 +208,14 @@ export async function readArtifact(
   return response.json() as Promise<WorkspaceReadRecord>;
 }
 
+export function resolveArtifactRawUrl(path: string): string {
+  const params = new URLSearchParams({ path });
+  return joinBaseUrl(
+    resolveChatStreamBaseUrl(),
+    `/api/workspace/artifacts/raw?${params.toString()}`,
+  );
+}
+
 export async function listSkills(
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord[]> {
