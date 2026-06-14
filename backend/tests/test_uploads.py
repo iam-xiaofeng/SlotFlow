@@ -156,3 +156,42 @@ def test_list_artifacts_returns_workspace_artifact_entries(tmp_path: Path) -> No
             "size_bytes": 9,
         }
     ]
+
+
+def test_read_artifact_returns_workspace_read_payload(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/summary.md")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("# Summary", encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "artifacts/summary.md"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "path": "artifacts/summary.md",
+        "kind": "text",
+        "media_type": "text/markdown",
+        "size_bytes": 9,
+        "source": "slotflow_workspace",
+        "metadata": {"format": "md"},
+        "content": "# Summary",
+        "warning": None,
+    }
+
+
+def test_read_artifact_rejects_non_artifact_paths(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    upload_path = store.workspace.resolve_path("uploads/file_abc123abc123/note.md")
+    upload_path.parent.mkdir(parents=True)
+    upload_path.write_text("# Private upload", encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "uploads/file_abc123abc123/note.md"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "artifact path must be under artifacts/"

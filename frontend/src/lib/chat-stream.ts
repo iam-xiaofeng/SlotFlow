@@ -48,6 +48,17 @@ export type WorkspaceEntryRecord = {
   size_bytes?: number | null;
 };
 
+export type WorkspaceReadRecord = {
+  path: string;
+  kind: "text" | "document" | "pdf" | "image" | "binary";
+  media_type: string;
+  size_bytes: number;
+  source: string;
+  metadata: Record<string, unknown>;
+  content?: string | null;
+  warning?: string | null;
+};
+
 export type SkillRecord = {
   name: string;
   description: string;
@@ -179,6 +190,22 @@ export async function listArtifacts(
   }
 
   return response.json() as Promise<WorkspaceEntryRecord[]>;
+}
+
+export async function readArtifact(
+  path: string,
+  options: ChatRequestOptions = {},
+): Promise<WorkspaceReadRecord> {
+  const params = new URLSearchParams({ path });
+  const response = await fetch(`/api/workspace/artifacts/read?${params.toString()}`, {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`read artifact failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<WorkspaceReadRecord>;
 }
 
 export async function listSkills(

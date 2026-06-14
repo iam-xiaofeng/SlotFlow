@@ -27,6 +27,7 @@ import {
   type ThreadRecord,
   type UploadedFileRecord,
   type WorkspaceEntryRecord,
+  type WorkspaceReadRecord,
   createHttpMcpServer,
   createMemory,
   deleteMcpServer,
@@ -38,6 +39,7 @@ import {
   listMemories,
   listSkills,
   listThreads,
+  readArtifact,
   setMcpServerEnabled,
   setSkillEnabled,
   updateMemory,
@@ -64,6 +66,9 @@ export function ChatApp() {
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
+  const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
+  const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
+  const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -262,8 +267,13 @@ export function ChatApp() {
     });
 
     if (result.accepted) {
-      await refreshThreads();
-      await refreshArtifacts();
+      await Promise.all([
+        refreshThreads(),
+        refreshArtifacts(),
+        refreshSkills(),
+        refreshMcpServers(),
+        refreshMemories(),
+      ]);
     } else {
       setInput(text);
       setAttachments(currentAttachments);
@@ -459,13 +469,34 @@ export function ChatApp() {
   }
 
   async function handleDeleteMemory(memory: MemoryRecord) {
+    setMemories((current) => current.filter((item) => item.id !== memory.id));
     try {
       await deleteMemory(memory.id);
       await refreshMemories();
       toast.success("记忆已删除");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "delete memory failed";
+      await refreshMemories();
       toast.error(message);
+    }
+  }
+
+  async function handlePreviewArtifact(artifact: WorkspaceEntryRecord) {
+    if (artifact.kind !== "file") {
+      return;
+    }
+
+    setIsLoadingArtifactPreview(true);
+    setArtifactPreviewError(null);
+    try {
+      setArtifactPreview(await readArtifact(artifact.path));
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "read artifact failed";
+      setArtifactPreview(null);
+      setArtifactPreviewError(message);
+      toast.error(message);
+    } finally {
+      setIsLoadingArtifactPreview(false);
     }
   }
 
@@ -512,9 +543,12 @@ export function ChatApp() {
           disabled={isStreaming}
           filteredThreads={filteredThreads}
           artifacts={artifacts}
+          artifactPreview={artifactPreview}
+          artifactPreviewError={artifactPreviewError}
           skills={skills}
           mcpServers={mcpServers}
           memories={memories}
+          isLoadingArtifactPreview={isLoadingArtifactPreview}
           isLoading={isLoadingThreads}
           query={threadQuery}
           threadListError={threadListError}
@@ -527,6 +561,7 @@ export function ChatApp() {
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
           onInstallSkill={() => void handleInstallSkillFromRegistry()}
           onNewThread={handleNewThread}
+          onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
           onQueryChange={setThreadQuery}
           onToggleMcpServer={(server, enabled) => void handleToggleMcpServer(server, enabled)}
           onToggleSkill={(skill, enabled) => void handleToggleSkill(skill, enabled)}

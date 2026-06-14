@@ -56,13 +56,17 @@ import {
   type SkillRecord,
   type ThreadRecord,
   type WorkspaceEntryRecord,
+  type WorkspaceReadRecord,
 } from "@/lib/chat-stream";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
+  artifactPreview: WorkspaceReadRecord | null;
+  artifactPreviewError: string | null;
   artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
   filteredThreads: ThreadRecord[];
+  isLoadingArtifactPreview: boolean;
   isLoading: boolean;
   memories: MemoryRecord[];
   mcpServers: McpServerRecord[];
@@ -78,6 +82,7 @@ type ThreadSidebarProps = {
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill: () => void;
   onNewThread: () => void;
+  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onQueryChange: (query: string) => void;
   onSelectThread: (thread: ThreadRecord) => void;
   onToggleMcpServer: (server: McpServerRecord, enabled: boolean) => void;
@@ -87,9 +92,12 @@ type ThreadSidebarProps = {
 
 export function ThreadSidebar({
   activeThreadId,
+  artifactPreview,
+  artifactPreviewError,
   artifacts,
   disabled,
   filteredThreads,
+  isLoadingArtifactPreview,
   isLoading,
   memories,
   mcpServers,
@@ -105,6 +113,7 @@ export function ThreadSidebar({
   onEditMemory,
   onInstallSkill,
   onNewThread,
+  onPreviewArtifact,
   onQueryChange,
   onSelectThread,
   onToggleMcpServer,
@@ -177,7 +186,14 @@ export function ThreadSidebar({
                 />
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu kind="artifacts" artifacts={artifacts} />
+                <ContextPickerMenu
+                  kind="artifacts"
+                  artifactPreview={artifactPreview}
+                  artifactPreviewError={artifactPreviewError}
+                  artifacts={artifacts}
+                  isLoadingArtifactPreview={isLoadingArtifactPreview}
+                  onPreviewArtifact={onPreviewArtifact}
+                />
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <MoreToolsMenu />
@@ -278,7 +294,10 @@ const contextPickerConfig = {
 
 function ContextPickerMenu({
   kind,
+  artifactPreview,
+  artifactPreviewError,
   artifacts = [],
+  isLoadingArtifactPreview = false,
   memories = [],
   skills = [],
   mcpServers = [],
@@ -289,12 +308,16 @@ function ContextPickerMenu({
   onDeleteSkill,
   onEditMemory,
   onInstallSkill,
+  onPreviewArtifact,
   onToggleMcpServer,
   onToggleSkill,
   onUploadSkill,
 }: {
   kind: ContextPickerKind;
+  artifactPreview?: WorkspaceReadRecord | null;
+  artifactPreviewError?: string | null;
   artifacts?: WorkspaceEntryRecord[];
+  isLoadingArtifactPreview?: boolean;
   memories?: MemoryRecord[];
   skills?: SkillRecord[];
   mcpServers?: McpServerRecord[];
@@ -305,6 +328,7 @@ function ContextPickerMenu({
   onDeleteSkill?: (skill: SkillRecord) => void;
   onEditMemory?: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill?: () => void;
+  onPreviewArtifact?: (artifact: WorkspaceEntryRecord) => void;
   onToggleMcpServer?: (server: McpServerRecord, enabled: boolean) => void;
   onToggleSkill?: (skill: SkillRecord, enabled: boolean) => void;
   onUploadSkill?: () => void;
@@ -367,12 +391,13 @@ function ContextPickerMenu({
             onEditMemory={onEditMemory}
           />
         ) : hasArtifacts ? (
-          artifacts.slice(0, 8).map((artifact) => (
-            <DropdownMenuItem key={artifact.path} disabled className="gap-3">
-              <FileText className="size-5" />
-              <span className="min-w-0 truncate">{artifact.path.replace(/^artifacts\//, "")}</span>
-            </DropdownMenuItem>
-          ))
+          <ArtifactList
+            artifacts={artifacts}
+            preview={artifactPreview ?? null}
+            previewError={artifactPreviewError ?? null}
+            isLoadingPreview={isLoadingArtifactPreview}
+            onPreviewArtifact={onPreviewArtifact}
+          />
         ) : (
           <DropdownMenuItem disabled className="gap-3">
             <Icon className="size-5" />
@@ -409,6 +434,126 @@ function ContextPickerMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function ArtifactList({
+  artifacts,
+  preview,
+  previewError,
+  isLoadingPreview,
+  onPreviewArtifact,
+}: {
+  artifacts: WorkspaceEntryRecord[];
+  preview: WorkspaceReadRecord | null;
+  previewError: string | null;
+  isLoadingPreview: boolean;
+  onPreviewArtifact?: (artifact: WorkspaceEntryRecord) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex max-h-56 flex-col gap-1 overflow-y-auto">
+        {artifacts.slice(0, 12).map((artifact) => {
+          const active = preview?.path === artifact.path;
+          return (
+            <DropdownMenuItem
+              key={artifact.path}
+              className="gap-3"
+              data-active={active || undefined}
+              disabled={artifact.kind !== "file"}
+              onClick={(event) => {
+                event.preventDefault();
+                if (artifact.kind === "file") {
+                  onPreviewArtifact?.(artifact);
+                }
+              }}
+            >
+              <FileText className="size-5" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">
+                  {artifact.path.replace(/^artifacts\//, "")}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {artifact.kind}
+                  {typeof artifact.size_bytes === "number"
+                    ? ` · ${formatBytes(artifact.size_bytes)}`
+                    : ""}
+                </span>
+              </span>
+            </DropdownMenuItem>
+          );
+        })}
+      </div>
+      <ArtifactPreview
+        preview={preview}
+        previewError={previewError}
+        isLoadingPreview={isLoadingPreview}
+      />
+    </div>
+  );
+}
+
+function ArtifactPreview({
+  preview,
+  previewError,
+  isLoadingPreview,
+}: {
+  preview: WorkspaceReadRecord | null;
+  previewError: string | null;
+  isLoadingPreview: boolean;
+}) {
+  if (isLoadingPreview) {
+    return (
+      <div className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
+        正在读取产物...
+      </div>
+    );
+  }
+
+  if (previewError) {
+    return (
+      <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
+        {previewError}
+      </div>
+    );
+  }
+
+  if (!preview) {
+    return (
+      <div className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
+        点击一个产物查看内容
+      </div>
+    );
+  }
+
+  const body = preview.content?.trim()
+    ? preview.content
+    : preview.warning || JSON.stringify(preview.metadata, null, 2);
+
+  return (
+    <div className="rounded-md border bg-muted/30">
+      <div className="border-b px-3 py-2">
+        <div className="truncate text-sm font-medium">
+          {preview.path.replace(/^artifacts\//, "")}
+        </div>
+        <div className="truncate text-xs text-muted-foreground">
+          {preview.kind} · {preview.media_type} · {formatBytes(preview.size_bytes)}
+        </div>
+      </div>
+      <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 text-xs leading-5">
+        {body}
+      </pre>
+    </div>
+  );
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ManagedContextRow({
