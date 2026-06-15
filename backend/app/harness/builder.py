@@ -135,6 +135,7 @@ def build_system_prompt(
             "After installing a relevant Skill, use it for the corresponding work as soon as it is available; if it only becomes available on the next run, say that plainly and continue with the best current tools.",
             "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
             "When uploaded files are present, their workspace paths are injected into the latest user message; call workspace_read(path) before answering file-content questions.",
+            "Use ask_clarification when the user's request is underspecified, has several plausible targets, requires a risky confirmation, or needs a user preference before meaningful work can continue. Provide short options for the user whenever possible.",
             "User-visible generated files must be written with artifact_write, not workspace_write.",
             "When the answer includes a chart, report, visualization, flowchart, comparison table, interactive demo, or code preview, create an artifact by default unless the user explicitly asks for text only.",
             "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",

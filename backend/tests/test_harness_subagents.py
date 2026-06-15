@@ -121,6 +121,7 @@ def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary()
     )
 
     assert [tool.name for tool in tools] == [
+        "ask_clarification",
         "slotflow_context",
         "workspace_list",
         "workspace_read",

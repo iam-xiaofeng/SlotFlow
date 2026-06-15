@@ -20,6 +20,7 @@ from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
 from app.harness.middleware import (
+    SlotFlowClarificationMiddleware,
     SlotFlowMiddlewareConfig,
     SlotFlowRuntimeSummaryMiddleware,
     SlotFlowSkillsPreflightMiddleware,
@@ -28,6 +29,7 @@ from app.harness.middleware import (
     SlotFlowUploadsMiddleware,
     build_harness_middleware,
 )
+from app.harness.middleware.clarification_middleware import build_clarification_payload
 from app.harness.middleware.tool_safety import repair_dangling_tool_calls
 from app.harness.sandbox import SlotFlowSandboxConfig
 
@@ -90,6 +92,7 @@ def test_build_harness_middleware_adds_runtime_summary_by_default() -> None:
         "SlotFlowToolSafetyMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
@@ -105,6 +108,7 @@ def test_build_harness_middleware_can_disable_runtime_summary() -> None:
         "SlotFlowToolSafetyMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
     ]
 
@@ -118,6 +122,7 @@ def test_build_harness_middleware_can_disable_tool_safety() -> None:
     assert [item.name for item in middleware] == [
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
@@ -137,6 +142,7 @@ def test_build_harness_middleware_dedupes_by_name() -> None:
         "SlotFlowToolSafetyMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
     ]
     assert middleware[0] is replacement
@@ -183,6 +189,65 @@ def test_skills_preflight_middleware_skips_simple_chat() -> None:
 
     assert update is None
     assert calls == []
+
+
+def test_clarification_middleware_intercepts_tool_call() -> None:
+    middleware = SlotFlowClarificationMiddleware()
+    request = ToolCallRequest(
+        tool_call={
+            "name": "ask_clarification",
+            "args": {
+                "question": "你想分析哪个币种？",
+                "clarification_type": "ambiguous_requirement",
+                "context": "昨天的记忆里有 BTC 和 ETH。",
+                "options": '["BTC", "ETH", "其他"]',
+            },
+            "id": "call_clarify",
+        },
+        tool=None,
+        state={},
+        runtime=Runtime(context=_bundle().context),
+    )
+
+    def handler(_: ToolCallRequest) -> ToolMessage:
+        raise AssertionError("clarification tool should be intercepted")
+
+    command = middleware.wrap_tool_call(request, handler)
+
+    assert command.goto == "__end__"
+    message = command.update["messages"][0]
+    payload = json.loads(str(message.content))
+    assert isinstance(message, ToolMessage)
+    assert message.name == "ask_clarification"
+    assert message.tool_call_id == "call_clarify"
+    assert payload["id"] == "clarification:call_clarify"
+    assert payload["type"] == "clarification"
+    assert payload["source"] == "slotflow_clarification"
+    assert payload["question"] == "你想分析哪个币种？"
+    assert payload["options"] == [
+        {"id": "A", "label": "BTC"},
+        {"id": "B", "label": "ETH"},
+        {"id": "C", "label": "其他"},
+    ]
+
+
+def test_clarification_payload_normalizes_dict_options() -> None:
+    payload = build_clarification_payload(
+        {
+            "name": "ask_clarification",
+            "args": {
+                "question": "选一个方向",
+                "clarification_type": "approach_choice",
+                "options": [{"label": "先做后端"}, {"text": "先做前端"}],
+            },
+        }
+    )
+
+    assert payload["id"].startswith("clarification:")
+    assert payload["options"] == [
+        {"id": "A", "label": "先做后端"},
+        {"id": "B", "label": "先做前端"},
+    ]
 
 
 def test_todo_middleware_exposes_write_todos_tool_and_prompt() -> None:

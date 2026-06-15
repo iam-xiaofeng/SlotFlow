@@ -1,6 +1,6 @@
 """SlotFlow harness tools。"""
 
-from app.harness.tools.builtins import slotflow_context_tool
+from app.harness.tools.builtins import ask_clarification_tool, slotflow_context_tool
 from app.harness.tools.customization import build_customization_tools
 from app.harness.tools.network import build_network_tools
 from app.harness.tools.registry import build_harness_tools
@@ -11,5 +11,6 @@ __all__ = [
     "build_harness_tools",
     "build_network_tools",
     "build_workspace_tools",
+    "ask_clarification_tool",
     "slotflow_context_tool",
 ]

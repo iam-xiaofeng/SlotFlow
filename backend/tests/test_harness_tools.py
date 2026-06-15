@@ -19,7 +19,7 @@ from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
 from app.harness.sandbox import SlotFlowSandboxConfig
-from app.harness.tools import slotflow_context_tool
+from app.harness.tools import ask_clarification_tool, slotflow_context_tool
 from app.harness.tools.registry import build_harness_tools
 from app.harness.tools.workspace import build_workspace_tools
 
@@ -59,6 +59,25 @@ def test_slotflow_context_tool_is_read_only_and_json_shaped() -> None:
     }
 
 
+def test_ask_clarification_tool_returns_structured_placeholder() -> None:
+    raw = ask_clarification_tool.invoke(
+        {
+            "question": "你想分析哪个币种？",
+            "clarification_type": "ambiguous_requirement",
+            "context": "昨天的记忆里有 BTC 和 ETH。",
+            "options": ["BTC", "ETH", "其他"],
+        }
+    )
+
+    assert json.loads(raw) == {
+        "question": "你想分析哪个币种？",
+        "clarification_type": "ambiguous_requirement",
+        "context": "昨天的记忆里有 BTC 和 ETH。",
+        "options": ["BTC", "ETH", "其他"],
+        "source": "slotflow_clarification_tool",
+    }
+
+
 def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
     """registry 是 builtin/workspace/network/customization 等工具的统一入口。"""
 
@@ -75,6 +94,7 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
 
     assert [tool.name for tool in tools] == [
         "slotflow_context",
+        "ask_clarification",
         "workspace_list",
         "workspace_read",
         "workspace_tree",

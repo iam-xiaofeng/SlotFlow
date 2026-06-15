@@ -10,12 +10,15 @@ LangGraph v3 typed projections
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.chat.agent_adapter import (
     AgentEvent,
     LangGraphEventAgentAdapter,
     build_agent_input,
+    clarification_event_from_snapshot,
     collect_agent_events,
     extract_message_delta,
     normalize_values_snapshot,
@@ -166,6 +169,41 @@ def test_normalize_values_snapshot_keeps_thread_and_run_identity() -> None:
     assert snapshot["thread_id"] == "thread_test"
     assert snapshot["run_id"] == "run_test"
     assert snapshot["messages"] == [{"role": "assistant", "content": "完成"}]
+
+
+def test_clarification_tool_message_becomes_requested_event() -> None:
+    payload = {
+        "type": "clarification",
+        "id": "clarification:call_1",
+        "question": "你想分析哪个币种？",
+        "clarification_type": "ambiguous_requirement",
+        "context": "昨天的记忆里有 BTC 和 ETH。",
+        "options": [{"id": "A", "label": "BTC"}],
+        "source": "slotflow_clarification",
+    }
+    snapshot = normalize_values_snapshot(
+        item={
+            "messages": [
+                {
+                    "role": "tool",
+                    "name": "ask_clarification",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                }
+            ]
+        },
+        bundle=_bundle(),
+    )
+
+    event = clarification_event_from_snapshot(snapshot)
+
+    assert event == AgentEvent(
+        event="clarification.requested",
+        data={
+            **payload,
+            "thread_id": "thread_test",
+            "run_id": "run_test",
+        },
+    )
 
 
 def test_run_bundle_keeps_business_context_out_of_configurable() -> None:

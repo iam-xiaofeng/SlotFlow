@@ -8,6 +8,9 @@ from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.memory import SlotFlowMemoryStore
 from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
+from app.harness.middleware.clarification_middleware import (
+    SlotFlowClarificationMiddleware,
+)
 from app.harness.middleware.config import SlotFlowMiddlewareConfig
 from app.harness.middleware.long_term_memory import SlotFlowLongTermMemoryMiddleware
 from app.harness.middleware.skills_preflight_middleware import (
@@ -57,6 +60,9 @@ def build_harness_middleware(
 
     if resolved.uploads_enabled:
         middleware.append(SlotFlowUploadsMiddleware())
+
+    if tools_enabled and resolved.clarification_enabled:
+        middleware.append(SlotFlowClarificationMiddleware())
 
     if tools_enabled and resolved.todo_enabled and features.plan_enabled:
         middleware.append(SlotFlowTodoMiddleware())

@@ -14,7 +14,7 @@ from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, load_mcp_tools
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore
 from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
-from app.harness.tools.builtins import slotflow_context_tool
+from app.harness.tools.builtins import ask_clarification_tool, slotflow_context_tool
 from app.harness.tools.customization import build_customization_tools
 from app.harness.tools.network import build_network_tools
 from app.harness.tools.workspace import build_workspace_tools
@@ -72,6 +72,7 @@ def build_harness_tools(
     return dedupe_tools_by_name(
         [
             *(extra_tools or []),
+            ask_clarification_tool,
             slotflow_context_tool,
             *workspace_tools,
             *network_tools,

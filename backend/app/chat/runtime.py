@@ -221,6 +221,10 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_LONG_TERM_MEMORY_ENABLED",
             default=True,
         ),
+        clarification_enabled=load_bool_from_env(
+            "SLOTFLOW_CLARIFICATION_MIDDLEWARE",
+            default=True,
+        ),
     )
 
 

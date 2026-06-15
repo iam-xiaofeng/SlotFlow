@@ -111,6 +111,7 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
     )
 
     assert [tool.name for tool in tools] == [
+        "ask_clarification",
         "slotflow_context",
         "workspace_list",
         "workspace_read",

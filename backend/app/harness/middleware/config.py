@@ -13,5 +13,6 @@ class SlotFlowMiddlewareConfig:
     tool_safety_enabled: bool = True
     long_term_memory_enabled: bool = True
     skills_preflight_enabled: bool = True
+    clarification_enabled: bool = True
     uploads_enabled: bool = True
     todo_enabled: bool = True

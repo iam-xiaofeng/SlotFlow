@@ -171,6 +171,7 @@ async def stream_thread_run(
     async def frames() -> AsyncIterator[str]:
         assistant_text_parts: list[str] = []
         snapshot_message_content: str | None = None
+        clarification_saved = False
         completed = False
 
         try:
@@ -184,6 +185,19 @@ async def stream_thread_run(
                 if event.event == "state.snapshot":
                     snapshot_message_content = latest_assistant_content(event)
 
+                if event.event == "clarification.requested" and not clarification_saved:
+                    repo.add_message(
+                        thread_id,
+                        role="assistant",
+                        content=format_clarification_content(event.data),
+                        run_id=run.id,
+                        metadata={
+                            "source": "clarification",
+                            "clarification": dict(event.data),
+                        },
+                    )
+                    clarification_saved = True
+
                 if event.event == "run.error":
                     repo.update_run_status(
                         run.id,
@@ -195,7 +209,7 @@ async def stream_thread_run(
 
                 if event.event == "run.finished":
                     content = snapshot_message_content or "".join(assistant_text_parts)
-                    if content:
+                    if content and not clarification_saved:
                         repo.add_message(
                             thread_id,
                             role="assistant",
@@ -243,6 +257,30 @@ def latest_assistant_content(event: BusinessSseEvent) -> str | None:
         if role in ("assistant", "ai") and isinstance(content, str):
             return content
     return None
+
+
+def format_clarification_content(payload: dict) -> str:
+    """Build readable fallback text for persisted clarification messages."""
+
+    lines: list[str] = []
+    context = payload.get("context")
+    question = payload.get("question")
+    if isinstance(context, str) and context.strip():
+        lines.append(context.strip())
+    if isinstance(question, str) and question.strip():
+        lines.append(question.strip())
+
+    options = payload.get("options")
+    if isinstance(options, list) and options:
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            option_id = option.get("id")
+            label = option.get("label")
+            if isinstance(option_id, str) and isinstance(label, str):
+                lines.append(f"{option_id}. {label}")
+
+    return "\n".join(lines).strip() or "请确认下一步。"
 
 
 def validate_uploaded_files_exist(

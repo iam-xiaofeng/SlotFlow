@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -36,6 +37,7 @@ AgentEventName = Literal[
     "run.prepared",
     "message.delta",
     "tool.delta",
+    "clarification.requested",
     "state.snapshot",
     "run.finished",
 ]
@@ -132,9 +134,10 @@ async def iter_projection_agent_events(
     queue: asyncio.Queue[ProjectionEnvelope | BaseException | object] = asyncio.Queue()
     done_sentinel = object()
     latest_snapshot: AgentEvent | None = None
+    latest_clarification: AgentEvent | None = None
 
     async def pump_projection(projection: str, channel: Any) -> None:
-        nonlocal latest_snapshot
+        nonlocal latest_clarification, latest_snapshot
         try:
             async for item in channel:
                 if projection == "values":
@@ -143,6 +146,10 @@ async def iter_projection_agent_events(
                         item=item,
                         bundle=bundle,
                     )
+                    if latest_snapshot is not None:
+                        latest_clarification = clarification_event_from_snapshot(
+                            latest_snapshot.data
+                        )
                     continue
                 if projection == "messages":
                     async for message_item in flatten_message_projection_items(item):
@@ -178,6 +185,8 @@ async def iter_projection_agent_events(
             )
             if event is not None:
                 yield event
+        if latest_clarification is not None:
+            yield latest_clarification
         if latest_snapshot is not None:
             yield latest_snapshot
     finally:
@@ -410,6 +419,50 @@ def normalize_values_snapshot(*, item: Any, bundle: RunConfigBundle) -> dict[str
         "messages": normalized_messages,
         "state": data,
     }
+
+
+def clarification_event_from_snapshot(snapshot: dict[str, Any]) -> AgentEvent | None:
+    """Extract the latest structured clarification request from a values snapshot."""
+
+    messages = snapshot.get("messages")
+    if not isinstance(messages, list):
+        return None
+
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "tool" or message.get("name") != "ask_clarification":
+            continue
+        payload = parse_clarification_payload(message.get("content"))
+        if payload is None:
+            return None
+        payload.setdefault("thread_id", snapshot.get("thread_id"))
+        payload.setdefault("run_id", snapshot.get("run_id"))
+        return AgentEvent(event="clarification.requested", data=payload)
+    return None
+
+
+def parse_clarification_payload(content: Any) -> dict[str, Any] | None:
+    """Parse the JSON ToolMessage produced by SlotFlowClarificationMiddleware."""
+
+    if isinstance(content, dict):
+        payload = content
+    elif isinstance(content, str):
+        try:
+            loaded = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(loaded, dict):
+            return None
+        payload = loaded
+    else:
+        return None
+
+    if payload.get("type") != "clarification":
+        return None
+    if payload.get("source") != "slotflow_clarification":
+        return None
+    return to_jsonable(payload)
 
 
 def normalize_messages(messages: Any) -> list[dict[str, Any]]:

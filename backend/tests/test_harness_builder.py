@@ -70,6 +70,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert graph is fake_graph
     assert captured["model"] is model
     assert [tool.name for tool in captured["tools"]] == [
+        "ask_clarification",
         "slotflow_context",
         "workspace_list",
         "workspace_read",
@@ -87,6 +88,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "SlotFlowToolSafetyMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
@@ -97,6 +99,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert "subagent_enabled=False" in captured["system_prompt"]
     assert "call find-skills before doing the work" in captured["system_prompt"]
     assert "Backend preflight" not in captured["system_prompt"]
+    assert "Use ask_clarification" in captured["system_prompt"]
     assert "User-visible generated files must be written with artifact_write" in captured[
         "system_prompt"
     ]
@@ -166,6 +169,7 @@ def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkey
         "SlotFlowToolSafetyMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
@@ -210,6 +214,7 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
     )
 
     assert [tool.name for tool in captured["tools"]] == [
+        "ask_clarification",
         "slotflow_context",
         "workspace_list",
         "workspace_read",
@@ -243,11 +248,12 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
         harness_config=SlotFlowHarnessConfig(
             system_prompt="base prompt",
             middleware_config=SlotFlowMiddlewareConfig(
-                    runtime_summary_enabled=False,
-                    tool_safety_enabled=False,
-                    skills_preflight_enabled=False,
-                    uploads_enabled=False,
-                    todo_enabled=False,
+                runtime_summary_enabled=False,
+                tool_safety_enabled=False,
+                skills_preflight_enabled=False,
+                clarification_enabled=False,
+                uploads_enabled=False,
+                todo_enabled=False,
             ),
         ),
     )

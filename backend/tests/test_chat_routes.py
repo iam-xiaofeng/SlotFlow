@@ -118,6 +118,40 @@ class CompletedAgentAdapter:
         )
 
 
+class ClarificationAgentAdapter:
+    """测试用 adapter：请求用户澄清并结束本轮。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        _ = request
+        payload = {
+            "type": "clarification",
+            "id": "clarification:call_route",
+            "question": "你想分析哪个币种？",
+            "clarification_type": "ambiguous_requirement",
+            "context": "昨天的记忆里有 BTC 和 ETH。",
+            "options": [
+                {"id": "A", "label": "BTC"},
+                {"id": "B", "label": "ETH"},
+            ],
+            "source": "slotflow_clarification",
+            "thread_id": bundle.context.thread_id,
+            "run_id": bundle.context.run_id,
+        }
+        yield AgentEvent(event="clarification.requested", data=payload)
+        yield AgentEvent(
+            event="run.finished",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+
+
 def _client(
     repo: ChatRepository,
     adapter=None,
@@ -361,3 +395,33 @@ def test_stream_run_error_event_marks_run_failed() -> None:
     assert runs[0].status == "failed"
     assert runs[0].error == "boom from test adapter"
     assert [message.role for message in messages] == ["user"]
+
+
+def test_stream_run_persists_clarification_request() -> None:
+    """clarification.requested 要保存成可重载的 assistant 消息。"""
+
+    repo = InMemoryChatRepository()
+    client = _client(repo, adapter=ClarificationAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "澄清链路"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "分析我昨天说的虚拟货币"},
+    )
+    events = _parse_sse(response.text)
+    messages = repo.list_messages(thread["id"])
+    runs = repo.list_runs(thread["id"])
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == [
+        "clarification.requested",
+        "run.finished",
+    ]
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[1].content.startswith("昨天的记忆里有 BTC 和 ETH。")
+    assert messages[1].metadata["source"] == "clarification"
+    assert messages[1].metadata["clarification"]["options"][0] == {
+        "id": "A",
+        "label": "BTC",
+    }
+    assert runs[0].status == "completed"
