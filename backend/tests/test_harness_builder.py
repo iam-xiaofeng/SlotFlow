@@ -85,6 +85,9 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     ]
     assert [item.name for item in captured["middleware"]] == [
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowTodoMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
     assert captured["checkpointer"] is checkpointer
@@ -93,7 +96,11 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert "plan_enabled=True" in captured["system_prompt"]
     assert "subagent_enabled=False" in captured["system_prompt"]
     assert "call find-skills before doing the work" in captured["system_prompt"]
-    assert "create an artifact with artifact_write" in captured["system_prompt"]
+    assert "Backend preflight" not in captured["system_prompt"]
+    assert "User-visible generated files must be written with artifact_write" in captured[
+        "system_prompt"
+    ]
+    assert "create an artifact by default" in captured["system_prompt"]
 
 
 def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) -> None:
@@ -114,10 +121,16 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
     )
 
     assert captured["tools"] == []
+    assert [item.name for item in captured["middleware"]] == [
+        "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowRuntimeSummaryMiddleware",
+    ]
 
 
-def test_harness_builder_adds_uploaded_workspace_paths_to_system_prompt(monkeypatch) -> None:
-    """Uploaded files are visible to the model as workspace-relative paths."""
+def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkeypatch) -> None:
+    """Uploaded files are injected by middleware, not duplicated in system prompt."""
 
     captured: dict[str, Any] = {}
 
@@ -149,9 +162,16 @@ def test_harness_builder_adds_uploaded_workspace_paths_to_system_prompt(monkeypa
         harness_config=SlotFlowHarnessConfig(system_prompt="base prompt"),
     )
 
-    assert "<slotflow-uploaded-files>" in captured["system_prompt"]
-    assert "path=uploads/run_harness/report.md" in captured["system_prompt"]
-    assert "Use workspace_read(path)" in captured["system_prompt"]
+    assert [item.name for item in captured["middleware"]] == [
+        "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowTodoMiddleware",
+        "SlotFlowRuntimeSummaryMiddleware",
+    ]
+    assert "<slotflow-uploaded-files>" not in captured["system_prompt"]
+    assert "path=uploads/run_harness/report.md" not in captured["system_prompt"]
+    assert "call workspace_read(path)" in captured["system_prompt"]
 
 
 def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None:
@@ -223,8 +243,11 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
         harness_config=SlotFlowHarnessConfig(
             system_prompt="base prompt",
             middleware_config=SlotFlowMiddlewareConfig(
-                runtime_summary_enabled=False,
-                tool_safety_enabled=False,
+                    runtime_summary_enabled=False,
+                    tool_safety_enabled=False,
+                    skills_preflight_enabled=False,
+                    uploads_enabled=False,
+                    todo_enabled=False,
             ),
         ),
     )

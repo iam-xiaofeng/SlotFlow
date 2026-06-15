@@ -42,29 +42,30 @@ def build_slotflow_harness_graph(
     """
 
     features = features_from_run_context(run_context)
-    selected_tools = maybe_disable_tools_for_model(
+    tools_supported = model_supports_tools(model)
+    built_tools = build_harness_tools(
+        features=features,
         model=model,
-        tools=build_harness_tools(
-            features=features,
-            model=model,
-            run_context=run_context,
-            extra_tools=tools,
-            mcp_config=harness_config.mcp_config,
-            mcp_tool_provider=harness_config.mcp_tool_provider,
-            mcp_config_store=harness_config.mcp_config_store,
-            skills_root=harness_config.skills_root,
-            skills_config_store=harness_config.skills_config_store,
-            memory_store=harness_config.memory_store,
-            sandbox_config=harness_config.sandbox_config,
-            subagent_config=harness_config.subagent_config,
-        ),
+        run_context=run_context,
+        extra_tools=tools,
+        mcp_config=harness_config.mcp_config,
+        mcp_tool_provider=harness_config.mcp_tool_provider,
+        mcp_config_store=harness_config.mcp_config_store,
+        skills_root=harness_config.skills_root,
+        skills_config_store=harness_config.skills_config_store,
+        sandbox_config=harness_config.sandbox_config,
+        subagent_config=harness_config.subagent_config,
     )
+    selected_tools = built_tools if tools_supported else []
 
     selected_middleware = build_harness_middleware(
         features=features,
+        run_context=run_context,
         config=harness_config.middleware_config,
         memory_store=harness_config.memory_store,
+        sandbox_config=harness_config.sandbox_config,
         extra_middleware=middleware,
+        tools_enabled=tools_supported,
     )
 
     return _create_agent_graph(
@@ -80,24 +81,12 @@ def build_slotflow_harness_graph(
     )
 
 
-def maybe_disable_tools_for_model(
-    *,
-    model: str | BaseChatModel,
-    tools: list[BaseTool],
-) -> list[BaseTool]:
-    """如果模型不支持 tool binding，就不要把工具传给 `create_agent`。
+def model_supports_tools(model: str | BaseChatModel) -> bool:
+    """Return whether the selected model can bind LangChain tools."""
 
-    真实 DeepSeek/OpenAI chat model 支持 `bind_tools()`。LangChain 的部分 fake model 只用于
-    普通文本测试，没有实现 tool binding；对这些模型强行传工具会在 graph 执行时失败。
-    """
-
-    if not tools:
-        return []
     if isinstance(model, str):
-        return tools
-    if type(model).bind_tools is BaseChatModel.bind_tools:
-        return []
-    return tools
+        return True
+    return type(model).bind_tools is not BaseChatModel.bind_tools
 
 
 def build_system_prompt(
@@ -130,9 +119,7 @@ def build_system_prompt(
             "",
             "<slotflow-long-term-memory-status>",
             f"enabled={harness_config.memory_store is not None}",
-            "When enabled, you can use memory_list, memory_save, memory_update, and memory_delete to explicitly manage durable user memories.",
-            "The automatic memory middleware can also recall and save compact turn memories without the user explicitly asking.",
-            "Do not claim you lack long-term memory; if no relevant memory is available, say no relevant memory was found.",
+            "When enabled, long-term memory instructions and tools are owned by SlotFlowLongTermMemoryMiddleware.",
             "</slotflow-long-term-memory-status>",
         ]
     )
@@ -143,33 +130,18 @@ def build_system_prompt(
             "Use web_search/web_fetch for public web access when current information is needed.",
             "Use find-skills to search installable Skills. find-skills is a callable tool, not only a prompt skill.",
             "When the user asks about a domain, profession, specialized task, or expert workflow, call find-skills before doing the work so you can discover whether a matching Skill exists.",
+            "For specialized requests, SlotFlow also injects a backend skills preflight into the latest user message when possible; review that result before deciding whether to install or use a Skill.",
             "Use skill_install only when a concrete package_url and skill_name are known or the user explicitly asks for that exact install.",
             "After installing a relevant Skill, use it for the corresponding work as soon as it is available; if it only becomes available on the next run, say that plainly and continue with the best current tools.",
             "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
-            "When an interactive explanation, chart, report, or visual comparison would make the answer clearer, create an artifact with artifact_write and reference it in the response.",
+            "When uploaded files are present, their workspace paths are injected into the latest user message; call workspace_read(path) before answering file-content questions.",
+            "User-visible generated files must be written with artifact_write, not workspace_write.",
+            "When the answer includes a chart, report, visualization, flowchart, comparison table, interactive demo, or code preview, create an artifact by default unless the user explicitly asks for text only.",
             "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",
             "</slotflow-extension-tools>",
         ]
     )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
-    if run_context.uploaded_files:
-        sections.extend(["", "<slotflow-uploaded-files>"])
-        for uploaded_file in run_context.uploaded_files:
-            display_name = uploaded_file.original_filename or uploaded_file.filename
-            sections.append(
-                "- "
-                f"path={uploaded_file.workspace_path}; "
-                f"filename={display_name}; "
-                f"stored_filename={uploaded_file.filename}; "
-                f"content_type={uploaded_file.content_type or 'unknown'}; "
-                f"size_bytes={uploaded_file.size_bytes}"
-            )
-        sections.extend(
-            [
-                "Use workspace_read(path) to inspect these files when relevant.",
-                "</slotflow-uploaded-files>",
-            ]
-        )
     skills_prompt = build_skills_prompt(enabled_skills)
     if skills_prompt:
         sections.extend(["", skills_prompt])

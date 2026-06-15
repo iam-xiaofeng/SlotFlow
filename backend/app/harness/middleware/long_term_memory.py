@@ -25,10 +25,21 @@ class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
         self,
         *,
         memory_store: SlotFlowMemoryStore,
+        run_context: RunContext | None = None,
+        tools_enabled: bool = True,
         max_results: int = 5,
     ) -> None:
         self._memory_store = memory_store
+        self._tools_enabled = tools_enabled
         self._max_results = max_results
+        self.tools = []
+        if tools_enabled:
+            from app.harness.tools.memory import build_memory_tools
+
+            self.tools = build_memory_tools(
+                memory_store=memory_store,
+                run_context=run_context,
+            )
 
     def before_agent(
         self,
@@ -96,6 +107,7 @@ class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
         system_message = append_memory_system_message(
             request.system_message,
             memories=memories,
+            tools_enabled=self._tools_enabled,
         )
         return replace(request, system_message=system_message)
 
@@ -150,8 +162,9 @@ def append_memory_system_message(
     system_message: SystemMessage | None,
     *,
     memories: list[MemoryRecord],
+    tools_enabled: bool = True,
 ) -> SystemMessage:
-    section = build_memory_prompt(memories)
+    section = build_memory_prompt(memories, tools_enabled=tools_enabled)
     if system_message is None:
         return SystemMessage(content=section)
 
@@ -160,10 +173,19 @@ def append_memory_system_message(
     return SystemMessage(content=content)
 
 
-def build_memory_prompt(memories: list[MemoryRecord]) -> str:
+def build_memory_prompt(
+    memories: list[MemoryRecord],
+    *,
+    tools_enabled: bool = True,
+) -> str:
+    tool_note = (
+        "你可以使用 memory_list、memory_save、memory_update、memory_delete 工具显式管理记忆；"
+        if tools_enabled
+        else "当前模型未启用记忆管理工具；"
+    )
     lines = [
         "<slotflow-long-term-memory>",
-        "SlotFlow 本地长期记忆已启用。你可以使用 memory_list、memory_save、memory_update、memory_delete 工具显式管理记忆；middleware 也会自动保存和召回有长期价值的偏好、基础信息、近期话题。",
+        f"SlotFlow 本地长期记忆已启用。{tool_note}middleware 会自动保存和召回有长期价值的偏好、基础信息、近期话题。",
         "不要声称你没有长期记忆功能。如果没有相关记忆，只说明本轮没有检索到相关记忆。",
     ]
     if memories:

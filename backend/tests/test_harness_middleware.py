@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.runtime import Runtime
 
-from app.chat.models import ChatStreamRequest
+from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
 from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
@@ -22,7 +22,10 @@ from app.harness.features import features_from_run_context
 from app.harness.middleware import (
     SlotFlowMiddlewareConfig,
     SlotFlowRuntimeSummaryMiddleware,
+    SlotFlowSkillsPreflightMiddleware,
+    SlotFlowTodoMiddleware,
     SlotFlowToolSafetyMiddleware,
+    SlotFlowUploadsMiddleware,
     build_harness_middleware,
 )
 from app.harness.middleware.tool_safety import repair_dangling_tool_calls
@@ -85,6 +88,9 @@ def test_build_harness_middleware_adds_runtime_summary_by_default() -> None:
 
     assert [item.name for item in middleware] == [
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowTodoMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
 
@@ -95,7 +101,12 @@ def test_build_harness_middleware_can_disable_runtime_summary() -> None:
         config=SlotFlowMiddlewareConfig(runtime_summary_enabled=False),
     )
 
-    assert [item.name for item in middleware] == ["SlotFlowToolSafetyMiddleware"]
+    assert [item.name for item in middleware] == [
+        "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowTodoMiddleware",
+    ]
 
 
 def test_build_harness_middleware_can_disable_tool_safety() -> None:
@@ -104,7 +115,12 @@ def test_build_harness_middleware_can_disable_tool_safety() -> None:
         config=SlotFlowMiddlewareConfig(tool_safety_enabled=False),
     )
 
-    assert [item.name for item in middleware] == ["SlotFlowRuntimeSummaryMiddleware"]
+    assert [item.name for item in middleware] == [
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowTodoMiddleware",
+        "SlotFlowRuntimeSummaryMiddleware",
+    ]
 
 
 def test_build_harness_middleware_dedupes_by_name() -> None:
@@ -119,8 +135,118 @@ def test_build_harness_middleware_dedupes_by_name() -> None:
     assert [item.name for item in middleware] == [
         "SlotFlowRuntimeSummaryMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSkillsPreflightMiddleware",
+        "SlotFlowUploadsMiddleware",
+        "SlotFlowTodoMiddleware",
     ]
     assert middleware[0] is replacement
+
+
+def test_skills_preflight_middleware_injects_find_skills_result() -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fake_finder(query, max_results, config):
+        _ = config
+        calls.append((query, max_results))
+        return {
+            "query": query,
+            "results": [{"title": "chart skill"}],
+            "tool": "find-skills",
+        }
+
+    middleware = SlotFlowSkillsPreflightMiddleware(finder=fake_finder)
+
+    update = middleware.before_agent(
+        {"messages": [HumanMessage(content="请分析股票数据并生成图表报告")]},
+        Runtime(context=_bundle().context),
+    )
+
+    assert calls == [("请分析股票数据并生成图表报告", 5)]
+    assert update is not None
+    assert update["slotflow"]["skills_preflight"]["tool"] == "find-skills"
+    message = update["messages"][0]
+    assert isinstance(message, HumanMessage)
+    assert "<slotflow-skills-preflight>" in str(message.content)
+    assert str(message.content).endswith("请分析股票数据并生成图表报告")
+
+
+def test_skills_preflight_middleware_skips_simple_chat() -> None:
+    calls: list[str] = []
+    middleware = SlotFlowSkillsPreflightMiddleware(
+        finder=lambda query, max_results, config: calls.append(query) or {}
+    )
+
+    update = middleware.before_agent(
+        {"messages": [HumanMessage(content="你好")]},
+        Runtime(context=_bundle().context),
+    )
+
+    assert update is None
+    assert calls == []
+
+
+def test_todo_middleware_exposes_write_todos_tool_and_prompt() -> None:
+    middleware = SlotFlowTodoMiddleware()
+
+    assert [tool.name for tool in middleware.tools] == ["write_todos"]
+    assert "SlotFlow todo list" in middleware.system_prompt
+    assert "Update the list immediately" in middleware.system_prompt
+
+
+def test_todo_middleware_reminds_model_when_todos_leave_context() -> None:
+    middleware = SlotFlowTodoMiddleware()
+
+    update = middleware.before_model(
+        {
+            "messages": [HumanMessage(content="继续执行")],
+            "todos": [
+                {"content": "读取文件", "status": "completed"},
+                {"content": "生成报告", "status": "in_progress"},
+            ],
+        },
+        Runtime(context=_bundle().context),
+    )
+
+    assert update is not None
+    reminder = update["messages"][0]
+    assert isinstance(reminder, HumanMessage)
+    assert reminder.name == "slotflow_todo_reminder"
+    assert "[in_progress] 生成报告" in str(reminder.content)
+
+
+def test_uploads_middleware_injects_uploaded_files_into_latest_user_message() -> None:
+    context = _bundle().context.model_copy(
+        update={
+            "uploaded_files": [
+                UploadedFileContext(
+                    id="file_123",
+                    filename="report.md",
+                    original_filename="用户报告.md",
+                    content_type="text/markdown",
+                    size_bytes=128,
+                    workspace_path="uploads/run_middleware/report.md",
+                )
+            ]
+        }
+    )
+    middleware = SlotFlowUploadsMiddleware()
+
+    update = middleware.before_agent(
+        {
+            "messages": [HumanMessage(content="请分析这个文件")],
+            "slotflow": {"existing": "kept"},
+        },
+        Runtime(context=context),
+    )
+
+    assert update is not None
+    assert update["slotflow"]["existing"] == "kept"
+    assert update["slotflow"]["uploads"]["count"] == 1
+    message = update["messages"][0]
+    assert isinstance(message, HumanMessage)
+    assert "<slotflow-uploaded-files>" in str(message.content)
+    assert "path=uploads/run_middleware/report.md" in str(message.content)
+    assert str(message.content).endswith("请分析这个文件")
 
 
 def test_tool_safety_middleware_converts_tool_exception_to_error_message() -> None:
