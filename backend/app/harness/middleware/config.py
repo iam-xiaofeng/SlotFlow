@@ -10,7 +10,13 @@ class SlotFlowMiddlewareConfig:
     """Feature switches for SlotFlow-owned agent middleware."""
 
     runtime_summary_enabled: bool = True
+    dangling_tool_call_enabled: bool = True
     tool_safety_enabled: bool = True
+    artifact_discovery_enabled: bool = True
+    summarization_enabled: bool = True
+    summarization_trigger_tokens: int = 24000
+    summarization_keep_messages: int = 20
+    summarization_trim_tokens: int = 8000
     long_term_memory_enabled: bool = True
     skills_preflight_enabled: bool = True
     clarification_enabled: bool = True

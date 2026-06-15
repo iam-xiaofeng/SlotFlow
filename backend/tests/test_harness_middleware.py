@@ -21,17 +21,22 @@ from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
 from app.harness.middleware import (
+    SlotFlowArtifactDiscoveryMiddleware,
     SlotFlowClarificationMiddleware,
+    SlotFlowDanglingToolCallMiddleware,
     SlotFlowMiddlewareConfig,
     SlotFlowRuntimeSummaryMiddleware,
     SlotFlowSkillsPreflightMiddleware,
+    SlotFlowSummarizationMiddleware,
     SlotFlowTodoMiddleware,
     SlotFlowToolSafetyMiddleware,
     SlotFlowUploadsMiddleware,
     build_harness_middleware,
 )
 from app.harness.middleware.clarification_middleware import build_clarification_payload
-from app.harness.middleware.tool_safety import repair_dangling_tool_calls
+from app.harness.middleware.dangling_tool_call_middleware import (
+    repair_dangling_tool_calls,
+)
 from app.harness.sandbox import SlotFlowSandboxConfig
 
 
@@ -87,44 +92,57 @@ def test_runtime_summary_middleware_writes_compact_context_snapshot() -> None:
 def test_build_harness_middleware_adds_runtime_summary_by_default() -> None:
     middleware = build_harness_middleware(
         features=features_from_run_context(_bundle().context),
+        model=FakeListChatModel(responses=["ok"]),
     )
 
     assert [item.name for item in middleware] == [
+        "SlotFlowDanglingToolCallMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
         "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
+    assert isinstance(middleware[0], SlotFlowDanglingToolCallMiddleware)
 
 
 def test_build_harness_middleware_can_disable_runtime_summary() -> None:
     middleware = build_harness_middleware(
         features=features_from_run_context(_bundle().context),
+        model=FakeListChatModel(responses=["ok"]),
         config=SlotFlowMiddlewareConfig(runtime_summary_enabled=False),
     )
 
     assert [item.name for item in middleware] == [
+        "SlotFlowDanglingToolCallMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
         "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
     ]
 
 
 def test_build_harness_middleware_can_disable_tool_safety() -> None:
     middleware = build_harness_middleware(
         features=features_from_run_context(_bundle().context),
+        model=FakeListChatModel(responses=["ok"]),
         config=SlotFlowMiddlewareConfig(tool_safety_enabled=False),
     )
 
     assert [item.name for item in middleware] == [
+        "SlotFlowDanglingToolCallMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
         "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
 
@@ -135,16 +153,20 @@ def test_build_harness_middleware_dedupes_by_name() -> None:
 
     middleware = build_harness_middleware(
         features=features,
+        model=FakeListChatModel(responses=["ok"]),
         extra_middleware=[replacement],
     )
 
     assert [item.name for item in middleware] == [
         "SlotFlowRuntimeSummaryMiddleware",
+        "SlotFlowDanglingToolCallMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
         "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
     ]
     assert middleware[0] is replacement
 
@@ -355,6 +377,59 @@ def test_uploads_middleware_injects_image_content_blocks(tmp_path) -> None:
     assert base64.b64decode(url.split(",", 1)[1]) == image_bytes
 
 
+def test_artifact_discovery_middleware_records_new_artifacts(tmp_path) -> None:
+    root = tmp_path / "workspace"
+    artifacts_root = root / "artifacts"
+    artifacts_root.mkdir(parents=True)
+    (artifacts_root / "old.md").write_text("old", encoding="utf-8")
+
+    middleware = SlotFlowArtifactDiscoveryMiddleware(
+        sandbox_config=SlotFlowSandboxConfig(workspace_root=root)
+    )
+    runtime = Runtime(context=_bundle().context)
+    before = middleware.before_agent({"messages": [], "slotflow": {}}, runtime)
+
+    (artifacts_root / "report.md").write_text("new", encoding="utf-8")
+
+    after = middleware.after_agent(
+        {"messages": [], "slotflow": before["slotflow"]},
+        runtime,
+    )
+
+    artifacts = after["slotflow"]["artifacts"]
+    assert artifacts["source"] == "slotflow_artifact_discovery"
+    assert [entry["path"] for entry in artifacts["new_entries"]] == [
+        "artifacts/report.md"
+    ]
+    assert {entry["path"] for entry in artifacts["entries"]} == {
+        "artifacts/old.md",
+        "artifacts/report.md",
+    }
+
+
+def test_summarization_middleware_compresses_old_messages() -> None:
+    middleware = SlotFlowSummarizationMiddleware(
+        model=FakeListChatModel(responses=["compressed context"]),
+        trigger_tokens=1,
+        keep_messages=1,
+        trim_tokens_to_summarize=100,
+    )
+
+    update = middleware.before_model(
+        {
+            "messages": [
+                HumanMessage(content="old context"),
+                HumanMessage(content="latest request"),
+            ]
+        },
+        Runtime(context=_bundle().context),
+    )
+
+    assert update is not None
+    assert "compressed context" in str(update["messages"][1].content)
+    assert update["messages"][-1].content == "latest request"
+
+
 def test_tool_safety_middleware_converts_tool_exception_to_error_message() -> None:
     @tool("boom")
     def boom_tool() -> str:
@@ -430,7 +505,33 @@ def test_repair_dangling_tool_calls_inserts_error_before_next_model_message() ->
     assert isinstance(repaired[2], ToolMessage)
     assert repaired[2].status == "error"
     assert repaired[2].tool_call_id == "call_read"
-    assert json.loads(str(repaired[2].content))["error"]["type"] == "dangling_tool_call"
+    payload = json.loads(str(repaired[2].content))
+    assert payload["error"]["type"] == "dangling_tool_call"
+    assert payload["error"]["source"] == "slotflow_dangling_tool_call"
+
+
+def test_repair_dangling_tool_calls_reads_raw_openai_tool_call_shape() -> None:
+    repaired = repair_dangling_tool_calls(
+        [
+            AIMessage(
+                content="",
+                additional_kwargs={
+                    "tool_calls": [
+                        {
+                            "id": "call_raw",
+                            "type": "function",
+                            "function": {"name": "workspace_tree", "arguments": "{}"},
+                        }
+                    ]
+                },
+            )
+        ]
+    )
+
+    assert len(repaired) == 2
+    assert isinstance(repaired[1], ToolMessage)
+    assert repaired[1].name == "workspace_tree"
+    assert repaired[1].tool_call_id == "call_raw"
 
 
 @pytest.mark.asyncio

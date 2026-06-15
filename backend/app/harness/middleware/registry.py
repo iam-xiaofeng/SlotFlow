@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.memory import SlotFlowMemoryStore
+from app.harness.middleware.artifact_discovery_middleware import (
+    SlotFlowArtifactDiscoveryMiddleware,
+)
 from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
 from app.harness.middleware.clarification_middleware import (
     SlotFlowClarificationMiddleware,
 )
 from app.harness.middleware.config import SlotFlowMiddlewareConfig
+from app.harness.middleware.dangling_tool_call_middleware import (
+    SlotFlowDanglingToolCallMiddleware,
+)
 from app.harness.middleware.long_term_memory import SlotFlowLongTermMemoryMiddleware
 from app.harness.middleware.skills_preflight_middleware import (
     SlotFlowSkillsPreflightMiddleware,
+)
+from app.harness.middleware.summarization_middleware import (
+    SlotFlowSummarizationMiddleware,
 )
 from app.harness.middleware.todo_middleware import SlotFlowTodoMiddleware
 from app.harness.middleware.tool_safety import SlotFlowToolSafetyMiddleware
@@ -29,6 +39,7 @@ SlotFlowAgentMiddleware = AgentMiddleware[SlotFlowAgentState, RunContext]
 def build_harness_middleware(
     *,
     features: SlotFlowHarnessFeatures,
+    model: str | BaseChatModel,
     run_context: RunContext | None = None,
     config: SlotFlowMiddlewareConfig | None = None,
     memory_store: SlotFlowMemoryStore | None = None,
@@ -41,8 +52,21 @@ def build_harness_middleware(
     resolved = config or SlotFlowMiddlewareConfig()
     middleware: list[SlotFlowAgentMiddleware] = list(extra_middleware or [])
 
+    if resolved.dangling_tool_call_enabled:
+        middleware.append(SlotFlowDanglingToolCallMiddleware())
+
     if resolved.tool_safety_enabled:
         middleware.append(SlotFlowToolSafetyMiddleware())
+
+    if resolved.summarization_enabled:
+        middleware.append(
+            SlotFlowSummarizationMiddleware(
+                model=model,
+                trigger_tokens=resolved.summarization_trigger_tokens,
+                keep_messages=resolved.summarization_keep_messages,
+                trim_tokens_to_summarize=resolved.summarization_trim_tokens,
+            )
+        )
 
     if resolved.long_term_memory_enabled and memory_store is not None:
         middleware.append(
@@ -66,6 +90,11 @@ def build_harness_middleware(
 
     if tools_enabled and resolved.todo_enabled and features.plan_enabled:
         middleware.append(SlotFlowTodoMiddleware())
+
+    if resolved.artifact_discovery_enabled:
+        middleware.append(
+            SlotFlowArtifactDiscoveryMiddleware(sandbox_config=sandbox_config)
+        )
 
     if resolved.runtime_summary_enabled:
         middleware.append(SlotFlowRuntimeSummaryMiddleware(features=features))

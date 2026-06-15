@@ -85,11 +85,14 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "mcp_add_http",
     ]
     assert [item.name for item in captured["middleware"]] == [
+        "SlotFlowDanglingToolCallMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
         "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
     assert captured["checkpointer"] is checkpointer
@@ -125,9 +128,12 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
 
     assert captured["tools"] == []
     assert [item.name for item in captured["middleware"]] == [
+        "SlotFlowDanglingToolCallMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
 
@@ -166,11 +172,14 @@ def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkey
     )
 
     assert [item.name for item in captured["middleware"]] == [
+        "SlotFlowDanglingToolCallMiddleware",
         "SlotFlowToolSafetyMiddleware",
+        "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
         "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
     assert "<slotflow-uploaded-files>" not in captured["system_prompt"]
@@ -249,7 +258,10 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
             system_prompt="base prompt",
             middleware_config=SlotFlowMiddlewareConfig(
                 runtime_summary_enabled=False,
+                dangling_tool_call_enabled=False,
                 tool_safety_enabled=False,
+                artifact_discovery_enabled=False,
+                summarization_enabled=False,
                 skills_preflight_enabled=False,
                 clarification_enabled=False,
                 uploads_enabled=False,

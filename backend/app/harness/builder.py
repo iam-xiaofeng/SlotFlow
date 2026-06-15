@@ -60,6 +60,7 @@ def build_slotflow_harness_graph(
 
     selected_middleware = build_harness_middleware(
         features=features,
+        model=model,
         run_context=run_context,
         config=harness_config.middleware_config,
         memory_store=harness_config.memory_store,

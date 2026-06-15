@@ -208,21 +208,58 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
 def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
     """Read SlotFlow-owned middleware switches from environment variables."""
 
+    defaults = SlotFlowMiddlewareConfig()
     return SlotFlowMiddlewareConfig(
         runtime_summary_enabled=load_bool_from_env(
             "SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE",
+            default=True,
+        ),
+        dangling_tool_call_enabled=load_bool_from_env(
+            "SLOTFLOW_DANGLING_TOOL_CALL_MIDDLEWARE",
             default=True,
         ),
         tool_safety_enabled=load_bool_from_env(
             "SLOTFLOW_TOOL_SAFETY_MIDDLEWARE",
             default=True,
         ),
+        artifact_discovery_enabled=load_bool_from_env(
+            "SLOTFLOW_ARTIFACT_DISCOVERY_MIDDLEWARE",
+            default=True,
+        ),
+        summarization_enabled=load_bool_from_env(
+            "SLOTFLOW_SUMMARIZATION_MIDDLEWARE",
+            default=True,
+        ),
+        summarization_trigger_tokens=load_positive_int_from_env(
+            "SLOTFLOW_SUMMARIZATION_TRIGGER_TOKENS",
+            default=defaults.summarization_trigger_tokens,
+        ),
+        summarization_keep_messages=load_positive_int_from_env(
+            "SLOTFLOW_SUMMARIZATION_KEEP_MESSAGES",
+            default=defaults.summarization_keep_messages,
+        ),
+        summarization_trim_tokens=load_positive_int_from_env(
+            "SLOTFLOW_SUMMARIZATION_TRIM_TOKENS",
+            default=defaults.summarization_trim_tokens,
+        ),
         long_term_memory_enabled=load_bool_from_env(
             "SLOTFLOW_LONG_TERM_MEMORY_ENABLED",
             default=True,
         ),
+        skills_preflight_enabled=load_bool_from_env(
+            "SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE",
+            default=True,
+        ),
         clarification_enabled=load_bool_from_env(
             "SLOTFLOW_CLARIFICATION_MIDDLEWARE",
+            default=True,
+        ),
+        uploads_enabled=load_bool_from_env(
+            "SLOTFLOW_UPLOADS_MIDDLEWARE",
+            default=True,
+        ),
+        todo_enabled=load_bool_from_env(
+            "SLOTFLOW_TODO_MIDDLEWARE",
             default=True,
         ),
     )
