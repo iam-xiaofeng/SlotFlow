@@ -9,6 +9,7 @@ import {
   type ChatStreamRequest,
   type MessageRecord,
   type ThreadRecord,
+  type WorkspaceEntryRecord,
   createThread,
   listThreadMessages,
   streamThreadRun,
@@ -43,6 +44,7 @@ export type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message">
 export type SendChatMessageResult = {
   accepted: boolean;
   thread: ThreadRecord | null;
+  artifacts: WorkspaceEntryRecord[];
 };
 
 const fallbackThreadTitle = "SlotFlow chat";
@@ -176,7 +178,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     ): Promise<SendChatMessageResult> => {
       const text = rawMessage.trim();
       if (!text || isStreamingRef.current) {
-        return { accepted: false, thread };
+        return { accepted: false, thread, artifacts: [] };
       }
 
       const controller = new AbortController();
@@ -254,6 +256,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           reuse_user_message_id: reusedUserMessageId,
         };
 
+        let discoveredArtifacts: WorkspaceEntryRecord[] = [];
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
           signal: controller.signal,
         })) {
@@ -288,6 +291,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             if (content) {
               replaceAssistantText(assistantMessageId, content);
             }
+            const nextArtifacts = latestDiscoveredArtifacts(streamEvent);
+            if (nextArtifacts.length > 0) {
+              discoveredArtifacts = nextArtifacts;
+            }
           }
 
           if (streamEvent.event === "run.error") {
@@ -304,17 +311,17 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           patchAssistant(assistantMessageId, { status: "done" });
         }
 
-        return { accepted: true, thread: activeThread };
+        return { accepted: true, thread: activeThread, artifacts: discoveredArtifacts };
       } catch (caught) {
         if (controller.signal.aborted) {
           patchAssistant(assistantMessageId, { status: "cancelled" });
-          return { accepted, thread: activeThread };
+          return { accepted, thread: activeThread, artifacts: [] };
         }
 
         const message = caught instanceof Error ? caught.message : "stream failed";
         setError(message);
         patchAssistant(assistantMessageId, { status: "error" });
-        return { accepted, thread: activeThread };
+        return { accepted, thread: activeThread, artifacts: [] };
       } finally {
         if (abortControllerRef.current === controller) {
           abortControllerRef.current = null;
@@ -390,6 +397,55 @@ function latestAssistantContent(event: ChatStreamEvent): string | null {
   }
 
   return null;
+}
+
+function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord[] {
+  const state = event.data.state;
+  if (typeof state !== "object" || state === null || !("slotflow" in state)) {
+    return [];
+  }
+
+  const slotflow = state.slotflow;
+  if (
+    typeof slotflow !== "object" ||
+    slotflow === null ||
+    !("artifacts" in slotflow)
+  ) {
+    return [];
+  }
+
+  const artifacts = slotflow.artifacts;
+  if (
+    typeof artifacts !== "object" ||
+    artifacts === null ||
+    !("new_entries" in artifacts) ||
+    !Array.isArray(artifacts.new_entries)
+  ) {
+    return [];
+  }
+
+  return artifacts.new_entries.flatMap((entry) => {
+    if (
+      typeof entry === "object" &&
+      entry !== null &&
+      "path" in entry &&
+      "kind" in entry &&
+      typeof entry.path === "string" &&
+      (entry.kind === "file" || entry.kind === "directory")
+    ) {
+      return [
+        {
+          path: entry.path,
+          kind: entry.kind,
+          size_bytes:
+            "size_bytes" in entry && typeof entry.size_bytes === "number"
+              ? entry.size_bytes
+              : null,
+        },
+      ];
+    }
+    return [];
+  });
 }
 
 function parseClarificationRequest(

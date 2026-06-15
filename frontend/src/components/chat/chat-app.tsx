@@ -267,6 +267,12 @@ export function ChatApp() {
       });
 
       if (result.accepted) {
+        const discoveredArtifacts = result.artifacts.filter(
+          (artifact) => artifact.kind === "file",
+        );
+        if (discoveredArtifacts.length > 0) {
+          setArtifacts((current) => mergeWorkspaceEntries(current, discoveredArtifacts));
+        }
         const [, nextArtifacts] = await Promise.all([
           refreshThreads(),
           refreshArtifacts(),
@@ -274,8 +280,11 @@ export function ChatApp() {
           refreshMcpServers(),
           refreshMemories(),
         ]);
-        const newArtifacts = nextArtifacts.filter(
-          (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
+        const newArtifacts = mergeWorkspaceEntries(
+          discoveredArtifacts,
+          nextArtifacts.filter(
+            (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
+          ),
         );
         if (result.thread && newArtifacts.length > 0) {
           rememberThreadArtifacts(
@@ -992,6 +1001,17 @@ function sortRecordsByNames<T extends { name: string }>(records: T[], names: str
       (position.get(left.name) ?? records.length) -
       (position.get(right.name) ?? records.length),
   );
+}
+
+function mergeWorkspaceEntries(
+  left: WorkspaceEntryRecord[],
+  right: WorkspaceEntryRecord[],
+): WorkspaceEntryRecord[] {
+  const merged = new Map(left.map((entry) => [entry.path, entry]));
+  for (const entry of right) {
+    merged.set(entry.path, entry);
+  }
+  return [...merged.values()];
 }
 
 function readThreadArtifactIndex(): ThreadArtifactIndex {
