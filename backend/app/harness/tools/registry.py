@@ -11,13 +11,11 @@ from langchain_core.tools import BaseTool
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, load_mcp_tools
-from app.harness.memory import SlotFlowMemoryStore
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore
 from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
 from app.harness.tools.builtins import slotflow_context_tool
 from app.harness.tools.customization import build_customization_tools
-from app.harness.tools.memory import build_memory_tools
 from app.harness.tools.network import build_network_tools
 from app.harness.tools.workspace import build_workspace_tools
 
@@ -36,7 +34,6 @@ def build_harness_tools(
     mcp_config_store: SlotFlowMcpConfigStore | None = None,
     skills_root: Path | None = None,
     skills_config_store: SlotFlowSkillsConfigStore | None = None,
-    memory_store: SlotFlowMemoryStore | None = None,
     sandbox_config: SlotFlowSandboxConfig | None = None,
     subagent_config: SlotFlowSubagentConfig | None = None,
 ) -> list[BaseTool]:
@@ -53,10 +50,6 @@ def build_harness_tools(
     )
     workspace_tools = build_workspace_tools(sandbox_config)
     network_tools = build_network_tools(sandbox_config)
-    memory_tools = build_memory_tools(
-        memory_store=memory_store,
-        run_context=run_context,
-    )
     customization_tools = build_customization_tools(
         skills_root=skills_root,
         skills_config_store=skills_config_store,
@@ -72,7 +65,6 @@ def build_harness_tools(
             slotflow_context_tool,
             *workspace_tools,
             *network_tools,
-            *memory_tools,
             *customization_tools,
             *mcp_tools,
         ],
@@ -83,7 +75,6 @@ def build_harness_tools(
             slotflow_context_tool,
             *workspace_tools,
             *network_tools,
-            *memory_tools,
             *customization_tools,
             *subagent_tools,
             *mcp_tools,

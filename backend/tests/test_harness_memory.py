@@ -19,7 +19,6 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.memory import SlotFlowMemoryStore
 from app.harness.middleware import SlotFlowLongTermMemoryMiddleware
 from app.harness.middleware.long_term_memory import build_turn_memory_content
-from app.harness.tools.memory import build_memory_tools
 from app.main import create_app
 
 
@@ -120,7 +119,10 @@ def test_memory_middleware_skips_auto_save_after_memory_save_tool(tmp_path: Path
     context = _context()
     tools = {
         item.name: item
-        for item in build_memory_tools(memory_store=store, run_context=context)
+        for item in SlotFlowLongTermMemoryMiddleware(
+            memory_store=store,
+            run_context=context,
+        ).tools
     }
     tool_result = tools["memory_save"].invoke(
         {"content": "我喜欢中文", "kind": "preference"}
@@ -253,11 +255,14 @@ def test_build_turn_memory_content_extracts_preference() -> None:
     assert content == "我希望以后回答更简洁"
 
 
-def test_memory_tools_save_and_list_memories(tmp_path: Path) -> None:
+def test_memory_middleware_tools_save_and_list_memories(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     tools = {
         item.name: item
-        for item in build_memory_tools(memory_store=store, run_context=_context())
+        for item in SlotFlowLongTermMemoryMiddleware(
+            memory_store=store,
+            run_context=_context(),
+        ).tools
     }
 
     save_result = tools["memory_save"].invoke({"content": "用户喜欢中文回答"})
@@ -265,6 +270,16 @@ def test_memory_tools_save_and_list_memories(tmp_path: Path) -> None:
 
     assert "用户记录：用户喜欢中文回答。" in save_result
     assert "用户记录：用户喜欢中文回答。" in list_result
+
+
+def test_memory_middleware_can_disable_tools(tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    middleware = SlotFlowLongTermMemoryMiddleware(
+        memory_store=store,
+        tools_enabled=False,
+    )
+
+    assert middleware.tools == []
 
 
 def test_memory_api_create_update_and_delete(tmp_path: Path) -> None:
