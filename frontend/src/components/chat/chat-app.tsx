@@ -453,7 +453,10 @@ export function ChatApp() {
     if (selectedFiles.length === 0) {
       return;
     }
+    await uploadSelectedFiles(selectedFiles);
+  }
 
+  async function uploadSelectedFiles(selectedFiles: File[]) {
     setIsUploading(true);
     try {
       const uploadedFiles: UploadedFileRecord[] = [];
@@ -469,11 +472,7 @@ export function ChatApp() {
 
       if (uploadedFiles.length > 0) {
         setAttachments((current) => [...current, ...uploadedFiles]);
-        toast.success(
-          uploadedFiles.length === 1
-            ? `${uploadedFiles[0].original_filename ?? uploadedFiles[0].filename} uploaded`
-            : `${uploadedFiles.length} files uploaded`,
-        );
+        toast.success(formatUploadToast(uploadedFiles));
       }
     } finally {
       setIsUploading(false);
@@ -828,6 +827,7 @@ export function ChatApp() {
       onCancel={cancelStream}
       onClearError={clearError}
       onFileChange={handleFileChange}
+      onPasteFiles={(files) => uploadSelectedFiles(files)}
       onRemoveAttachment={handleRemoveAttachment}
       onRemoveQueuedMessage={handleRemoveQueuedMessage}
       onSendMessage={submitMessage}
@@ -976,6 +976,13 @@ function extractUploadedFilesFromMetadata(
 
 function makeQueueId() {
   return `queued_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function formatUploadToast(files: UploadedFileRecord[]) {
+  if (files.length === 1) {
+    return `${files[0].original_filename ?? files[0].filename} uploaded`;
+  }
+  return `${files.length} files uploaded`;
 }
 
 function sortRecordsByNames<T extends { name: string }>(records: T[], names: string[]): T[] {

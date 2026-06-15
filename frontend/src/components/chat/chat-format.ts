@@ -4,6 +4,7 @@ export type MessageFile = {
   id: string;
   filename: string;
   original_filename?: string | null;
+  content_type?: string | null;
   size_bytes?: number;
 };
 
@@ -72,6 +73,11 @@ export function getMessageFiles(message: ChatUiMessage): MessageFile[] {
               item.original_filename === null)
               ? item.original_filename
               : undefined,
+          content_type:
+            "content_type" in item &&
+            (typeof item.content_type === "string" || item.content_type === null)
+              ? item.content_type
+              : undefined,
           size_bytes:
             "size_bytes" in item && typeof item.size_bytes === "number"
               ? item.size_bytes
@@ -81,6 +87,16 @@ export function getMessageFiles(message: ChatUiMessage): MessageFile[] {
     }
     return [];
   });
+}
+
+export function isImageFile(file: {
+  filename: string;
+  content_type?: string | null;
+}) {
+  return (
+    file.content_type?.startsWith("image/") ||
+    /\.(png|jpe?g|gif|webp)$/i.test(file.filename)
+  );
 }
 
 export function displayFileName(file: {

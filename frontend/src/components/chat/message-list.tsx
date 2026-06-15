@@ -18,6 +18,7 @@ import { type ChatUiMessage } from "@/hooks/use-chat-stream";
 import {
   type ClarificationOptionRecord,
   type ClarificationRequestRecord,
+  resolveUploadRawUrl,
 } from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,7 @@ import {
   formatFileSize,
   getMessageFiles,
   displayFileName,
+  isImageFile,
   type MessageFile,
   normalizeMathForMarkdown,
 } from "./chat-format";
@@ -752,11 +754,19 @@ function MessageAttachments({ files }: { files: MessageFile[] }) {
       {files.map((file) => (
         <div
           key={file.id}
-          className="flex max-w-72 items-center gap-3 rounded-2xl border border-border bg-card px-3 py-2 text-left shadow-sm"
+          className="flex max-w-72 items-center gap-3 rounded-lg border border-border bg-card px-2 py-2 text-left shadow-sm"
         >
-          <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-muted">
-            <FileText className="size-5" />
-          </div>
+          {isImageFile(file) ? (
+            <img
+              src={resolveUploadRawUrl(file.id)}
+              alt={displayFileName(file)}
+              className="size-16 shrink-0 rounded-md object-cover"
+            />
+          ) : (
+            <div className="grid size-10 shrink-0 place-items-center rounded-md bg-muted">
+              <FileText className="size-5" />
+            </div>
+          )}
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{displayFileName(file)}</div>
             {typeof file.size_bytes === "number" ? (

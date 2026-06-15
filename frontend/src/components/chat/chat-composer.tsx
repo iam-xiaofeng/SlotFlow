@@ -1,5 +1,6 @@
 import {
   type ChangeEvent,
+  type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
@@ -37,10 +38,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
-import { type UploadedFileRecord } from "@/lib/chat-stream";
+import { type UploadedFileRecord, resolveUploadRawUrl } from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
 
-import { displayFileName, formatFileSize } from "./chat-format";
+import { displayFileName, formatFileSize, isImageFile } from "./chat-format";
 
 type ChatComposerProps = {
   attachments: UploadedFileRecord[];
@@ -53,6 +54,7 @@ type ChatComposerProps = {
   onCancel: () => void;
   onClearError: () => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void | Promise<void>;
+  onPasteFiles: (files: File[]) => void | Promise<void>;
   onRemoveAttachment: (fileId: string) => void;
   onRemoveQueuedMessage: (messageId: string) => void;
   onSendMessage: (message: string) => Promise<boolean>;
@@ -76,6 +78,7 @@ export function ChatComposer({
   onCancel,
   onClearError,
   onFileChange,
+  onPasteFiles,
   onRemoveAttachment,
   onRemoveQueuedMessage,
   onSendMessage,
@@ -83,7 +86,7 @@ export function ChatComposer({
   const [input, setInput] = useState("");
   const [isExpanded, setIsExpanded] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const canSend = Boolean(input.trim()) && !isUploading;
+  const canSend = (Boolean(input.trim()) || attachments.length > 0) && !isUploading;
 
   function handleInputChange(event: ChangeEvent<HTMLTextAreaElement>) {
     const nextValue = event.target.value;
@@ -104,7 +107,7 @@ export function ChatComposer({
   }
 
   async function submitCurrentInput() {
-    const text = input.trim();
+    const text = input.trim() || defaultAttachmentMessage(attachments);
     if (!text || isUploading) {
       return;
     }
@@ -166,6 +169,7 @@ export function ChatComposer({
                 textareaRef={textareaRef}
                 onInputChange={handleInputChange}
                 onKeyDown={handleKeyDown}
+                onPasteFiles={onPasteFiles}
               />
               <div className="mt-3 flex items-center justify-between gap-2">
                 <ComposerTools
@@ -195,6 +199,7 @@ export function ChatComposer({
                 textareaRef={textareaRef}
                 onInputChange={handleInputChange}
                 onKeyDown={handleKeyDown}
+                onPasteFiles={onPasteFiles}
               />
               <ComposerActions
                 canSend={canSend}
@@ -289,11 +294,21 @@ function ComposerAttachments({
         <Badge
           key={file.id}
           variant="outline"
-          className="h-8 max-w-full gap-1.5 rounded-md pr-1"
+          className="h-auto max-w-full gap-2 rounded-md py-1 pl-1 pr-1.5"
         >
-          <FileText className="size-4 shrink-0" />
-          <span className="max-w-52 truncate">{displayFileName(file)}</span>
-          <span className="text-muted-foreground">
+          {isImageFile(file) ? (
+            <img
+              src={resolveUploadRawUrl(file.id)}
+              alt={displayFileName(file)}
+              className="size-9 rounded object-cover"
+            />
+          ) : (
+            <span className="grid size-8 place-items-center rounded bg-muted">
+              <FileText className="size-4 shrink-0" />
+            </span>
+          )}
+          <span className="max-w-44 truncate">{displayFileName(file)}</span>
+          <span className="shrink-0 text-muted-foreground">
             {formatFileSize(file.size_bytes)}
           </span>
           <button
@@ -317,13 +332,24 @@ function ComposerTextarea({
   textareaRef,
   onInputChange,
   onKeyDown,
+  onPasteFiles,
 }: {
   compact?: boolean;
   input: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onPasteFiles: (files: File[]) => void | Promise<void>;
 }) {
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const imageFiles = extractClipboardImageFiles(event);
+    if (imageFiles.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    void onPasteFiles(imageFiles);
+  }
+
   return (
     <Textarea
       ref={textareaRef}
@@ -332,6 +358,7 @@ function ComposerTextarea({
       rows={1}
       placeholder="有问题，尽管问"
       onKeyDown={onKeyDown}
+      onPaste={handlePaste}
       wrap="soft"
       className={cn(
         "max-h-[min(40dvh,12rem)] min-h-8 min-w-0 resize-none overflow-y-auto border-0 bg-transparent px-0 py-0 text-lg leading-7 shadow-none [overflow-wrap:anywhere] focus-visible:ring-0",
@@ -339,6 +366,34 @@ function ComposerTextarea({
       )}
     />
   );
+}
+
+function extractClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>): File[] {
+  const items = Array.from(event.clipboardData.items ?? []);
+  return items.flatMap((item, index) => {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) {
+      return [];
+    }
+    const file = item.getAsFile();
+    if (!file) {
+      return [];
+    }
+    if (file.name) {
+      return [file];
+    }
+    const suffix = item.type.split("/")[1] || "png";
+    return [new File([file], `pasted-image-${index + 1}.${suffix}`, { type: item.type })];
+  });
+}
+
+function defaultAttachmentMessage(files: UploadedFileRecord[]) {
+  if (files.length === 0) {
+    return "";
+  }
+  if (files.every(isImageFile)) {
+    return files.length === 1 ? "请查看这张图片。" : "请查看这些图片。";
+  }
+  return "请查看这些附件。";
 }
 
 function shouldUseExpandedComposer(value: string) {

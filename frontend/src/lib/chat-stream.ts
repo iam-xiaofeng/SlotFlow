@@ -253,6 +253,10 @@ export function resolveArtifactRawUrl(path: string): string {
   );
 }
 
+export function resolveUploadRawUrl(fileId: string): string {
+  return joinBaseUrl(resolveChatStreamBaseUrl(), `/api/uploads/${fileId}/raw`);
+}
+
 export async function deleteArtifact(
   path: string,
   options: ChatRequestOptions = {},
