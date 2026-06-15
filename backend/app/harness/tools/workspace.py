@@ -120,7 +120,12 @@ def build_workspace_tools(
 
         @tool("workspace_write")
         def workspace_write(path: str, content: str) -> str:
-            """Write a UTF-8 text file into the SlotFlow workspace."""
+            """Write UTF-8 draft or intermediate content into the SlotFlow workspace.
+
+            Do not use this for user-visible deliverables. Use artifact_write for
+            generated reports, charts, visualizations, demos, previews, or files the
+            user should see in the artifact panel.
+            """
 
             target = workspace.write_text(path, content)
             return json.dumps(
@@ -136,7 +141,7 @@ def build_workspace_tools(
 
         @tool("artifact_write")
         def artifact_write(path: str, content: str) -> str:
-            """Write a UTF-8 artifact under workspace/artifacts."""
+            """Write a user-visible UTF-8 artifact under workspace/artifacts."""
 
             artifact_path = normalize_artifact_path(path)
             target = workspace.write_text(artifact_path, content)

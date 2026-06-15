@@ -27,14 +27,10 @@ def build_customization_tools(
     def find_skills(query: str, max_results: int = 5) -> str:
         """Search for installable Skills related to a user need."""
 
-        result = search_web(
-            query=f"{query} site:skills.sh OR site:github.com/vercel-labs/skills",
+        result = find_installable_skills(
+            query=query,
             max_results=max_results,
             config=config,
-        )
-        result["hint"] = (
-            "Use skill_install only when you have a concrete package_url and skill_name. "
-            "If the search result is ambiguous, ask the user before installing."
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -136,3 +132,24 @@ def build_customization_tools(
         )
 
     return [find_skills, skill_list, skill_install, mcp_add_http]
+
+
+def find_installable_skills(
+    *,
+    query: str,
+    max_results: int = 5,
+    config: SlotFlowSandboxConfig | None = None,
+) -> dict:
+    """Run the shared find-skills search used by tools and preflight."""
+
+    result = search_web(
+        query=f"{query} site:skills.sh OR site:github.com/vercel-labs/skills",
+        max_results=max_results,
+        config=config or SlotFlowSandboxConfig(),
+    )
+    result["hint"] = (
+        "Use skill_install only when you have a concrete package_url and skill_name. "
+        "If the search result is ambiguous, ask the user before installing."
+    )
+    result["tool"] = "find-skills"
+    return result

@@ -232,6 +232,8 @@ def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) ->
         "workspace_write",
         "artifact_write",
     ]
+    assert "draft or intermediate" in writable_tools["workspace_write"].description
+    assert "user-visible" in writable_tools["artifact_write"].description
     assert json.loads(raw) == {
         "path": "notes/a.txt",
         "bytes_written": 5,
