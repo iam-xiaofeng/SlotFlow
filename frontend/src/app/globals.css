@@ -153,6 +153,7 @@
 
 .slotflow-markdown {
   overflow-wrap: anywhere;
+  line-height: 1.78;
 }
 
 .slotflow-markdown > :first-child {
@@ -170,13 +171,13 @@
 .slotflow-markdown pre,
 .slotflow-markdown table,
 .slotflow-markdown .katex-display {
-  margin: 0.75rem 0;
+  margin: 1rem 0;
 }
 
 .slotflow-markdown h1,
 .slotflow-markdown h2,
 .slotflow-markdown h3 {
-  margin: 1rem 0 0.5rem;
+  margin: 1.35rem 0 0.65rem;
   font-weight: 650;
   line-height: 1.25;
 }
@@ -196,6 +197,10 @@
 .slotflow-markdown ul,
 .slotflow-markdown ol {
   padding-left: 1.5rem;
+}
+
+.slotflow-markdown li + li {
+  margin-top: 0.28rem;
 }
 
 .slotflow-markdown ul {
@@ -229,6 +234,28 @@
 .slotflow-markdown pre code {
   background: transparent;
   padding: 0;
+}
+
+.slotflow-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-size: 0.95rem;
+}
+
+.slotflow-markdown th,
+.slotflow-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
+}
+
+.slotflow-markdown th {
+  background: var(--muted);
+  font-weight: 650;
 }
 
 .slotflow-markdown .katex-display {

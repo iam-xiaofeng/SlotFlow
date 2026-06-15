@@ -1,6 +1,6 @@
 "use client";
 
-import { type PointerEvent } from "react";
+import { type PointerEvent, useRef } from "react";
 import {
   ExternalLink,
   LoaderCircle,
@@ -39,6 +39,7 @@ type ArtifactWorkspaceToolbarProps = {
 
 const minPanelWidth = 360;
 const maxPanelWidth = 960;
+const artifactPanelWidthVariable = "--slotflow-artifact-panel-width";
 
 export function ArtifactWorkspaceToolbar({
   artifacts,
@@ -90,20 +91,46 @@ export function ArtifactWorkspacePanel({
   width,
   onWidthChange,
 }: ArtifactWorkspacePanelProps) {
+  const animationFrameRef = useRef<number | null>(null);
+
   function beginResize(event: PointerEvent<HTMLDivElement>) {
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = width;
     const maxWidth = Math.min(maxPanelWidth, Math.max(minPanelWidth, window.innerWidth - 420));
+    let nextWidth = width;
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    function paintWidth(value: number) {
+      nextWidth = value;
+      if (animationFrameRef.current !== null) {
+        return;
+      }
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        document.documentElement.style.setProperty(
+          artifactPanelWidthVariable,
+          `${nextWidth}px`,
+        );
+        animationFrameRef.current = null;
+      });
+    }
 
     function handleMove(moveEvent: globalThis.PointerEvent) {
-      const nextWidth = clamp(startWidth - (moveEvent.clientX - startX), minPanelWidth, maxWidth);
-      onWidthChange(nextWidth);
+      paintWidth(clamp(startWidth - (moveEvent.clientX - startX), minPanelWidth, maxWidth));
     }
 
     function stopResize() {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", stopResize);
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      onWidthChange(nextWidth);
     }
 
     window.addEventListener("pointermove", handleMove);
@@ -113,7 +140,7 @@ export function ArtifactWorkspacePanel({
   return (
     <aside
       className="relative flex h-full min-w-0 shrink-0 flex-col border-l bg-background"
-      style={{ width }}
+      style={{ width: `var(${artifactPanelWidthVariable}, ${width}px)` }}
     >
       <div
         role="separator"

@@ -92,6 +92,8 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert "thinking_enabled=True" in captured["system_prompt"]
     assert "plan_enabled=True" in captured["system_prompt"]
     assert "subagent_enabled=False" in captured["system_prompt"]
+    assert "call find-skills before doing the work" in captured["system_prompt"]
+    assert "create an artifact with artifact_write" in captured["system_prompt"]
 
 
 def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) -> None:

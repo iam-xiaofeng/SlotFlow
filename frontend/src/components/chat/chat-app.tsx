@@ -68,6 +68,11 @@ type QueuedChatMessage = {
   attachmentCount: number;
 };
 
+type ThreadArtifactIndex = Record<string, string[]>;
+
+const threadArtifactStorageKey = "slotflow.thread-artifacts.v1";
+const artifactPanelWidthVariable = "--slotflow-artifact-panel-width";
+
 export function ChatApp() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [threadQuery, setThreadQuery] = useState("");
@@ -75,6 +80,7 @@ export function ChatApp() {
   const [isLoadingThreads, setIsLoadingThreads] = useState(true);
   const [attachments, setAttachments] = useState<UploadedFileRecord[]>([]);
   const [artifacts, setArtifacts] = useState<WorkspaceEntryRecord[]>([]);
+  const [threadArtifactPaths, setThreadArtifactPaths] = useState<ThreadArtifactIndex>({});
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
@@ -91,6 +97,7 @@ export function ChatApp() {
   const skillFolderInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const isDrainingQueueRef = useRef(false);
+  const hasLoadedThreadArtifactIndexRef = useRef(false);
 
   const {
     thread,
@@ -170,9 +177,6 @@ export function ChatApp() {
       if (!active) {
         return;
       }
-      if (nextThreads[0]) {
-        await loadThread(nextThreads[0]);
-      }
       await Promise.all([
         refreshArtifacts(),
         refreshSkills(),
@@ -189,7 +193,19 @@ export function ChatApp() {
     return () => {
       active = false;
     };
-  }, [loadThread, refreshArtifacts, refreshMcpServers, refreshMemories, refreshSkills, refreshThreads]);
+  }, [refreshArtifacts, refreshMcpServers, refreshMemories, refreshSkills, refreshThreads]);
+
+  useEffect(() => {
+    setThreadArtifactPaths(readThreadArtifactIndex());
+    hasLoadedThreadArtifactIndexRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedThreadArtifactIndexRef.current) {
+      return;
+    }
+    writeThreadArtifactIndex(threadArtifactPaths);
+  }, [threadArtifactPaths]);
 
   const filteredThreads = useMemo(() => {
     const query = threadQuery.trim().toLowerCase();
@@ -204,6 +220,25 @@ export function ChatApp() {
     [artifacts],
   );
   const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
+
+  const rememberThreadArtifacts = useCallback((threadId: string, paths: string[]) => {
+    if (paths.length === 0) {
+      return;
+    }
+    setThreadArtifactPaths((current) => {
+      const existing = current[threadId] ?? [];
+      const merged = [...existing];
+      for (const path of paths) {
+        if (!merged.includes(path)) {
+          merged.push(path);
+        }
+      }
+      return {
+        ...current,
+        [threadId]: merged,
+      };
+    });
+  }, []);
 
   const sendPreparedMessage = useCallback(
     async (
@@ -237,9 +272,16 @@ export function ChatApp() {
           refreshMcpServers(),
           refreshMemories(),
         ]);
-        const newArtifact = nextArtifacts.find(
+        const newArtifacts = nextArtifacts.filter(
           (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
         );
+        if (result.thread && newArtifacts.length > 0) {
+          rememberThreadArtifacts(
+            result.thread.id,
+            newArtifacts.map((artifact) => artifact.path),
+          );
+        }
+        const newArtifact = newArtifacts[0];
         if (newArtifact) {
           void handlePreviewArtifact(newArtifact);
         }
@@ -255,6 +297,7 @@ export function ChatApp() {
       refreshMemories,
       refreshSkills,
       refreshThreads,
+      rememberThreadArtifacts,
       sendMessage,
     ],
   );
@@ -319,6 +362,14 @@ export function ChatApp() {
         setAttachments([]);
         setQueuedMessages([]);
       }
+      setThreadArtifactPaths((current) => {
+        if (!(targetThread.id in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[targetThread.id];
+        return next;
+      });
       await refreshThreads();
       toast.success("聊天记录已删除");
     } catch (caught) {
@@ -779,6 +830,7 @@ export function ChatApp() {
           disabled={isConversationBusy}
           filteredThreads={filteredThreads}
           artifacts={artifacts}
+          threadArtifactPaths={threadArtifactPaths}
           skills={skills}
           mcpServers={mcpServers}
           memories={memories}
@@ -811,11 +863,14 @@ export function ChatApp() {
       </Sidebar>
 
       <SidebarInset className="h-dvh min-h-0 overflow-hidden">
-        <header className="flex h-14 shrink-0 items-center justify-end bg-background px-3 sm:px-4">
+        <header className="flex h-14 shrink-0 items-center justify-end bg-background pl-3 sm:pl-4">
+          <div className={isArtifactPanelOpen ? "" : "pr-3 sm:pr-4"}>
+            <UserMenu />
+          </div>
           {isArtifactPanelOpen && artifactFiles.length > 0 ? (
             <div
-              className="mr-2 min-w-0 shrink-0"
-              style={{ width: artifactPanelWidth }}
+              className="ml-2 min-w-0 shrink-0"
+              style={{ width: `var(${artifactPanelWidthVariable}, ${artifactPanelWidth}px)` }}
             >
               <ArtifactWorkspaceToolbar
                 artifacts={artifactFiles}
@@ -825,7 +880,6 @@ export function ChatApp() {
               />
             </div>
           ) : null}
-          <UserMenu />
         </header>
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -908,4 +962,42 @@ function sortRecordsByNames<T extends { name: string }>(records: T[], names: str
       (position.get(left.name) ?? records.length) -
       (position.get(right.name) ?? records.length),
   );
+}
+
+function readThreadArtifactIndex(): ThreadArtifactIndex {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(threadArtifactStorageKey);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).flatMap(([threadId, paths]) => {
+        if (!Array.isArray(paths)) {
+          return [];
+        }
+        return [
+          [
+            threadId,
+            paths.filter((path): path is string => typeof path === "string" && path.length > 0),
+          ],
+        ];
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeThreadArtifactIndex(index: ThreadArtifactIndex) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(threadArtifactStorageKey, JSON.stringify(index));
 }

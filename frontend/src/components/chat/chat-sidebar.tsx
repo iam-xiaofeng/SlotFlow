@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import {
   type LucideIcon,
   Brain,
@@ -36,6 +36,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -73,6 +76,7 @@ type ThreadSidebarProps = {
   mcpServers: McpServerRecord[];
   query: string;
   skills: SkillRecord[];
+  threadArtifactPaths: Record<string, string[]>;
   threadListError: string | null;
   totalThreads: number;
   onAddHttpMcpServer: () => void;
@@ -108,6 +112,7 @@ export function ThreadSidebar({
   mcpServers,
   query,
   skills,
+  threadArtifactPaths,
   threadListError,
   totalThreads,
   onAddHttpMcpServer,
@@ -238,9 +243,12 @@ export function ThreadSidebar({
           activeThreadId={activeThreadId}
           disabled={disabled}
           filteredThreads={filteredThreads}
+          artifacts={artifacts}
           isLoading={isLoading}
           query={query}
+          threadArtifactPaths={threadArtifactPaths}
           threadListError={threadListError}
+          onPreviewArtifact={onPreviewArtifact}
           onSelectThread={onSelectThread}
           onDeleteThread={onDeleteThread}
         />
@@ -471,7 +479,7 @@ function SkillContextList({
 }) {
   const [draggedName, setDraggedName] = useState<string | null>(null);
   const [expandedParents, setExpandedParents] = useState<Set<string>>(
-    () => new Set(["find-skills"]),
+    () => new Set(),
   );
   const skillsByName = useMemo(
     () => new Map(skills.map((skill) => [skill.name, skill])),
@@ -701,6 +709,7 @@ function ContextRecordRow({
   disabled = false,
   draggable = false,
   enabled,
+  extraMenuContent,
   isActive = false,
   isDragging = false,
   title,
@@ -716,6 +725,7 @@ function ContextRecordRow({
   disabled?: boolean;
   draggable?: boolean;
   enabled?: boolean;
+  extraMenuContent?: ReactNode;
   isActive?: boolean;
   isDragging?: boolean;
   title: string;
@@ -800,7 +810,9 @@ function ContextRecordRow({
           <MoreHorizontal className="size-4" />
           <span className="sr-only">更多操作</span>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" side="right" sideOffset={6} className="w-32">
+        <DropdownMenuContent align="end" side="right" sideOffset={6} className="w-40">
+          {extraMenuContent}
+          {extraMenuContent && actions.length > 0 ? <DropdownMenuSeparator /> : null}
           {actions.map((action) => {
             const ActionIcon = action.icon;
             return (
@@ -1172,25 +1184,36 @@ function MoreToolsMenu() {
 
 type ThreadHistoryProps = {
   activeThreadId: string | null;
+  artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
   filteredThreads: ThreadRecord[];
   isLoading: boolean;
   query: string;
+  threadArtifactPaths: Record<string, string[]>;
   threadListError: string | null;
+  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onSelectThread: (thread: ThreadRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
 };
 
 function ThreadHistory({
   activeThreadId,
+  artifacts,
   disabled,
   filteredThreads,
   isLoading,
   query,
+  threadArtifactPaths,
   threadListError,
+  onPreviewArtifact,
   onSelectThread,
   onDeleteThread,
 }: ThreadHistoryProps) {
+  const artifactFiles = useMemo(
+    () => artifacts.filter((artifact) => artifact.kind === "file"),
+    [artifacts],
+  );
+
   return (
     <SidebarGroup className="p-2 pt-1 group-data-[collapsible=icon]:hidden">
       <SidebarGroupLabel className="px-2">刚刚</SidebarGroupLabel>
@@ -1208,31 +1231,95 @@ function ThreadHistory({
                 {query.trim() ? "没有匹配的聊天" : "暂无刚刚的聊天"}
               </div>
             ) : (
-              filteredThreads.map((item) => (
-                <SidebarMenuItem key={item.id}>
-                  <ContextRecordRow
-                    title={item.title}
-                    description={formatThreadTime(item.updated_at)}
-                    isActive={item.id === activeThreadId}
-                    disabled={disabled}
-                    onSelect={() => onSelectThread(item)}
-                    actions={[
-                      {
-                        label: "删除",
-                        variant: "destructive",
-                        icon: Trash2,
-                        disabled,
-                        onSelect: () => onDeleteThread(item),
-                      },
-                    ]}
-                  />
-                </SidebarMenuItem>
-              ))
+              filteredThreads.map((item) => {
+                const threadArtifacts = getThreadArtifacts(
+                  item,
+                  artifactFiles,
+                  threadArtifactPaths,
+                );
+                return (
+                  <SidebarMenuItem key={item.id}>
+                    <ContextRecordRow
+                      title={item.title}
+                      description={formatThreadTime(item.updated_at)}
+                      isActive={item.id === activeThreadId}
+                      disabled={disabled}
+                      onSelect={() => onSelectThread(item)}
+                      extraMenuContent={
+                        <ThreadArtifactSubmenu
+                          artifacts={threadArtifacts}
+                          onPreviewArtifact={onPreviewArtifact}
+                        />
+                      }
+                      actions={[
+                        {
+                          label: "删除",
+                          variant: "destructive",
+                          icon: Trash2,
+                          disabled,
+                          onSelect: () => onDeleteThread(item),
+                        },
+                      ]}
+                    />
+                  </SidebarMenuItem>
+                );
+              })
             )}
           </SidebarMenu>
         </ScrollArea>
       </SidebarGroupContent>
     </SidebarGroup>
+  );
+}
+
+function ThreadArtifactSubmenu({
+  artifacts,
+  onPreviewArtifact,
+}: {
+  artifacts: WorkspaceEntryRecord[];
+  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
+}) {
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger disabled={artifacts.length === 0}>
+        <FileText className="size-4" />
+        产物
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-72">
+        {artifacts.length === 0 ? (
+          <DropdownMenuItem disabled>这个聊天暂无产物</DropdownMenuItem>
+        ) : (
+          artifacts.map((artifact) => (
+            <DropdownMenuItem
+              key={artifact.path}
+              className="min-w-0 gap-2"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onPreviewArtifact(artifact);
+              }}
+            >
+              <FileText className="size-4" />
+              <span className="min-w-0 truncate">
+                {artifact.path.replace(/^artifacts\//, "")}
+              </span>
+            </DropdownMenuItem>
+          ))
+        )}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
+function getThreadArtifacts(
+  thread: ThreadRecord,
+  artifacts: WorkspaceEntryRecord[],
+  threadArtifactPaths: Record<string, string[]>,
+): WorkspaceEntryRecord[] {
+  const explicitPaths = new Set(threadArtifactPaths[thread.id] ?? []);
+  const threadPrefix = `artifacts/${thread.id}/`;
+  return artifacts.filter(
+    (artifact) => explicitPaths.has(artifact.path) || artifact.path.startsWith(threadPrefix),
   );
 }
 

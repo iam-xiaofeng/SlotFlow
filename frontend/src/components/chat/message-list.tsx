@@ -262,7 +262,11 @@ function MessageBubble({
 }) {
   const isUser = message.role === "user";
   const files = getMessageFiles(message);
-  const content = message.content || (message.status === "streaming" ? "..." : "");
+  const content = message.content;
+  const isAssistantThinking =
+    !isUser && message.status === "streaming" && !content.trim();
+  const canShowAssistantActions =
+    isLatestAssistant && message.status === "done" && Boolean(content.trim());
 
   return (
     <article
@@ -294,6 +298,8 @@ function MessageBubble({
           >
             {isUser ? (
               <p className="whitespace-pre-wrap">{content}</p>
+            ) : isAssistantThinking ? (
+              <ThinkingIndicator />
             ) : (
               <MarkdownContent content={content} />
             )}
@@ -307,10 +313,9 @@ function MessageBubble({
             onCopyMessage={onCopyMessage}
             onStartEdit={onStartEdit}
           />
-        ) : isLatestAssistant ? (
+        ) : canShowAssistantActions ? (
           <AssistantMessageActions
             content={content}
-            disabled={isStreaming}
             onCopyMessage={onCopyMessage}
             onRetryLatestAssistantMessage={onRetryLatestAssistantMessage}
           />
@@ -438,12 +443,10 @@ function InlineUserMessageEditor({
 
 function AssistantMessageActions({
   content,
-  disabled,
   onCopyMessage,
   onRetryLatestAssistantMessage,
 }: {
   content: string;
-  disabled: boolean;
   onCopyMessage: (content: string) => void;
   onRetryLatestAssistantMessage: () => void;
 }) {
@@ -465,13 +468,27 @@ function AssistantMessageActions({
         variant="ghost"
         size="sm"
         title="重试"
-        disabled={disabled}
         className="h-8 gap-1.5 px-2 text-xs"
         onClick={onRetryLatestAssistantMessage}
       >
         <RotateCcw className="size-4" />
         重试
       </Button>
+    </div>
+  );
+}
+
+function ThinkingIndicator() {
+  return (
+    <div className="flex h-8 items-center gap-1.5 text-muted-foreground">
+      <span className="sr-only">思考中</span>
+      {[0, 1, 2].map((index) => (
+        <span
+          key={index}
+          className="size-2 rounded-full bg-current opacity-60 animate-bounce"
+          style={{ animationDelay: `${index * 120}ms` }}
+        />
+      ))}
     </div>
   );
 }

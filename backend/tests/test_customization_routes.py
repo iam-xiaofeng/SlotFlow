@@ -228,6 +228,28 @@ def test_install_skill_groups_dependency_skills(
     ).is_file()
 
 
+def test_list_skills_groups_legacy_same_package_dependencies(tmp_path: Path) -> None:
+    client, runtime_config = _client(tmp_path)
+    for name in ["earnings-preview", "company-valuation"]:
+        skill_dir = runtime_config.skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+        runtime_config.skills_config_store.mark_skill(
+            name,
+            enabled=True,
+            source="skills.sh",
+            package_url="https://github.com/example/finance-skills",
+        )
+
+    listed = client.get("/api/skills").json()
+    child = next(skill for skill in listed if skill["name"] == "company-valuation")
+
+    assert child["parent"] == "earnings-preview"
+
+
 def test_skill_pin_and_reorder_routes(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     client.post(

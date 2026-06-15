@@ -142,8 +142,11 @@ def build_system_prompt(
             "<slotflow-extension-tools>",
             "Use web_search/web_fetch for public web access when current information is needed.",
             "Use find-skills to search installable Skills. find-skills is a callable tool, not only a prompt skill.",
+            "When the user asks about a domain, profession, specialized task, or expert workflow, call find-skills before doing the work so you can discover whether a matching Skill exists.",
             "Use skill_install only when a concrete package_url and skill_name are known or the user explicitly asks for that exact install.",
+            "After installing a relevant Skill, use it for the corresponding work as soon as it is available; if it only becomes available on the next run, say that plainly and continue with the best current tools.",
             "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
+            "When an interactive explanation, chart, report, or visual comparison would make the answer clearer, create an artifact with artifact_write and reference it in the response.",
             "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",
             "</slotflow-extension-tools>",
         ]

@@ -37,6 +37,7 @@ async def list_skills(request: Request) -> list[SkillRecord]:
     store = get_skills_config_store(request)
     if store is not None:
         store.ensure_default_find_skills()
+        store.infer_missing_dependency_parents()
         refresh_runtime_skills_config(runtime_config)
     skills = load_enabled_skills(
         skills_root=root,

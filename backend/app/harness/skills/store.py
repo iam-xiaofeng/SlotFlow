@@ -108,6 +108,48 @@ class SlotFlowSkillsConfigStore:
             if self.get_config(name).enabled
         }
 
+    def infer_missing_dependency_parents(self) -> None:
+        """Group legacy skills from the same registry install under their first skill.
+
+        New installs record dependency parents when the CLI returns extra skills. Older
+        local configs may only have the shared package URL, so the UI would show every
+        dependency as a top-level skill. This migration only fills blank parents and
+        leaves protected or explicitly grouped skills unchanged.
+        """
+
+        configs = self.configs()
+        groups: dict[str, list[tuple[str, SkillConfig]]] = {}
+        for name, config in configs.items():
+            if (
+                config.protected
+                or not config.package_url
+                or not config.source.startswith("skills.sh")
+            ):
+                continue
+            groups.setdefault(config.package_url, []).append((name, config))
+
+        changed = False
+        for group in groups.values():
+            if len(group) <= 1:
+                continue
+            ordered = sorted(group, key=skill_config_sort_key)
+            root_name = next(
+                (
+                    name
+                    for name, _ in ordered
+                    if any(child_config.parent == name for _, child_config in ordered)
+                ),
+                ordered[0][0],
+            )
+            for name, config in ordered:
+                if name == root_name or config.parent is not None:
+                    continue
+                configs[name] = replace_skill_config(config, parent=root_name)
+                changed = True
+
+        if changed:
+            self._write_configs(configs)
+
     def set_enabled(self, name: str, enabled: bool) -> SkillConfig:
         configs = self.configs()
         current = configs.get(name, SkillConfig())
