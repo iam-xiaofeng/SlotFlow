@@ -18,6 +18,8 @@ import {
 import { type ChatUiMessage, useChatStream } from "@/hooks/use-chat-stream";
 import {
   type ChatMode,
+  type ClarificationOptionRecord,
+  type ClarificationRequestRecord,
   type McpServerRecord,
   type MemoryKind,
   type MemoryRecord,
@@ -783,6 +785,24 @@ export function ChatApp() {
     });
   }
 
+  async function handleSelectClarification(
+    clarification: ClarificationRequestRecord,
+    option: ClarificationOptionRecord,
+  ) {
+    if (isConversationBusy) {
+      return;
+    }
+    await submitMessage(`我选择 ${option.id}：${option.label}`, {
+      files: [],
+      metadata: {
+        source: "clarification-choice",
+        clarification_id: clarification.id,
+        clarification_question: clarification.question,
+        option_id: option.id,
+      },
+    });
+  }
+
   function handleRemoveAttachment(fileId: string) {
     setAttachments((current) => current.filter((item) => item.id !== fileId));
   }
@@ -902,6 +922,9 @@ export function ChatApp() {
                     handleEditLatestUserMessage(messageId, content)
                   }
                   onRetryLatestAssistantMessage={() => void handleRetryLatestAssistantMessage()}
+                  onSelectClarification={(clarification, option) =>
+                    void handleSelectClarification(clarification, option)
+                  }
                 />
                 <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
                   {composer}

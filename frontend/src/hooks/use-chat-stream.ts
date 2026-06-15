@@ -4,6 +4,7 @@ import { startTransition, useCallback, useEffect, useRef, useState } from "react
 
 import {
   type ChatMode,
+  type ClarificationRequestRecord,
   type ChatStreamEvent,
   type ChatStreamRequest,
   type MessageRecord,
@@ -272,6 +273,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
           }
 
+          if (streamEvent.event === "clarification.requested") {
+            const clarification = parseClarificationRequest(streamEvent.data);
+            if (clarification) {
+              patchAssistant(assistantMessageId, {
+                content: formatClarificationContent(clarification),
+                metadata: { clarification },
+              });
+            }
+          }
+
           if (streamEvent.event === "state.snapshot") {
             const content = latestAssistantContent(streamEvent);
             if (content) {
@@ -379,6 +390,59 @@ function latestAssistantContent(event: ChatStreamEvent): string | null {
   }
 
   return null;
+}
+
+function parseClarificationRequest(
+  data: Record<string, unknown>,
+): ClarificationRequestRecord | null {
+  if (
+    data.type !== "clarification" ||
+    typeof data.id !== "string" ||
+    typeof data.question !== "string"
+  ) {
+    return null;
+  }
+
+  const options = Array.isArray(data.options)
+    ? data.options.flatMap((item) => {
+        if (
+          typeof item === "object" &&
+          item !== null &&
+          "id" in item &&
+          "label" in item &&
+          typeof item.id === "string" &&
+          typeof item.label === "string"
+        ) {
+          return [{ id: item.id, label: item.label }];
+        }
+        return [];
+      })
+    : [];
+
+  return {
+    type: "clarification",
+    id: data.id,
+    question: data.question,
+    clarification_type:
+      typeof data.clarification_type === "string"
+        ? data.clarification_type
+        : "missing_info",
+    context: typeof data.context === "string" ? data.context : null,
+    options,
+    source: typeof data.source === "string" ? data.source : "slotflow_clarification",
+    thread_id: typeof data.thread_id === "string" ? data.thread_id : null,
+    run_id: typeof data.run_id === "string" ? data.run_id : null,
+  };
+}
+
+function formatClarificationContent(clarification: ClarificationRequestRecord): string {
+  return [
+    clarification.context,
+    clarification.question,
+    ...clarification.options.map((option) => `${option.id}. ${option.label}`),
+  ]
+    .filter((line): line is string => Boolean(line?.trim()))
+    .join("\n");
 }
 
 function makeId(prefix: string) {

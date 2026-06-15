@@ -15,6 +15,10 @@ import remarkMath from "remark-math";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { type ChatUiMessage } from "@/hooks/use-chat-stream";
+import {
+  type ClarificationOptionRecord,
+  type ClarificationRequestRecord,
+} from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
 
 import {
@@ -32,6 +36,10 @@ type MessageListProps = {
   onCopyMessage: (content: string) => void;
   onEditLatestUserMessage: (messageId: string, content: string) => Promise<boolean>;
   onRetryLatestAssistantMessage: () => void;
+  onSelectClarification: (
+    clarification: ClarificationRequestRecord,
+    option: ClarificationOptionRecord,
+  ) => void;
 };
 
 type UserMessageNavItem = {
@@ -47,6 +55,7 @@ export function MessageList({
   onCopyMessage,
   onEditLatestUserMessage,
   onRetryLatestAssistantMessage,
+  onSelectClarification,
 }: MessageListProps) {
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const userMessageRefs = useRef(new Map<string, HTMLElement>());
@@ -202,6 +211,7 @@ export function MessageList({
                 onCancelEdit={() => setEditingUserMessageId(null)}
                 onSubmitEdit={(content) => submitUserMessageEdit(message.id, content)}
                 onRetryLatestAssistantMessage={onRetryLatestAssistantMessage}
+                onSelectClarification={onSelectClarification}
                 userMessageRef={
                   message.role === "user"
                     ? (element) => registerUserMessage(message.id, element)
@@ -246,6 +256,7 @@ function MessageBubble({
   onCancelEdit,
   onSubmitEdit,
   onRetryLatestAssistantMessage,
+  onSelectClarification,
   userMessageRef,
 }: {
   message: ChatUiMessage;
@@ -258,15 +269,25 @@ function MessageBubble({
   onCancelEdit: () => void;
   onSubmitEdit: (content: string) => Promise<boolean>;
   onRetryLatestAssistantMessage: () => void;
+  onSelectClarification: (
+    clarification: ClarificationRequestRecord,
+    option: ClarificationOptionRecord,
+  ) => void;
   userMessageRef?: (element: HTMLElement | null) => void;
 }) {
   const isUser = message.role === "user";
   const files = getMessageFiles(message);
   const content = message.content;
+  const clarification = getClarificationRequest(message);
   const isAssistantThinking =
-    !isUser && message.status === "streaming" && !content.trim();
+    !isUser && !clarification && message.status === "streaming" && !content.trim();
   const canShowAssistantActions =
-    isLatestAssistant && message.status === "done" && Boolean(content.trim());
+    !clarification &&
+    isLatestAssistant &&
+    message.status === "done" &&
+    Boolean(content.trim());
+  const canAnswerClarification =
+    Boolean(clarification) && isLatestAssistant && !isStreaming;
 
   return (
     <article
@@ -298,6 +319,12 @@ function MessageBubble({
           >
             {isUser ? (
               <p className="whitespace-pre-wrap">{content}</p>
+            ) : clarification ? (
+              <ClarificationRequestPanel
+                clarification={clarification}
+                disabled={!canAnswerClarification}
+                onSelect={onSelectClarification}
+              />
             ) : isAssistantThinking ? (
               <ThinkingIndicator />
             ) : (
@@ -493,6 +520,81 @@ function ThinkingIndicator() {
   );
 }
 
+function ClarificationRequestPanel({
+  clarification,
+  disabled,
+  onSelect,
+}: {
+  clarification: ClarificationRequestRecord;
+  disabled: boolean;
+  onSelect: (
+    clarification: ClarificationRequestRecord,
+    option: ClarificationOptionRecord,
+  ) => void;
+}) {
+  useEffect(() => {
+    if (disabled || clarification.options.length === 0) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      const option = clarification.options.find(
+        (item) => item.id.toLowerCase() === event.key.toLowerCase(),
+      );
+      if (!option) {
+        return;
+      }
+      event.preventDefault();
+      onSelect(clarification, option);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [clarification, disabled, onSelect]);
+
+  return (
+    <div className="max-w-3xl rounded-lg border bg-background p-4 shadow-sm">
+      {clarification.context ? (
+        <p className="mb-2 text-sm leading-6 text-muted-foreground">
+          {clarification.context}
+        </p>
+      ) : null}
+      <p className="whitespace-pre-wrap text-base font-medium leading-7">
+        {clarification.question}
+      </p>
+      {clarification.options.length > 0 ? (
+        <div className="mt-3 grid gap-2">
+          {clarification.options.map((option) => (
+            <Button
+              key={option.id}
+              type="button"
+              variant="outline"
+              className="h-auto justify-start gap-3 rounded-lg px-3 py-2.5 text-left"
+              disabled={disabled}
+              onClick={() => onSelect(clarification, option)}
+            >
+              <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted text-xs font-semibold">
+                {option.id}
+              </span>
+              <span className="min-w-0 whitespace-normal break-words leading-6">
+                {option.label}
+              </span>
+            </Button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MessageNavigator({
   activeIndex,
   isOpen,
@@ -579,6 +681,56 @@ function MessageNavigator({
       ) : null}
     </div>
   );
+}
+
+function getClarificationRequest(
+  message: ChatUiMessage,
+): ClarificationRequestRecord | null {
+  const raw = message.metadata?.clarification;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+
+  const record = raw as Record<string, unknown>;
+  if (
+    record.type !== "clarification" ||
+    typeof record.id !== "string" ||
+    typeof record.question !== "string"
+  ) {
+    return null;
+  }
+
+  const options = Array.isArray(record.options)
+    ? record.options.flatMap((item) => {
+        if (
+          item &&
+          typeof item === "object" &&
+          "id" in item &&
+          "label" in item &&
+          typeof item.id === "string" &&
+          typeof item.label === "string"
+        ) {
+          return [{ id: item.id, label: item.label }];
+        }
+        return [];
+      })
+    : [];
+
+  return {
+    type: "clarification",
+    id: record.id,
+    question: record.question,
+    clarification_type:
+      typeof record.clarification_type === "string"
+        ? record.clarification_type
+        : "missing_info",
+    context: typeof record.context === "string" ? record.context : null,
+    options,
+    source:
+      typeof record.source === "string" ? record.source : "slotflow_clarification",
+    thread_id: typeof record.thread_id === "string" ? record.thread_id : null,
+    run_id: typeof record.run_id === "string" ? record.run_id : null,
+  };
 }
 
 function MarkdownContent({ content }: { content: string }) {

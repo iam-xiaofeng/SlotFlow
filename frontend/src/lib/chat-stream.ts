@@ -21,6 +21,23 @@ export type MessageRecord = {
   created_at: string;
 };
 
+export type ClarificationOptionRecord = {
+  id: string;
+  label: string;
+};
+
+export type ClarificationRequestRecord = {
+  type: "clarification";
+  id: string;
+  question: string;
+  clarification_type: string;
+  context?: string | null;
+  options: ClarificationOptionRecord[];
+  source: string;
+  thread_id?: string | null;
+  run_id?: string | null;
+};
+
 export type ChatMode = "flash" | "pro" | "ultra";
 
 export type ChatStreamRequest = {
