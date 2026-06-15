@@ -388,15 +388,18 @@ def test_artifact_discovery_middleware_records_new_artifacts(tmp_path) -> None:
     )
     runtime = Runtime(context=_bundle().context)
     before = middleware.before_agent({"messages": [], "slotflow": {}}, runtime)
+    assert before is None
 
     (artifacts_root / "report.md").write_text("new", encoding="utf-8")
 
     after = middleware.after_agent(
-        {"messages": [], "slotflow": before["slotflow"]},
+        {"messages": [], "slotflow": {"existing": "kept"}},
         runtime,
     )
 
     artifacts = after["slotflow"]["artifacts"]
+    assert after["slotflow"]["existing"] == "kept"
+    assert "artifact_discovery" not in after["slotflow"]
     assert artifacts["source"] == "slotflow_artifact_discovery"
     assert [entry["path"] for entry in artifacts["new_entries"]] == [
         "artifacts/report.md"

@@ -10,6 +10,7 @@ from langgraph.runtime import Runtime
 from app.chat.models import RunContext
 from app.harness.sandbox import SlotFlowSandboxConfig, build_slotflow_workspace
 from app.harness.state import SlotFlowAgentState
+from app.harness.tools.workspace import list_workspace_tree
 
 
 SLOTFLOW_ARTIFACT_DISCOVERY_SOURCE = "slotflow_artifact_discovery"
@@ -23,33 +24,26 @@ class SlotFlowArtifactDiscoveryMiddleware(
     def __init__(self, sandbox_config: SlotFlowSandboxConfig | None = None) -> None:
         super().__init__()
         self._sandbox_config = sandbox_config
+        self._baseline_by_run_id: dict[str, set[str]] = {}
 
     def before_agent(
         self,
         state: SlotFlowAgentState,
         runtime: Runtime[RunContext],
     ) -> dict[str, Any] | None:
-        _ = runtime
-        slotflow = dict(state.get("slotflow") or {})
         artifacts = list_artifact_entries(self._sandbox_config)
-        slotflow["artifact_discovery"] = {
-            "baseline_paths": [entry["path"] for entry in artifacts if entry["kind"] == "file"],
-            "source": SLOTFLOW_ARTIFACT_DISCOVERY_SOURCE,
+        self._baseline_by_run_id[run_key(runtime)] = {
+            entry["path"] for entry in artifacts if entry["kind"] == "file"
         }
-        return {"slotflow": slotflow}
+        return None
 
     def after_agent(
         self,
         state: SlotFlowAgentState,
         runtime: Runtime[RunContext],
     ) -> dict[str, Any] | None:
-        _ = runtime
         slotflow = dict(state.get("slotflow") or {})
-        discovery = slotflow.get("artifact_discovery")
-        baseline_paths = set()
-        if isinstance(discovery, dict) and isinstance(discovery.get("baseline_paths"), list):
-            baseline_paths = {str(path) for path in discovery["baseline_paths"]}
-
+        baseline_paths = self._baseline_by_run_id.pop(run_key(runtime), set())
         entries = list_artifact_entries(self._sandbox_config)
         new_entries = [
             entry
@@ -74,18 +68,16 @@ def list_artifact_entries(
     artifact_root = workspace.resolve_path("artifacts")
     if not artifact_root.exists():
         return []
+    return list_workspace_tree(
+        workspace=workspace,
+        path="artifacts",
+        max_depth=8,
+        max_entries=500,
+    )
 
-    entries: list[dict[str, Any]] = []
-    for child in sorted(artifact_root.rglob("*"), key=lambda item: item.as_posix()):
-        relative = child.relative_to(workspace.root).as_posix()
-        if child.is_dir():
-            entries.append({"path": relative, "kind": "directory", "size_bytes": None})
-        elif child.is_file():
-            entries.append(
-                {
-                    "path": relative,
-                    "kind": "file",
-                    "size_bytes": child.stat().st_size,
-                }
-            )
-    return entries
+
+def run_key(runtime: Runtime[RunContext]) -> str:
+    """Return a stable key for the current run."""
+
+    context = runtime.context
+    return context.run_id if context is not None else "default"

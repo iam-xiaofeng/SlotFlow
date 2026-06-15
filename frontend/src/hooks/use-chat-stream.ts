@@ -293,7 +293,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
             const nextArtifacts = latestDiscoveredArtifacts(streamEvent);
             if (nextArtifacts.length > 0) {
-              discoveredArtifacts = nextArtifacts;
+              discoveredArtifacts = mergeWorkspaceEntries(
+                discoveredArtifacts,
+                nextArtifacts,
+              );
             }
           }
 
@@ -446,6 +449,17 @@ function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord
     }
     return [];
   });
+}
+
+function mergeWorkspaceEntries(
+  left: WorkspaceEntryRecord[],
+  right: WorkspaceEntryRecord[],
+): WorkspaceEntryRecord[] {
+  const merged = new Map(left.map((entry) => [entry.path, entry]));
+  for (const entry of right) {
+    merged.set(entry.path, entry);
+  }
+  return [...merged.values()];
 }
 
 function parseClarificationRequest(

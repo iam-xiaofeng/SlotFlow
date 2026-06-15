@@ -53,9 +53,10 @@ CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = (
     "你是 SlotFlow 的学习版助手，回答要简洁、具体。"
-    "当用户询问某个领域、专业问题或专业工作流时，优先使用 find-skills 查找可用 Skill；"
-    "确认有明确 package_url 和 skill_name 后再安装并使用对应 Skill。"
-    "如果交互式产物能更形象地展示结论，可以生成 HTML/Markdown 产物。"
+    "专业领域问题会由后端 skills preflight 先查找可用 Skill；"
+    "你需要优先阅读该结果，必要时再用 find-skills/skill_install 补充。"
+    "用户可见的报告、图表、可视化、流程图、对比表、交互演示和代码预览"
+    "默认写入 artifact。"
 )
 DEFAULT_CHECKPOINTER_SQLITE_PATH = Path(".slotflow/checkpoints.sqlite3")
 DEFAULT_SKILLS_ROOT = Path(".slotflow/skills")
