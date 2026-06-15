@@ -59,7 +59,7 @@ def build_harness_middleware(
         )
 
     if resolved.uploads_enabled:
-        middleware.append(SlotFlowUploadsMiddleware())
+        middleware.append(SlotFlowUploadsMiddleware(sandbox_config=sandbox_config))
 
     if tools_enabled and resolved.clarification_enabled:
         middleware.append(SlotFlowClarificationMiddleware())

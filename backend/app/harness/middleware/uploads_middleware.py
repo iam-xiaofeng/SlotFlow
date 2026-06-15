@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, override
 
 from langchain.agents.middleware import AgentMiddleware
@@ -9,6 +10,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from app.chat.models import RunContext, UploadedFileContext
+from app.harness.sandbox import SlotFlowSandboxConfig, build_slotflow_workspace
 from app.harness.state import SlotFlowAgentState
 
 
@@ -20,6 +22,9 @@ class SlotFlowUploadsMiddleware(AgentMiddleware[SlotFlowAgentState, RunContext])
     """Inject current-run upload metadata into the latest user message."""
 
     name = "SlotFlowUploadsMiddleware"
+
+    def __init__(self, *, sandbox_config: SlotFlowSandboxConfig | None = None) -> None:
+        self._workspace = build_slotflow_workspace(sandbox_config)
 
     @override
     def before_agent(
@@ -37,8 +42,16 @@ class SlotFlowUploadsMiddleware(AgentMiddleware[SlotFlowAgentState, RunContext])
             last_message = messages[-1]
             if not _content_contains_uploads_block(last_message.content):
                 upload_context = _format_uploaded_files(context.uploaded_files)
+                image_blocks = _image_content_blocks(
+                    context.uploaded_files,
+                    workspace=self._workspace,
+                )
                 messages[-1] = HumanMessage(
-                    content=_prepend_text(last_message.content, f"{upload_context}\n\n"),
+                    content=_prepend_upload_content(
+                        last_message.content,
+                        f"{upload_context}\n\n",
+                        image_blocks=image_blocks,
+                    ),
                     id=last_message.id,
                     name=last_message.name,
                     additional_kwargs=last_message.additional_kwargs,
@@ -67,6 +80,7 @@ def _format_uploaded_files(uploaded_files: list[UploadedFileContext]) -> str:
         UPLOADS_BLOCK_START,
         "Files uploaded for this message are available in the SlotFlow workspace.",
         "Use `workspace_read(path)` before answering file-content questions.",
+        "Image uploads are also attached as image_url content blocks for vision-capable models.",
         "",
     ]
     for uploaded_file in uploaded_files:
@@ -106,3 +120,66 @@ def _prepend_text(content: Any, prefix: str) -> Any:
     if isinstance(content, list):
         return [{"type": "text", "text": prefix}, *content]
     return content
+
+
+def _prepend_upload_content(
+    content: Any,
+    prefix: str,
+    *,
+    image_blocks: list[dict[str, Any]],
+) -> Any:
+    if not image_blocks:
+        return _prepend_text(content, prefix)
+    if isinstance(content, str):
+        return [{"type": "text", "text": f"{prefix}{content}"}, *image_blocks]
+    if isinstance(content, list):
+        return [{"type": "text", "text": prefix}, *content, *image_blocks]
+    return content
+
+
+def _image_content_blocks(
+    uploaded_files: list[UploadedFileContext],
+    *,
+    workspace,
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for uploaded_file in uploaded_files:
+        if not _is_image_upload(uploaded_file):
+            continue
+        try:
+            target = workspace.resolve_path(uploaded_file.workspace_path)
+            if not target.is_file() or target.stat().st_size > workspace.config.max_read_bytes:
+                continue
+            encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+        except Exception:
+            continue
+        media_type = uploaded_file.content_type or _image_media_type_from_name(
+            uploaded_file.filename
+        )
+        blocks.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+            }
+        )
+    return blocks
+
+
+def _is_image_upload(uploaded_file: UploadedFileContext) -> bool:
+    content_type = uploaded_file.content_type or ""
+    if content_type.startswith("image/"):
+        return True
+    return uploaded_file.filename.lower().endswith(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    )
+
+
+def _image_media_type_from_name(filename: str) -> str:
+    lower = filename.lower()
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".gif"):
+        return "image/gif"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    return "image/jpeg"

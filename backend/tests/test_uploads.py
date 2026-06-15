@@ -83,6 +83,21 @@ def test_get_uploaded_file_returns_metadata(tmp_path: Path) -> None:
     assert response.json()["workspace_path"] == uploaded["workspace_path"]
 
 
+def test_raw_uploaded_file_serves_bytes_inline(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    uploaded = client.post(
+        "/api/uploads",
+        files={"file": ("photo.png", b"\x89PNG\r\n\x1a\nimage", "image/png")},
+    ).json()
+
+    response = client.get(f"/api/uploads/{uploaded['id']}/raw")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["content-disposition"] == "inline"
+    assert response.content == b"\x89PNG\r\n\x1a\nimage"
+
+
 def test_workspace_read_can_read_uploaded_file_by_workspace_path(tmp_path: Path) -> None:
     """模块 23：上传文件返回的 workspace_path 仍然受 workspace 工具边界保护。"""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -312,6 +313,46 @@ def test_uploads_middleware_injects_uploaded_files_into_latest_user_message() ->
     assert "<slotflow-uploaded-files>" in str(message.content)
     assert "path=uploads/run_middleware/report.md" in str(message.content)
     assert str(message.content).endswith("请分析这个文件")
+
+
+def test_uploads_middleware_injects_image_content_blocks(tmp_path) -> None:
+    image_bytes = b"\x89PNG\r\n\x1a\nimage"
+    root = tmp_path / "workspace"
+    image_path = root / "uploads" / "run_middleware" / "photo.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(image_bytes)
+    context = _bundle().context.model_copy(
+        update={
+            "uploaded_files": [
+                UploadedFileContext(
+                    id="file_image",
+                    filename="photo.png",
+                    original_filename="截图.png",
+                    content_type="image/png",
+                    size_bytes=len(image_bytes),
+                    workspace_path="uploads/run_middleware/photo.png",
+                )
+            ]
+        }
+    )
+    middleware = SlotFlowUploadsMiddleware(
+        sandbox_config=SlotFlowSandboxConfig(workspace_root=root)
+    )
+
+    update = middleware.before_agent(
+        {"messages": [HumanMessage(content="这张图是什么？")]},
+        Runtime(context=context),
+    )
+
+    assert update is not None
+    content = update["messages"][0].content
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert "path=uploads/run_middleware/photo.png" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    url = content[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == image_bytes
 
 
 def test_tool_safety_middleware_converts_tool_exception_to_error_message() -> None:
