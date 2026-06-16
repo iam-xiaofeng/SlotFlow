@@ -23,6 +23,7 @@ from app.chat.agent_adapter import (
     extract_message_delta,
     normalize_values_snapshot,
     projection_item_to_agent_event,
+    todo_event_from_snapshot,
 )
 from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
@@ -202,6 +203,35 @@ def test_clarification_tool_message_becomes_requested_event() -> None:
             **payload,
             "thread_id": "thread_test",
             "run_id": "run_test",
+        },
+    )
+
+
+def test_todos_in_values_snapshot_become_todo_updated_event() -> None:
+    snapshot = normalize_values_snapshot(
+        item={
+            "messages": [],
+            "todos": [
+                {"content": "读取代码", "status": "completed"},
+                {"content": "补前端展示", "status": "in_progress"},
+                {"content": "跑测试", "status": "later"},
+            ],
+        },
+        bundle=_bundle(),
+    )
+
+    event = todo_event_from_snapshot(snapshot)
+
+    assert event == AgentEvent(
+        event="todo.updated",
+        data={
+            "thread_id": "thread_test",
+            "run_id": "run_test",
+            "todos": [
+                {"content": "读取代码", "status": "completed"},
+                {"content": "补前端展示", "status": "in_progress"},
+                {"content": "跑测试", "status": "pending"},
+            ],
         },
     )
 

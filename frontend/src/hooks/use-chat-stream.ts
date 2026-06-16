@@ -28,6 +28,13 @@ export type ChatUiMessage = {
   metadata?: Record<string, unknown>;
 };
 
+export type ChatTodoStatus = "pending" | "in_progress" | "completed";
+
+export type ChatTodo = {
+  content: string;
+  status: ChatTodoStatus;
+};
+
 export type UseChatStreamOptions = {
   defaultThreadTitle?: string;
   defaultModelName?: string;
@@ -65,6 +72,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
   const [thread, setThread] = useState<ThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
+  const [todos, setTodos] = useState<ChatTodo[]>([]);
   const [events, setEvents] = useState<ChatStreamEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +137,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         const nextThread = await createThread(title);
         setThread(nextThread);
         setMessages([]);
+        setTodos([]);
         setEvents([]);
         return nextThread;
       } catch (caught) {
@@ -147,6 +156,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
     setThread(null);
     setMessages([]);
+    setTodos([]);
     setEvents([]);
     setError(null);
     return true;
@@ -162,6 +172,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       const storedMessages = await listThreadMessages(targetThread.id);
       setThread(targetThread);
       setMessages(storedMessages.map(messageRecordToUiMessage));
+      setTodos([]);
       setEvents([]);
       return true;
     } catch (caught) {
@@ -206,6 +217,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       isStreamingRef.current = true;
       setIsStreaming(true);
       setError(null);
+      setTodos([]);
 
       let activeThread: ThreadRecord | null = thread;
       let accepted = false;
@@ -286,10 +298,18 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
           }
 
+          if (streamEvent.event === "todo.updated") {
+            setTodos(parseTodos(streamEvent.data.todos));
+          }
+
           if (streamEvent.event === "state.snapshot") {
             const content = latestAssistantContent(streamEvent);
             if (content) {
               replaceAssistantText(assistantMessageId, content);
+            }
+            const nextTodos = latestTodos(streamEvent);
+            if (nextTodos) {
+              setTodos(nextTodos);
             }
             const nextArtifacts = latestDiscoveredArtifacts(streamEvent);
             if (nextArtifacts.length > 0) {
@@ -354,6 +374,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   return {
     thread,
     messages,
+    todos,
     events,
     isStreaming,
     error,
@@ -400,6 +421,41 @@ function latestAssistantContent(event: ChatStreamEvent): string | null {
   }
 
   return null;
+}
+
+function latestTodos(event: ChatStreamEvent): ChatTodo[] | null {
+  const state = event.data.state;
+  if (typeof state !== "object" || state === null || !("todos" in state)) {
+    return null;
+  }
+  return parseTodos(state.todos);
+}
+
+function parseTodos(value: unknown): ChatTodo[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "content" in item &&
+      "status" in item &&
+      typeof item.content === "string"
+    ) {
+      const status = parseTodoStatus(item.status);
+      return [{ content: item.content, status }];
+    }
+    return [];
+  });
+}
+
+function parseTodoStatus(value: unknown): ChatTodoStatus {
+  if (value === "completed" || value === "in_progress" || value === "pending") {
+    return value;
+  }
+  return "pending";
 }
 
 function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord[] {

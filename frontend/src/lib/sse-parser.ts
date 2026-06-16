@@ -3,6 +3,7 @@ export type ChatStreamEventName =
   | "message.delta"
   | "tool.delta"
   | "clarification.requested"
+  | "todo.updated"
   | "state.snapshot"
   | "run.finished"
   | "run.error";

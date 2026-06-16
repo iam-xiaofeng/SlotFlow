@@ -8,6 +8,13 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  Circle,
+  ListTodo,
+  LoaderCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -16,6 +23,7 @@ import {
   SidebarProvider,
 } from "@/components/ui/sidebar";
 import { type ChatUiMessage, useChatStream } from "@/hooks/use-chat-stream";
+import { type ChatTodo } from "@/hooks/use-chat-stream";
 import {
   type ChatMode,
   type ClarificationOptionRecord,
@@ -104,6 +112,7 @@ export function ChatApp() {
   const {
     thread,
     messages,
+    todos,
     isStreaming,
     error,
     sendMessage,
@@ -936,6 +945,7 @@ export function ChatApp() {
                   }
                 />
                 <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
+                  <TodoProgressPanel todos={todos} />
                   {composer}
                 </div>
               </>
@@ -955,6 +965,85 @@ export function ChatApp() {
       </SidebarInset>
     </SidebarProvider>
   );
+}
+
+function TodoProgressPanel({ todos }: { todos: ChatTodo[] }) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+
+  if (todos.length === 0) {
+    return null;
+  }
+
+  const completedCount = todos.filter((todo) => todo.status === "completed").length;
+
+  return (
+    <div className="mx-auto mb-2 w-full max-w-3xl overflow-hidden rounded-2xl border border-border/60 bg-background/75 shadow-sm backdrop-blur">
+      <button
+        type="button"
+        aria-expanded={!isCollapsed}
+        className={
+          "flex min-h-9 w-full items-center justify-between gap-3 bg-muted/35 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
+        }
+        onClick={() => setIsCollapsed((current) => !current)}
+      >
+        <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+          <ListTodo className="size-4 shrink-0" />
+          <span className="truncate">任务列表</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+          <span>
+            {completedCount}/{todos.length}
+          </span>
+          <ChevronDown
+            className={
+              isCollapsed
+                ? "size-4 transition-transform"
+                : "size-4 rotate-180 transition-transform"
+            }
+          />
+        </div>
+      </button>
+      <div
+        className={
+          isCollapsed
+            ? "max-h-0 overflow-hidden border-t-0 px-3 py-0 transition-all duration-200 ease-out"
+            : "max-h-36 overflow-y-auto border-t border-border/50 px-3 py-2 transition-all duration-200 ease-out"
+        }
+      >
+        <ol className="flex flex-col gap-1.5">
+          {todos.map((todo, index) => (
+            <li
+              key={`${index}:${todo.content}`}
+              className="flex min-w-0 items-start gap-2 text-sm"
+            >
+              <TodoStatusIcon status={todo.status} />
+              <span
+                className={
+                  todo.status === "completed"
+                    ? "min-w-0 flex-1 text-muted-foreground line-through"
+                    : todo.status === "in_progress"
+                      ? "min-w-0 flex-1 text-foreground"
+                      : "min-w-0 flex-1 text-muted-foreground"
+                }
+              >
+                {todo.content}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  );
+}
+
+function TodoStatusIcon({ status }: { status: ChatTodo["status"] }) {
+  if (status === "completed") {
+    return <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" />;
+  }
+  if (status === "in_progress") {
+    return <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />;
+  }
+  return <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/70" />;
 }
 
 function extractFileIdsFromMessage(message: ChatUiMessage | undefined): string[] {

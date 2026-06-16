@@ -38,6 +38,7 @@ AgentEventName = Literal[
     "message.delta",
     "tool.delta",
     "clarification.requested",
+    "todo.updated",
     "state.snapshot",
     "run.finished",
 ]
@@ -135,9 +136,10 @@ async def iter_projection_agent_events(
     done_sentinel = object()
     latest_snapshot: AgentEvent | None = None
     latest_clarification: AgentEvent | None = None
+    latest_todos_signature: str | None = None
 
     async def pump_projection(projection: str, channel: Any) -> None:
-        nonlocal latest_clarification, latest_snapshot
+        nonlocal latest_clarification, latest_snapshot, latest_todos_signature
         try:
             async for item in channel:
                 if projection == "values":
@@ -147,6 +149,16 @@ async def iter_projection_agent_events(
                         bundle=bundle,
                     )
                     if latest_snapshot is not None:
+                        todo_event = todo_event_from_snapshot(latest_snapshot.data)
+                        if todo_event is not None:
+                            signature = json.dumps(
+                                todo_event.data.get("todos", []),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                            if signature != latest_todos_signature:
+                                latest_todos_signature = signature
+                                await queue.put(todo_event)
                         latest_clarification = clarification_event_from_snapshot(
                             latest_snapshot.data
                         )
@@ -175,6 +187,9 @@ async def iter_projection_agent_events(
                 continue
             if isinstance(item, BaseException):
                 raise item
+            if isinstance(item, AgentEvent):
+                yield item
+                continue
             if not isinstance(item, ProjectionEnvelope):
                 continue
 
@@ -440,6 +455,44 @@ def clarification_event_from_snapshot(snapshot: dict[str, Any]) -> AgentEvent | 
         payload.setdefault("run_id", snapshot.get("run_id"))
         return AgentEvent(event="clarification.requested", data=payload)
     return None
+
+
+def todo_event_from_snapshot(snapshot: dict[str, Any]) -> AgentEvent | None:
+    """Extract the current todo list from a values snapshot."""
+
+    state = snapshot.get("state")
+    if not isinstance(state, dict) or "todos" not in state:
+        return None
+
+    todos = normalize_todos(state.get("todos"))
+    return AgentEvent(
+        event="todo.updated",
+        data={
+            "thread_id": snapshot.get("thread_id"),
+            "run_id": snapshot.get("run_id"),
+            "todos": todos,
+        },
+    )
+
+
+def normalize_todos(value: Any) -> list[dict[str, str]]:
+    """Normalize LangChain todo state to the public SlotFlow shape."""
+
+    if not isinstance(value, list):
+        return []
+
+    todos: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        status = item.get("status")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if status not in ("pending", "in_progress", "completed"):
+            status = "pending"
+        todos.append({"content": content, "status": status})
+    return todos
 
 
 def parse_clarification_payload(content: Any) -> dict[str, Any] | None:
