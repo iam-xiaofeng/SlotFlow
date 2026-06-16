@@ -67,6 +67,24 @@ def test_create_thread_strips_title_and_lists_recent_first(repo: ChatRepository)
     assert [thread.id for thread in threads] == [first.id, second.id]
 
 
+def test_update_thread_title_and_search_messages(repo: ChatRepository) -> None:
+    thread = repo.create_thread(title="临时标题")
+    repo.add_message(thread.id, role="user", content="请解释 LangChain middleware")
+    assistant = repo.add_message(thread.id, role="assistant", content="middleware 可以在模型调用前后改写状态")
+
+    updated = repo.update_thread_title(thread.id, "LangChain 中间件")
+    title_results = repo.search_threads("中间件")
+    message_results = repo.search_threads("改写状态")
+
+    assert updated.title == "LangChain 中间件"
+    assert title_results[0].thread.id == thread.id
+    assert title_results[0].match_type == "title"
+    assert message_results[0].thread.id == thread.id
+    assert message_results[0].message is not None
+    assert message_results[0].message.id == assistant.id
+    assert "改写状态" in message_results[0].snippet
+
+
 def test_add_and_list_messages_keep_write_order(repo: ChatRepository) -> None:
     """消息按写入顺序保存，这是聊天记录能正确展示的基础。"""
 

@@ -72,6 +72,16 @@ class MessageRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ThreadSearchResultRecord(BaseModel):
+    """A thread search hit from either the title or a stored message."""
+
+    thread: ThreadRecord
+    message: MessageRecord | None = None
+    match_type: Literal["title", "message"]
+    snippet: str
+    score: int = 0
+
+
 class ChatStreamRequest(BaseModel):
     """启动一次 assistant 流式运行时的请求体。
 

@@ -21,7 +21,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Literal, Protocol
+from typing import Callable, Iterable, Literal, Protocol
 
 from app.chat.ids import new_message_id, new_run_id, new_thread_id
 from app.chat.models import (
@@ -30,6 +30,7 @@ from app.chat.models import (
     MessageRole,
     RunRecord,
     RunStatus,
+    ThreadSearchResultRecord,
     ThreadRecord,
     utc_now,
 )
@@ -82,6 +83,10 @@ class ChatRepository(Protocol):
 
     def delete_thread(self, thread_id: str) -> None: ...
 
+    def update_thread_title(self, thread_id: str, title: str) -> ThreadRecord: ...
+
+    def search_threads(self, query: str, *, limit: int = 20) -> list[ThreadSearchResultRecord]: ...
+
     def add_message(
         self,
         thread_id: str,
@@ -126,7 +131,21 @@ class ChatRepository(Protocol):
     ) -> RunRecord: ...
 
 
-class InMemoryChatRepository:
+class ChatRecordCopyMixin:
+    @staticmethod
+    def _copy_thread(thread: ThreadRecord) -> ThreadRecord:
+        return thread.model_copy(deep=True)
+
+    @staticmethod
+    def _copy_message(message: MessageRecord) -> MessageRecord:
+        return message.model_copy(deep=True)
+
+    @staticmethod
+    def _copy_run(run: RunRecord) -> RunRecord:
+        return run.model_copy(deep=True)
+
+
+class InMemoryChatRepository(ChatRecordCopyMixin):
     """用内存字典保存 thread / message / run 的仓库。
 
     这个类故意保持同步接口。FastAPI 的路由可以在 async 函数里直接调用它，
@@ -190,6 +209,33 @@ class InMemoryChatRepository:
             self._run_ids_by_thread.pop(thread_id, None)
             self._messages_by_thread.pop(thread_id, None)
             self._threads.pop(thread_id, None)
+
+    def update_thread_title(self, thread_id: str, title: str) -> ThreadRecord:
+        """Update the display title for an existing thread."""
+
+        clean_title = title.strip()
+        if not clean_title:
+            return self.get_thread(thread_id)
+
+        with self._lock:
+            thread = self._require_thread(thread_id)
+            thread.title = clean_title
+            self._touch_thread(thread_id)
+            return self._copy_thread(thread)
+
+    def search_threads(self, query: str, *, limit: int = 20) -> list[ThreadSearchResultRecord]:
+        """Search thread titles and stored message content."""
+
+        with self._lock:
+            return search_thread_records(
+                query=query,
+                threads=[self._copy_thread(thread) for thread in self._threads.values()],
+                messages_for_thread=lambda thread: [
+                    self._copy_message(message)
+                    for message in self._messages_by_thread.get(thread.id, [])
+                ],
+                limit=limit,
+            )
 
     def add_message(
         self,
@@ -347,26 +393,7 @@ class InMemoryChatRepository:
 
         self._threads[thread_id].updated_at = utc_now()
 
-    @staticmethod
-    def _copy_thread(thread: ThreadRecord) -> ThreadRecord:
-        """返回 thread 副本，避免调用方改到仓库内部对象。"""
-
-        return thread.model_copy(deep=True)
-
-    @staticmethod
-    def _copy_message(message: MessageRecord) -> MessageRecord:
-        """返回 message 副本，避免 metadata 被外部共享修改。"""
-
-        return message.model_copy(deep=True)
-
-    @staticmethod
-    def _copy_run(run: RunRecord) -> RunRecord:
-        """返回 run 副本，避免调用方绕过仓库修改状态。"""
-
-        return run.model_copy(deep=True)
-
-
-class SQLiteChatRepository:
+class SQLiteChatRepository(ChatRecordCopyMixin):
     """用 SQLite 保存 thread / message / run 的仓库。
 
     它实现和 `InMemoryChatRepository` 相同的同步接口。SQLite 操作会碰磁盘，但当前
@@ -387,15 +414,10 @@ class SQLiteChatRepository:
             timeout=30.0,
         )
         self._connection.row_factory = sqlite3.Row
-        #改变数据库查询结果的返回格式，将默认的“元组（Tuple）”格式升级为类字典的“Row 对象”
-        #从而允许你通过“列名（字段名）”来直接访问数据。
         self._connection.execute("PRAGMA foreign_keys = ON")
-        #显式开启“外键约束”功能 防止数据不一致
         if self._database_path_text != ":memory:":
             self._connection.execute("PRAGMA journal_mode = WAL")
-            # 使用 WAL（Write-Ahead Logging）模式，提高并发性能
         self._initialize_schema()
-        # 初始化数据库模式
 
     def close(self) -> None:
         """关闭 SQLite 连接。测试或脚本显式释放文件句柄时可以调用。"""
@@ -451,6 +473,37 @@ class SQLiteChatRepository:
             self._connection.execute(
                 "DELETE FROM threads WHERE id = ?",
                 (thread_id,),
+            )
+
+    def update_thread_title(self, thread_id: str, title: str) -> ThreadRecord:
+        """Update the display title for an existing thread."""
+
+        clean_title = title.strip()
+        if not clean_title:
+            return self.get_thread(thread_id)
+
+        with self._lock, self._connection:
+            self._fetch_thread_row(thread_id)
+            updated_at = utc_now()
+            self._connection.execute(
+                """
+                UPDATE threads
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (clean_title, self._datetime_to_text(updated_at), thread_id),
+            )
+            return self._row_to_thread(self._fetch_thread_row(thread_id))
+
+    def search_threads(self, query: str, *, limit: int = 20) -> list[ThreadSearchResultRecord]:
+        """Search thread titles and stored message content."""
+
+        with self._lock:
+            return search_thread_records(
+                query=query,
+                threads=self.list_threads(),
+                messages_for_thread=lambda thread: self.list_messages(thread.id),
+                limit=limit,
             )
 
     def add_message(
@@ -638,7 +691,7 @@ class SQLiteChatRepository:
             return self._row_to_run(self._fetch_run_row(run_id))
 
     def _initialize_schema(self) -> None:
-        """创建模块 18 需要的最小 SQLite 表结构。"""
+        """创建 chat 仓库需要的 SQLite 表结构。"""
 
         with self._lock, self._connection:
             self._connection.executescript(
@@ -782,19 +835,6 @@ class SQLiteChatRepository:
     def _datetime_to_text(value) -> str:
         return value.isoformat()
 
-    @staticmethod
-    def _copy_thread(thread: ThreadRecord) -> ThreadRecord:
-        return thread.model_copy(deep=True)
-
-    @staticmethod
-    def _copy_message(message: MessageRecord) -> MessageRecord:
-        return message.model_copy(deep=True)
-
-    @staticmethod
-    def _copy_run(run: RunRecord) -> RunRecord:
-        return run.model_copy(deep=True)
-
-
 def load_chat_repository_config_from_env() -> ChatRepositoryConfig:
     """从环境变量读取 chat 仓库配置。"""
 
@@ -825,3 +865,69 @@ def build_chat_repository(config: ChatRepositoryConfig | None = None) -> ChatRep
     if resolved.backend == "sqlite":
         return SQLiteChatRepository(resolved.sqlite_path)
     raise ValueError(f"unsupported chat repository backend: {resolved.backend!r}")
+
+
+def normalize_search_query(query: str) -> str:
+    return " ".join(query.casefold().split())
+
+
+def search_thread_records(
+    *,
+    query: str,
+    threads: Iterable[ThreadRecord],
+    messages_for_thread: Callable[[ThreadRecord], Iterable[MessageRecord]],
+    limit: int,
+) -> list[ThreadSearchResultRecord]:
+    normalized_query = normalize_search_query(query)
+    if not normalized_query:
+        return []
+
+    results: list[ThreadSearchResultRecord] = []
+    for thread in threads:
+        if search_text_matches(thread.title, normalized_query):
+            results.append(
+                ThreadSearchResultRecord(
+                    thread=thread,
+                    match_type="title",
+                    snippet=build_search_snippet(thread.title, normalized_query),
+                    score=100,
+                )
+            )
+        for message in messages_for_thread(thread):
+            if search_text_matches(message.content, normalized_query):
+                results.append(
+                    ThreadSearchResultRecord(
+                        thread=thread,
+                        message=message,
+                        match_type="message",
+                        snippet=build_search_snippet(message.content, normalized_query),
+                        score=80 if message.role == "user" else 60,
+                    )
+                )
+
+    results.sort(
+        key=lambda result: (
+            result.score,
+            result.message.created_at if result.message else result.thread.updated_at,
+        ),
+        reverse=True,
+    )
+    return results[: max(1, limit)]
+
+
+def search_text_matches(text: str, normalized_query: str) -> bool:
+    return normalized_query in " ".join(text.casefold().split())
+
+
+def build_search_snippet(text: str, normalized_query: str, *, radius: int = 56) -> str:
+    compact = " ".join(text.split())
+    folded = compact.casefold()
+    index = folded.find(normalized_query)
+    if index < 0:
+        return compact[: radius * 2].strip()
+
+    start = max(0, index - radius)
+    end = min(len(compact), index + len(normalized_query) + radius)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(compact) else ""
+    return f"{prefix}{compact[start:end].strip()}{suffix}"

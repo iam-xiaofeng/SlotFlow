@@ -282,6 +282,23 @@ def test_thread_routes_create_list_get_and_list_messages() -> None:
     assert client.get(f"/api/chat/threads/{thread['id']}").status_code == 404
 
 
+def test_search_threads_matches_stored_messages() -> None:
+    repo = InMemoryChatRepository()
+    client = _client(repo)
+    thread = client.post("/api/chat/threads", json={"title": "普通标题"}).json()
+    repo.add_message(thread["id"], role="user", content="LangChain middleware 怎么配置")
+    repo.add_message(thread["id"], role="assistant", content="可以在模型调用前后处理消息")
+
+    response = client.get("/api/chat/search", params={"q": "模型调用前后"})
+
+    assert response.status_code == 200
+    results = response.json()
+    assert results[0]["thread"]["id"] == thread["id"]
+    assert results[0]["match_type"] == "message"
+    assert results[0]["message"]["role"] == "assistant"
+    assert "模型调用前后" in results[0]["snippet"]
+
+
 def test_missing_thread_routes_return_404() -> None:
     """不存在的 thread 要返回 404，而不是在仓库里悄悄创建。"""
 
@@ -352,6 +369,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
     assert runs[0].status == "completed"
     assert runs[0].model_name == "deepseek-v4-pro"
     assert runs[0].mode == "pro"
+    assert repo.get_thread(thread["id"]).title == "解释完整链路"
 
 
 def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:

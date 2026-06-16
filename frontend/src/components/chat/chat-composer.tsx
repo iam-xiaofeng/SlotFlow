@@ -10,17 +10,26 @@ import {
   useState,
 } from "react";
 import {
+  type LucideIcon,
   ArrowUp,
   Brain,
+  Check,
+  CheckCircle2,
+  ChevronRight,
+  ChevronDown,
+  Circle,
   FileText,
   Folder,
   Globe2,
   ImageIcon,
+  ListTodo,
   LoaderCircle,
   Mic,
   MoreHorizontal,
   Paperclip,
+  Pencil,
   Plus,
+  GraduationCap,
   Square,
   Telescope,
   X,
@@ -38,14 +47,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   type ChatMode,
@@ -53,11 +54,13 @@ import {
   type UploadedFileRecord,
   resolveUploadRawUrl,
 } from "@/lib/chat-stream";
+import { cn } from "@/lib/utils";
 
 import { displayFileName, formatFileSize, isImageFile } from "./chat-format";
 
 type ChatComposerProps = {
   attachments: UploadedFileRecord[];
+  todos: ComposerTodo[];
   error: string | null;
   fileInputRef: RefObject<HTMLInputElement | null>;
   isStreaming: boolean;
@@ -67,6 +70,7 @@ type ChatComposerProps = {
   queuedMessages: ComposerQueuedMessage[];
   selectedMode: ChatMode;
   selectedModelName: string;
+  showPromptChips: boolean;
   onAttachFiles: () => void;
   onCancel: () => void;
   onClearError: () => void;
@@ -86,8 +90,29 @@ export type ComposerQueuedMessage = {
   position: number;
 };
 
+export type ComposerTodo = {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+};
+
+const MODE_OPTIONS: Record<ChatMode, { label: string; description: string }> = {
+  flash: {
+    label: "Flash",
+    description: "快速响应，适合简单问答。",
+  },
+  pro: {
+    label: "Pro",
+    description: "默认模式，兼顾速度与质量。",
+  },
+  ultra: {
+    label: "Ultra",
+    description: "更强推理，适合复杂任务。",
+  },
+};
+
 export function ChatComposer({
   attachments,
+  todos,
   error,
   fileInputRef,
   isStreaming,
@@ -97,6 +122,7 @@ export function ChatComposer({
   queuedMessages,
   selectedMode,
   selectedModelName,
+  showPromptChips,
   onAttachFiles,
   onCancel,
   onClearError,
@@ -166,7 +192,7 @@ export function ChatComposer({
       }}
       className="w-full"
     >
-      <div className="mx-auto w-full max-w-3xl">
+      <div className="mx-auto w-full max-w-[52rem]">
         {error ? (
           <ComposerError message={error} onDismiss={onClearError} />
         ) : null}
@@ -193,19 +219,21 @@ export function ChatComposer({
           onChange={(event) => void onFileChange(event)}
         />
 
-        <div
-          className="rounded-3xl border border-input bg-background px-4 py-3 shadow-sm"
-        >
-          <ComposerTextarea
-            input={input}
-            textareaRef={textareaRef}
-            onCompositionEnd={handleCompositionEnd}
-            onCompositionStart={handleCompositionStart}
-            onInputChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-            onPasteFiles={onPasteFiles}
-          />
-          <div className="mt-3 flex items-center justify-between gap-2">
+        <ComposerTodoPanel todos={todos} />
+
+        <div className="relative z-10 overflow-hidden rounded-[1.7rem] border border-border/80 bg-background shadow-[0_18px_50px_-34px_rgba(15,23,42,0.55),0_1px_2px_rgba(15,23,42,0.04)] transition-shadow focus-within:border-foreground/15 focus-within:shadow-[0_24px_70px_-38px_rgba(15,23,42,0.62),0_1px_2px_rgba(15,23,42,0.05)]">
+          <div className="px-5 pb-2 pt-4 sm:px-6">
+            <ComposerTextarea
+              input={input}
+              textareaRef={textareaRef}
+              onCompositionEnd={handleCompositionEnd}
+              onCompositionStart={handleCompositionStart}
+              onInputChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              onPasteFiles={onPasteFiles}
+            />
+          </div>
+          <div className="flex min-h-12 items-center justify-between gap-3 px-4 pb-3 sm:px-5">
             <ComposerTools
               disabled={isUploading}
               isUploading={isUploading}
@@ -225,9 +253,94 @@ export function ChatComposer({
             />
           </div>
         </div>
+        {showPromptChips ? (
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 group-data-[collapsible=icon]:hidden">
+            <ComposerPromptChip icon={Pencil} label="Write" />
+            <ComposerPromptChip icon={GraduationCap} label="Learn" />
+            <ComposerPromptChip icon={Telescope} label="Research" />
+          </div>
+        ) : null}
       </div>
     </form>
   );
+}
+
+function ComposerTodoPanel({ todos }: { todos: ComposerTodo[] }) {
+  const [isCollapsed, setIsCollapsed] = useState(true);
+
+  if (todos.length === 0) {
+    return null;
+  }
+
+  const completedCount = todos.filter((todo) => todo.status === "completed").length;
+
+  return (
+    <div className="relative z-0 mx-3 -mb-px overflow-hidden rounded-t-2xl border border-b-0 border-border/80 bg-muted/35 shadow-sm backdrop-blur-sm transition-all duration-200 ease-out">
+      <button
+        type="button"
+        aria-expanded={!isCollapsed}
+        className="flex min-h-9 w-full items-center justify-between gap-3 px-4 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-muted/50 sm:px-5"
+        onClick={() => setIsCollapsed((current) => !current)}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <ListTodo className="size-4 shrink-0" />
+          <span className="truncate">To-dos</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-2 text-xs">
+          <span>
+            {completedCount}/{todos.length}
+          </span>
+          <ChevronDown
+            className={cn(
+              "size-4 transition-transform",
+              !isCollapsed && "rotate-180",
+            )}
+          />
+        </span>
+      </button>
+      <div
+        className={cn(
+          "overflow-hidden bg-background/90 transition-[max-height,padding] duration-200 ease-out",
+          isCollapsed
+            ? "max-h-0 px-4 py-0 sm:px-5"
+            : "max-h-32 overflow-y-auto px-4 pb-3 pt-2 sm:px-5",
+        )}
+      >
+        <ol className="flex flex-col gap-1.5">
+          {todos.map((todo, index) => (
+            <li
+              key={`${index}:${todo.content}`}
+              className="flex min-w-0 items-start gap-2 text-sm leading-5"
+            >
+              <TodoStatusIcon status={todo.status} />
+              <span
+                className={cn(
+                  "min-w-0 flex-1",
+                  todo.status === "completed"
+                    ? "text-muted-foreground line-through"
+                    : todo.status === "in_progress"
+                      ? "text-foreground"
+                      : "text-muted-foreground",
+                )}
+              >
+                {todo.content}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  );
+}
+
+function TodoStatusIcon({ status }: { status: ComposerTodo["status"] }) {
+  if (status === "completed") {
+    return <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" />;
+  }
+  if (status === "in_progress") {
+    return <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />;
+  }
+  return <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/70" />;
 }
 
 function ComposerQueue({
@@ -379,7 +492,7 @@ function ComposerTextarea({
       onKeyDown={onKeyDown}
       onPaste={handlePaste}
       wrap="soft"
-      className="block max-h-[min(40dvh,12rem)] min-h-8 w-full min-w-0 resize-none overflow-hidden border-0 bg-transparent px-0 py-0 text-lg leading-7 shadow-none [field-sizing:fixed] [overflow-wrap:anywhere] focus-visible:ring-0"
+      className="block max-h-[min(40dvh,12rem)] min-h-8 w-full min-w-0 resize-none overflow-hidden border-0 bg-transparent px-0 py-0 !text-lg !leading-7 shadow-none placeholder:text-muted-foreground/75 [field-sizing:fixed] [overflow-wrap:anywhere] focus-visible:ring-0"
     />
   );
 }
@@ -390,7 +503,7 @@ function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
   }
 
   const maxHeight = Math.min(window.innerHeight * 0.4, 192);
-  element.style.height = "0px";
+  element.style.height = "auto";
   const nextHeight = Math.min(element.scrollHeight, maxHeight);
   element.style.height = `${Math.max(nextHeight, 32)}px`;
   element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
@@ -424,6 +537,24 @@ function defaultAttachmentMessage(files: UploadedFileRecord[]) {
   return "请查看这些附件。";
 }
 
+function ComposerPromptChip({
+  icon: Icon,
+  label,
+}: {
+  icon: LucideIcon;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="inline-flex h-10 items-center gap-2 rounded-xl border border-border/80 bg-background px-3 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted/60"
+    >
+      <Icon className="size-4 text-muted-foreground" />
+      {label}
+    </button>
+  );
+}
+
 type ComposerToolsProps = {
   disabled: boolean;
   isUploading: boolean;
@@ -445,14 +576,14 @@ function ComposerTools({
               variant="ghost"
               size="icon"
               disabled={disabled}
-              className="size-10 rounded-full"
+              className="size-10 rounded-full text-foreground hover:bg-muted"
             />
           }
         >
           {isUploading ? (
-            <LoaderCircle className="size-6 animate-spin" />
+            <LoaderCircle className="size-5 animate-spin" />
           ) : (
-            <Plus className="size-6" />
+            <Plus className="size-5" />
           )}
           <span className="sr-only">打开添加菜单</span>
         </DropdownMenuTrigger>
@@ -533,16 +664,14 @@ function ComposerActions({
   onSend,
 }: ComposerActionsProps) {
   return (
-    <div className="flex min-w-0 shrink-0 items-center gap-1">
-      <ComposerModeSelect
-        value={selectedMode}
-        disabled={isStreaming}
-        onChange={onModeChange}
-      />
+    <div className="flex min-w-0 shrink-0 items-center gap-1.5">
       <ComposerModelSelect
         value={selectedModelName}
         options={modelOptions}
-        disabled={isLoadingModels || isStreaming}
+        disabled={isStreaming}
+        isLoading={isLoadingModels}
+        mode={selectedMode}
+        onModeChange={onModeChange}
         onChange={onModelChange}
       />
       <Button
@@ -550,9 +679,9 @@ function ComposerActions({
         variant="ghost"
         size="icon"
         title="语音输入"
-        className="size-10 rounded-full"
+        className="size-9 rounded-full text-foreground hover:bg-muted"
       >
-        <Mic className="size-6" />
+        <Mic className="size-5" />
         <span className="sr-only">语音输入</span>
       </Button>
 
@@ -565,9 +694,9 @@ function ComposerActions({
               title="加入队列"
               disabled={!canSend}
               onClick={onSend}
-              className="size-11 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:bg-muted disabled:text-muted-foreground"
+              className="size-10 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:bg-muted disabled:text-muted-foreground"
             >
-              <ArrowUp className="size-6" />
+              <ArrowUp className="size-5" />
               <span className="sr-only">加入队列</span>
             </Button>
           ) : null}
@@ -577,7 +706,7 @@ function ComposerActions({
             size="icon"
             title="停止"
             onClick={onCancel}
-            className="size-11 rounded-full bg-muted text-foreground hover:bg-muted/80"
+            className="size-10 rounded-full bg-muted text-foreground hover:bg-muted/80"
           >
             <Square className="size-4 fill-current" />
             <span className="sr-only">停止</span>
@@ -590,9 +719,9 @@ function ComposerActions({
           title="发送"
           disabled={!canSend}
           onClick={onSend}
-          className="size-11 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:bg-muted disabled:text-muted-foreground"
+          className="size-10 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:bg-muted disabled:text-muted-foreground"
         >
-          <ArrowUp className="size-6" />
+          <ArrowUp className="size-5" />
           <span className="sr-only">发送</span>
         </Button>
       )}
@@ -600,74 +729,151 @@ function ComposerActions({
   );
 }
 
-function ComposerModeSelect({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: ChatMode;
-  disabled: boolean;
-  onChange: (mode: ChatMode) => void;
-}) {
-  return (
-    <Select
-      value={value}
-      onValueChange={(nextValue) => onChange(nextValue as ChatMode)}
-      disabled={disabled}
-    >
-      <SelectTrigger size="sm" className="w-[74px] rounded-full border-transparent bg-muted/70">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent side="top" align="end" className="min-w-28">
-        <SelectGroup>
-          {(["flash", "pro", "ultra"] as ChatMode[]).map((mode) => (
-            <SelectItem key={mode} value={mode}>
-              {mode}
-            </SelectItem>
-          ))}
-        </SelectGroup>
-      </SelectContent>
-    </Select>
-  );
-}
-
 function ComposerModelSelect({
   value,
   options,
   disabled,
+  isLoading,
+  mode,
   onChange,
+  onModeChange,
 }: {
   value: string;
   options: ModelOptionRecord[];
   disabled: boolean;
+  isLoading: boolean;
+  mode: ChatMode;
   onChange: (modelName: string) => void;
+  onModeChange: (mode: ChatMode) => void;
 }) {
   const hasOptions = options.length > 0;
+  const activeModel = options.find((model) => model.id === value);
   return (
-    <Select
-      value={hasOptions ? value : ""}
-      onValueChange={(nextValue) => {
-        if (nextValue) {
-          onChange(nextValue);
-        }
-      }}
-      disabled={disabled || !hasOptions}
-    >
-      <SelectTrigger
-        size="sm"
-        className="max-w-[13rem] rounded-full border-transparent bg-muted/70 sm:w-[12rem]"
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        type="button"
+        disabled={disabled || !hasOptions}
+        className="inline-flex h-10 min-w-0 max-w-[13.5rem] items-center justify-center gap-1.5 rounded-xl bg-muted px-3 text-sm font-medium outline-none transition-colors hover:bg-muted/80 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 aria-expanded:bg-muted/80 sm:max-w-[16rem]"
       >
-        <SelectValue>{hasOptions ? value : "models"}</SelectValue>
-      </SelectTrigger>
-      <SelectContent side="top" align="end" className="min-w-64">
-        <SelectGroup>
+        <span className="min-w-0 truncate">
+          {shortModelName(activeModel?.id ?? value)}
+        </span>
+        <span className="text-muted-foreground">Mode: {MODE_OPTIONS[mode].label}</span>
+        <ChevronDownIcon />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        side="top"
+        align="end"
+        sideOffset={8}
+        className="w-[25rem] rounded-2xl p-2 shadow-xl"
+      >
+        <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
           {options.map((model) => (
-            <SelectItem key={`${model.provider}:${model.id}`} value={model.id}>
-              <span className="truncate">{model.label}</span>
-            </SelectItem>
+            <DropdownMenuItem
+              key={`${model.provider}:${model.id}`}
+              className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl px-3 py-2"
+              onClick={() => onChange(model.id)}
+            >
+              <span className="min-w-0">
+                <span className="block truncate font-medium">{shortModelName(model.id)}</span>
+                <span className="block truncate text-sm text-muted-foreground">
+                  {modelDescription(model)}
+                </span>
+              </span>
+              {model.id === value ? <Check className="size-4 text-blue-600" /> : null}
+            </DropdownMenuItem>
           ))}
-        </SelectGroup>
-      </SelectContent>
-    </Select>
+        </div>
+        {isLoading ? (
+          <p className="px-3 pb-1 pt-2 text-xs text-muted-foreground">正在刷新模型列表</p>
+        ) : null}
+        <DropdownMenuSeparator />
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger className="min-h-11 rounded-xl px-3">
+            <span className="flex-1">Effort</span>
+            <span className="text-muted-foreground">{MODE_OPTIONS[mode].label}</span>
+            <ChevronRight className="size-4 text-muted-foreground" />
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent
+            sideOffset={10}
+            className="w-[25rem] rounded-2xl p-3 shadow-xl"
+          >
+            <p className="mb-3 px-1 text-sm leading-5 text-muted-foreground">
+              选择本轮任务的执行模式，会作为 mode 传给后端。
+            </p>
+            {(["flash", "pro", "ultra"] as ChatMode[]).map((nextMode) => (
+              <DropdownMenuItem
+                key={nextMode}
+                title={MODE_OPTIONS[nextMode].description}
+                className="grid min-h-[4.25rem] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl px-3 py-2"
+                onClick={() => onModeChange(nextMode)}
+              >
+                <span className="min-w-0">
+                  <span className="flex items-center gap-2 font-medium">
+                    {MODE_OPTIONS[nextMode].label}
+                    {nextMode === "pro" ? (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                        Default
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="mt-0.5 block truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
+                    {MODE_OPTIONS[nextMode].description}
+                  </span>
+                </span>
+                {nextMode === mode ? <Check className="size-4 text-blue-600" /> : null}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            <div className="flex items-center justify-between gap-4 px-3 py-2">
+              <span>
+                <span className="block text-sm font-medium">Thinking</span>
+                <span className="block text-sm text-muted-foreground">
+                  Can think for more complex tasks
+                </span>
+              </span>
+              <span
+                className={
+                  mode === "flash"
+                    ? "relative h-6 w-11 rounded-full bg-muted"
+                    : "relative h-6 w-11 rounded-full bg-blue-600"
+                }
+              >
+                <span
+                  className={
+                    mode === "flash"
+                      ? "absolute left-1 top-1 size-4 rounded-full bg-background shadow-sm"
+                      : "absolute right-1 top-1 size-4 rounded-full bg-white shadow-sm"
+                  }
+                />
+              </span>
+            </div>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
+}
+
+function ChevronDownIcon() {
+  return <ChevronRight className="size-4 rotate-90 text-muted-foreground" />;
+}
+
+function shortModelName(modelName: string) {
+  return modelName
+    .replace(/^deepseek[-_]/i, "")
+    .replace(/^claude[-_]/i, "")
+    .replace(/^gpt[-_]/i, "GPT ")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function modelDescription(model: ModelOptionRecord) {
+  if (model.provider === "deepseek") {
+    return model.id.includes("flash") ? "Fastest for quick answers" : "Efficient for everyday tasks";
+  }
+  if (model.provider === "anthropic") {
+    return "For careful writing and reasoning";
+  }
+  return "General-purpose reasoning model";
 }

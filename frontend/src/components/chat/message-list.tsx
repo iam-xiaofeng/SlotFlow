@@ -7,10 +7,10 @@ import {
   useState,
 } from "react";
 import {
-  Brain,
   ChevronDown,
   Copy,
   FileText,
+  Lightbulb,
   List,
   Pencil,
   RotateCcw,
@@ -363,11 +363,14 @@ function MessageBubble({
                 }
               />
             ) : isAssistantThinking ? (
-              <ThinkingIndicator />
+              <AssistantThinkingSummary content="" isStreaming />
             ) : (
               <>
                 {assistantContent.thought ? (
-                  <AssistantThinkingSummary content={assistantContent.thought} />
+                  <AssistantThinkingSummary
+                    content={assistantContent.thought}
+                    isStreaming={message.status === "streaming"}
+                  />
                 ) : null}
                 {assistantContent.body.trim() ? (
                   <MarkdownContent content={assistantContent.body} />
@@ -881,49 +884,113 @@ function splitAssistantContent(
   }
 
   const lines = normalized.split(/\r?\n/);
-  const thoughtStart = lines.findIndex((line) =>
-    /^(?:#{1,6}\s*)?(?:Durable Context Summary|思考过程|流程回放|过程回放)\s*$/iu.test(
-      line.trim(),
-    ),
-  );
+  const thoughtStart = lines.findIndex((line) => isThoughtHeading(line));
   if (thoughtStart < 0) {
     return { thought: "", body: content };
   }
 
+  const bodyBeforeThought = lines.slice(0, thoughtStart).join("\n").trim();
   const bodyStart = lines.findIndex((line, index) => {
     if (index <= thoughtStart + 2) {
       return false;
     }
     const trimmed = line.trim();
-    return /^#{1,3}\s*(?:20\d{2}|[一二三四五六七八九十]+、|报告|.*报告)/u.test(
-      trimmed,
+    return (
+      /^#{1,3}\s*(?:20\d{2}|[一二三四五六七八九十]+、|报告|.*报告|结果|结论|总结|最终答复|最终回答|产物)/u.test(
+        trimmed,
+      ) || /^(?:最终答复|最终回答|结果|结论|总结|产物)[:：]/u.test(trimmed)
     );
   });
 
   if (bodyStart > thoughtStart) {
+    const bodyAfterThought = lines.slice(bodyStart).join("\n").trim();
     return {
       thought: lines.slice(thoughtStart, bodyStart).join("\n").trim(),
-      body: lines.slice(bodyStart).join("\n").trim(),
+      body: [bodyBeforeThought, bodyAfterThought].filter(Boolean).join("\n\n"),
     };
   }
 
-  return { thought: normalized, body: "" };
+  return {
+    thought: lines.slice(thoughtStart).join("\n").trim(),
+    body: bodyBeforeThought,
+  };
 }
 
-function AssistantThinkingSummary({ content }: { content: string }) {
+function isThoughtHeading(line: string) {
+  const normalized = line
+    .trim()
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^[^\w\u4e00-\u9fff]{0,8}\s*/, "")
+    .trim();
+  return /^(?:Durable Context Summary|思考过程|(?:我的)?(?:实际)?推理过程(?:（[^）]+）)?|流程回放|过程回放|隐藏步骤|Thinking|Reasoning)\s*[:：]?\s*$/iu.test(
+    normalized,
+  );
+}
+
+function AssistantThinkingSummary({
+  content,
+  isStreaming = false,
+}: {
+  content: string;
+  isStreaming?: boolean;
+}) {
+  const displayContent = stripThoughtHeading(content);
+  const hasContent = Boolean(displayContent.trim());
+
   return (
-    <details className="group/thinking mb-4 overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground shadow-sm" open>
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-medium text-foreground [&::-webkit-details-marker]:hidden">
-        <span className="grid size-5 place-items-center rounded-full bg-primary/10 text-primary">
-          <Brain className="size-3.5" />
+    <details
+      className="group/thinking mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground shadow-sm"
+      open
+    >
+      <summary className="flex h-9 cursor-pointer list-none items-center gap-2 bg-muted/30 px-3 font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+        <span className="grid size-5 place-items-center text-muted-foreground">
+          <Lightbulb className="size-4" />
         </span>
-        <span>已思考</span>
-        <ChevronDown className="ml-1 size-4 transition-transform group-open/thinking:rotate-180" />
+        <span>{isStreaming && !hasContent ? "思考中" : "思考过程"}</span>
+        <ChevronDown className="ml-auto size-4 transition-transform group-open/thinking:rotate-180" />
       </summary>
-      <div className="max-h-72 overflow-y-auto border-t border-border/70 px-3 py-2">
-        <MarkdownContent content={content} compact />
+      <div className="border-t border-border/60 px-4 pb-4 pt-3">
+        <div className="max-h-[26rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]">
+          <div className="border-l border-border/70 pl-4 leading-6">
+            {hasContent ? (
+              <MarkdownContent
+                className="text-muted-foreground"
+                content={displayContent}
+                compact
+              />
+            ) : (
+              <div className="flex h-8 items-center gap-2 text-muted-foreground">
+                <span>正在分析请求并组织步骤</span>
+                <ThinkingDots />
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </details>
+  );
+}
+
+function stripThoughtHeading(content: string): string {
+  return content
+    .replace(
+      /^(?:#{1,6}\s*)?(?:[^\w\u4e00-\u9fff]{0,8}\s*)?(?:Durable Context Summary|思考过程|(?:我的)?(?:实际)?推理过程(?:（[^）]+）)?|流程回放|过程回放|隐藏步骤|Thinking|Reasoning)\s*[:：]?\s*\n+/iu,
+      "",
+    )
+    .trim();
+}
+
+function ThinkingDots() {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {[0, 1, 2].map((index) => (
+        <span
+          key={index}
+          className="size-1.5 rounded-full bg-current opacity-60 animate-bounce"
+          style={{ animationDelay: `${index * 120}ms` }}
+        />
+      ))}
+    </span>
   );
 }
 

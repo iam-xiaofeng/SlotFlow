@@ -29,6 +29,7 @@ from app.chat.runtime import (
     create_async_checkpointer,
     create_checkpointer,
     load_runtime_config_from_env,
+    build_openai_compatible_model_kwargs,
 )
 from app.harness.mcp import MultiServerMcpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
@@ -145,6 +146,35 @@ def test_load_runtime_config_from_env_reads_mcp_config(
         servers=(SlotFlowMcpServerConfig(name="search"),),
     )
     assert config.mcp_tool_provider is None
+
+
+def test_deepseek_thinking_kwargs_follow_run_context() -> None:
+    pro_context = _bundle(
+        request=ChatStreamRequest(message="复杂分析", mode="pro")
+    ).context
+    flash_context = _bundle(
+        request=ChatStreamRequest(message="快速回答", mode="flash")
+    ).context
+
+    pro_kwargs = build_openai_compatible_model_kwargs(
+        model_name="deepseek-v4-pro",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        provider="deepseek",
+        run_context=pro_context,
+    )
+    flash_kwargs = build_openai_compatible_model_kwargs(
+        model_name="deepseek-v4-flash",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        provider="deepseek",
+        run_context=flash_context,
+    )
+
+    assert pro_kwargs["reasoning_effort"] == "high"
+    assert pro_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert "reasoning_effort" not in flash_kwargs
+    assert "extra_body" not in flash_kwargs
 
 
 def test_load_runtime_config_from_env_reads_real_mcp_json_config(

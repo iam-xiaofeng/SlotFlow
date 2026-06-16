@@ -27,10 +27,13 @@ import { PanelLeftIcon } from "lucide-react"
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
-const SIDEBAR_WIDTH = "16rem"
+const SIDEBAR_WIDTH = "24rem"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
-const SIDEBAR_WIDTH_ICON = "3.5rem"
+const SIDEBAR_WIDTH_ICON = "15.5rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+const SIDEBAR_WIDTH_STORAGE_KEY = "slotflow.sidebar.width.v2"
+const SIDEBAR_MIN_WIDTH = 280
+const SIDEBAR_MAX_WIDTH = 440
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
@@ -156,13 +159,74 @@ function Sidebar({
   className,
   children,
   dir,
+  resizable = false,
+  minWidth = SIDEBAR_MIN_WIDTH,
+  maxWidth = SIDEBAR_MAX_WIDTH,
+  storageKey = SIDEBAR_WIDTH_STORAGE_KEY,
+  style,
   ...props
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right"
   variant?: "sidebar" | "floating" | "inset"
   collapsible?: "offcanvas" | "icon" | "none"
+  resizable?: boolean
+  minWidth?: number
+  maxWidth?: number
+  storageKey?: string
 }) {
   const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
+  const [width, setWidth] = React.useState(SIDEBAR_WIDTH)
+
+  React.useEffect(() => {
+    if (!resizable) {
+      return
+    }
+    const savedWidth = window.localStorage.getItem(storageKey)
+    const parsedWidth = savedWidth ? Number.parseInt(savedWidth, 10) : Number.NaN
+    if (Number.isFinite(parsedWidth)) {
+      setWidth(`${clamp(parsedWidth, minWidth, maxWidth)}px`)
+    }
+  }, [maxWidth, minWidth, resizable, storageKey])
+
+  React.useEffect(() => {
+    if (!resizable || width === SIDEBAR_WIDTH) {
+      return
+    }
+    window.localStorage.setItem(storageKey, width)
+  }, [resizable, storageKey, width])
+
+  const startResize = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (!resizable || state === "collapsed") {
+        return
+      }
+
+      event.preventDefault()
+      const startX = event.clientX
+      const startWidth = parseSidebarWidth(width)
+      const previousCursor = document.body.style.cursor
+      const previousUserSelect = document.body.style.userSelect
+
+      document.body.style.cursor = "col-resize"
+      document.body.style.userSelect = "none"
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const delta = side === "left" ? moveEvent.clientX - startX : startX - moveEvent.clientX
+        setWidth(`${clamp(startWidth + delta, minWidth, maxWidth)}px`)
+      }
+
+      const onPointerUp = () => {
+        document.body.style.cursor = previousCursor
+        document.body.style.userSelect = previousUserSelect
+        window.removeEventListener("pointermove", onPointerMove)
+        window.removeEventListener("pointerup", onPointerUp)
+      }
+
+      window.addEventListener("pointermove", onPointerMove)
+      window.addEventListener("pointerup", onPointerUp)
+    },
+    [maxWidth, minWidth, resizable, side, state, width]
+  )
 
   if (collapsible === "none") {
     return (
@@ -213,6 +277,12 @@ function Sidebar({
       data-variant={variant}
       data-side={side}
       data-slot="sidebar"
+      style={
+        {
+          "--sidebar-width": resizable ? width : undefined,
+          ...style,
+        } as React.CSSProperties
+      }
     >
       {/* This is what handles the sidebar gap on desktop */}
       <div
@@ -245,10 +315,34 @@ function Sidebar({
           className="flex size-full flex-col bg-sidebar group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
         >
           {children}
+          {resizable && state !== "collapsed" ? (
+            <button
+              type="button"
+              aria-label="调整侧边栏宽度"
+              className={cn(
+                "absolute inset-y-0 z-30 hidden w-3 cursor-col-resize items-center justify-center opacity-0 transition-opacity hover:opacity-100 md:flex",
+                side === "left" ? "-right-1.5" : "-left-1.5"
+              )}
+              onPointerDown={startResize}
+            >
+              <span className="h-14 w-1 rounded-full bg-sidebar-border shadow-sm" />
+            </button>
+          ) : null}
         </div>
       </div>
     </div>
   )
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function parseSidebarWidth(value: string) {
+  if (value.endsWith("rem")) {
+    return Number.parseFloat(value) * 16
+  }
+  return Number.parseFloat(value) || SIDEBAR_MIN_WIDTH
 }
 
 function SidebarTrigger({

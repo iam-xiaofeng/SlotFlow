@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.chat.agent_adapter import AgentAdapter
@@ -29,6 +29,7 @@ from app.chat.models import (
     ChatStreamRequest,
     MessageRecord,
     ModelCatalogRecord,
+    ThreadSearchResultRecord,
     ThreadCreateRequest,
     ThreadRecord,
     UploadedFileContext,
@@ -37,6 +38,7 @@ from app.chat.model_catalog import discover_model_catalog
 from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotFoundError
 from app.chat.run_config import build_run_config
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
+from app.chat.title_generation import maybe_generate_thread_title
 from app.uploads.models import UploadedFileRecord
 from app.uploads.storage import SlotFlowUploadStore, UploadNotFoundError
 
@@ -70,6 +72,17 @@ async def list_threads(request: Request) -> list[ThreadRecord]:
     """列出所有会话，最近活动的排在前面。"""
 
     return get_repo(request).list_threads()
+
+
+@router.get("/search", response_model=list[ThreadSearchResultRecord])
+async def search_threads(
+    request: Request,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=20, ge=1, le=50),
+) -> list[ThreadSearchResultRecord]:
+    """Search stored thread titles and message content."""
+
+    return get_repo(request).search_threads(q, limit=limit)
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadRecord)
@@ -235,6 +248,11 @@ async def stream_thread_run(
                             run_id=run.id,
                             metadata=assistant_message_metadata(reasoning_content),
                         )
+                        await update_thread_title_after_first_exchange(
+                            repo,
+                            thread_id=thread_id,
+                            model_name=body.model_name,
+                        )
                     repo.update_run_status(run.id, status="completed")
                     completed = True
 
@@ -264,6 +282,23 @@ def latest_assistant_content(event: BusinessSseEvent) -> str | None:
     """
 
     return latest_assistant_message_field(event, "content")
+
+
+async def update_thread_title_after_first_exchange(
+    repo: ChatRepository,
+    *,
+    thread_id: str,
+    model_name: str,
+) -> None:
+    thread = repo.get_thread(thread_id)
+    messages = repo.list_messages(thread_id)
+    title = await maybe_generate_thread_title(
+        thread=thread,
+        messages=messages,
+        model_name=model_name,
+    )
+    if title and title != thread.title:
+        repo.update_thread_title(thread_id, title)
 
 
 def latest_assistant_reasoning_content(event: BusinessSseEvent) -> str | None:

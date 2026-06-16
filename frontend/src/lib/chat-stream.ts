@@ -21,6 +21,14 @@ export type MessageRecord = {
   created_at: string;
 };
 
+export type ThreadSearchResultRecord = {
+  thread: ThreadRecord;
+  message?: MessageRecord | null;
+  match_type: "title" | "message";
+  snippet: string;
+  score: number;
+};
+
 export type ClarificationOptionRecord = {
   id: string;
   label: string;
@@ -187,6 +195,25 @@ export async function listThreads(
   }
 
   return response.json() as Promise<ThreadRecord[]>;
+}
+
+export async function searchThreads(
+  query: string,
+  options: ChatRequestOptions = {},
+): Promise<ThreadSearchResultRecord[]> {
+  const params = new URLSearchParams({
+    q: query,
+    limit: "30",
+  });
+  const response = await fetch(`/api/chat/search?${params.toString()}`, {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`search threads failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<ThreadSearchResultRecord[]>;
 }
 
 export async function getThread(

@@ -17,6 +17,8 @@ WorkspaceReadKind = Literal["text", "document", "pdf", "image", "binary"]
 
 TEXT_EXTENSIONS = {
     ".csv",
+    ".htm",
+    ".html",
     ".json",
     ".log",
     ".markdown",
@@ -234,6 +236,8 @@ def media_type_for_extension(extension: str) -> str:
         ".csv": "text/csv",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ".gif": "image/gif",
+        ".htm": "text/html",
+        ".html": "text/html",
         ".jpeg": "image/jpeg",
         ".jpg": "image/jpeg",
         ".json": "application/json",

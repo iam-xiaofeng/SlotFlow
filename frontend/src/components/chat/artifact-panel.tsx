@@ -1,7 +1,10 @@
 "use client";
 
-import { type PointerEvent, useRef } from "react";
+import { type PointerEvent, useEffect, useRef, useState } from "react";
 import {
+  Code2,
+  Download,
+  Eye,
   ExternalLink,
   LoaderCircle,
   PanelRightClose,
@@ -21,79 +24,63 @@ import {
   type WorkspaceReadRecord,
   resolveArtifactRawUrl,
 } from "@/lib/chat-stream";
+import { cn } from "@/lib/utils";
 
 import { MarkdownContent } from "./markdown-content";
 
 type ArtifactWorkspacePanelProps = {
+  activePath: string | null;
+  artifacts: WorkspaceEntryRecord[];
   preview: WorkspaceReadRecord | null;
   previewError: string | null;
   isLoadingPreview: boolean;
   width: number;
+  onClose: () => void;
+  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onWidthChange: (width: number) => void;
 };
 
 type ArtifactWorkspaceToolbarProps = {
-  artifacts: WorkspaceEntryRecord[];
   activePath: string | null;
+  artifacts: WorkspaceEntryRecord[];
+  preview: WorkspaceReadRecord | null;
+  viewMode: ArtifactViewMode;
   onClose: () => void;
   onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
+  onViewModeChange: (mode: ArtifactViewMode) => void;
 };
 
-const minPanelWidth = 360;
+type ArtifactViewMode = "code" | "preview";
+type ArtifactPreviewType = {
+  isHtml: boolean;
+  isImage: boolean;
+  isMarkdown: boolean;
+  isPdf: boolean;
+  canSwitchView: boolean;
+};
+
+const minPanelWidth = 640;
 const maxPanelWidth = 960;
 const artifactPanelWidthVariable = "--slotflow-artifact-panel-width";
 
-export function ArtifactWorkspaceToolbar({
-  artifacts,
-  activePath,
-  onClose,
-  onPreviewArtifact,
-}: ArtifactWorkspaceToolbarProps) {
-  const selectedPath = activePath ?? artifacts[0]?.path ?? "";
-
-  return (
-    <div className="flex h-14 min-w-0 items-center gap-2 border-l px-3">
-      <div className="shrink-0 text-sm font-semibold">产物</div>
-      <Select
-        value={selectedPath}
-        onValueChange={(path) => {
-          const artifact = artifacts.find((item) => item.path === path);
-          if (artifact) {
-            onPreviewArtifact(artifact);
-          }
-        }}
-      >
-        <SelectTrigger className="min-w-0 flex-1" size="sm">
-          <SelectValue placeholder={`${artifacts.length} 个文件`} />
-        </SelectTrigger>
-        <SelectContent align="start" className="max-w-96">
-          <SelectGroup>
-            {artifacts.map((artifact) => (
-              <SelectItem key={artifact.path} value={artifact.path}>
-                <span className="min-w-0 truncate">
-                  {artifact.path.replace(/^artifacts\//, "")}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
-      <Button type="button" variant="ghost" size="icon-sm" title="关闭产物面板" onClick={onClose}>
-        <PanelRightClose className="size-4" />
-        <span className="sr-only">关闭产物面板</span>
-      </Button>
-    </div>
-  );
-}
-
 export function ArtifactWorkspacePanel({
+  activePath,
+  artifacts,
   preview,
   previewError,
   isLoadingPreview,
   width,
+  onClose,
+  onPreviewArtifact,
   onWidthChange,
 }: ArtifactWorkspacePanelProps) {
   const animationFrameRef = useRef<number | null>(null);
+  const [viewMode, setViewMode] = useState<ArtifactViewMode>("preview");
+  const visibleWidth = Math.max(width, minPanelWidth);
+
+  useEffect(() => {
+    setViewMode("preview");
+  }, [preview?.path]);
 
   function beginResize(event: PointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -141,24 +128,159 @@ export function ArtifactWorkspacePanel({
 
   return (
     <aside
-      className="relative flex h-full min-w-0 shrink-0 flex-col border-l bg-background"
-      style={{ width: `var(${artifactPanelWidthVariable}, ${width}px)` }}
+      className="relative flex h-full min-w-0 shrink-0 flex-col bg-background py-4 pl-0 pr-4"
+      style={{ width: `var(${artifactPanelWidthVariable}, ${visibleWidth}px)` }}
     >
       <div
         role="separator"
         aria-orientation="vertical"
         title="拖拽调整产物面板宽度"
-        className="absolute inset-y-0 left-0 w-2 -translate-x-1 cursor-col-resize"
+        className="group/resize-handle absolute inset-y-4 left-0 z-30 w-5 -translate-x-2 cursor-col-resize"
         onPointerDown={beginResize}
-      />
-      <div className="grid min-h-0 flex-1">
+      >
+        <span className="absolute left-1/2 top-1/2 h-16 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border opacity-0 shadow-sm transition-opacity group-hover/resize-handle:opacity-100" />
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background shadow-lg">
+        <ArtifactWorkspaceToolbar
+          activePath={activePath}
+          artifacts={artifacts}
+          preview={preview}
+          viewMode={viewMode}
+          onClose={onClose}
+          onPreviewArtifact={onPreviewArtifact}
+          onViewModeChange={setViewMode}
+        />
         <ArtifactStage
           preview={preview}
           previewError={previewError}
           isLoadingPreview={isLoadingPreview}
+          viewMode={viewMode}
         />
       </div>
     </aside>
+  );
+}
+
+export function ArtifactWorkspaceToolbar({
+  activePath,
+  artifacts,
+  preview,
+  viewMode,
+  onClose,
+  onPreviewArtifact,
+  onViewModeChange,
+}: ArtifactWorkspaceToolbarProps) {
+  const selectedPath = activePath ?? artifacts[0]?.path ?? "";
+  const rawUrl = preview ? resolveArtifactRawUrl(preview.path) : "";
+  const canSwitchView = preview ? getArtifactPreviewType(preview).canSwitchView : false;
+
+  return (
+    <div className="flex h-14 shrink-0 items-center gap-2 border-b bg-muted/50 px-2">
+      <Select
+        value={selectedPath}
+        onValueChange={(path) => {
+          const artifact = artifacts.find((item) => item.path === path);
+          if (artifact) {
+            onPreviewArtifact(artifact);
+          }
+        }}
+      >
+        <SelectTrigger
+          className="min-w-0 flex-1 border-none bg-transparent shadow-none"
+          size="sm"
+        >
+          <SelectValue placeholder={`${artifacts.length} 个文件`} />
+        </SelectTrigger>
+        <SelectContent align="start" className="max-w-96">
+          <SelectGroup>
+            {artifacts.map((artifact) => (
+              <SelectItem key={artifact.path} value={artifact.path}>
+                <span className="min-w-0 truncate">
+                  {artifact.path.replace(/^artifacts\//, "")}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+
+      {canSwitchView ? (
+        <div className="mx-auto flex shrink-0 items-center rounded-lg border bg-background p-0.5">
+          <Button
+            type="button"
+            variant={viewMode === "code" ? "secondary" : "ghost"}
+            size="icon-xs"
+            title="源码"
+            className="size-7 rounded-md"
+            onClick={() => onViewModeChange("code")}
+          >
+            <Code2 className="size-4" />
+            <span className="sr-only">源码</span>
+          </Button>
+          <Button
+            type="button"
+            variant={viewMode === "preview" ? "secondary" : "ghost"}
+            size="icon-xs"
+            title="预览"
+            className="size-7 rounded-md"
+            onClick={() => onViewModeChange("preview")}
+          >
+            <Eye className="size-4" />
+            <span className="sr-only">预览</span>
+          </Button>
+        </div>
+      ) : null}
+
+      <div className="ml-auto flex shrink-0 items-center gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          title="在新窗口打开"
+          className="size-8 text-muted-foreground hover:text-foreground"
+          disabled={!rawUrl}
+          onClick={() => {
+            if (rawUrl) {
+              window.open(rawUrl, "_blank", "noopener,noreferrer");
+            }
+          }}
+        >
+          <ExternalLink className="size-4" />
+          <span className="sr-only">在新窗口打开</span>
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          title="下载"
+          className="size-8 text-muted-foreground hover:text-foreground"
+          disabled={!rawUrl}
+        >
+          {rawUrl ? (
+            <a href={rawUrl} download target="_blank" rel="noreferrer">
+              <Download className="size-4" />
+              <span className="sr-only">下载</span>
+            </a>
+          ) : (
+            <>
+              <Download className="size-4" />
+              <span className="sr-only">下载</span>
+            </>
+          )}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          title="关闭产物面板"
+          className="size-8 text-muted-foreground hover:text-foreground"
+          onClick={onClose}
+        >
+          <PanelRightClose className="size-4" />
+          <span className="sr-only">关闭产物面板</span>
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -166,14 +288,16 @@ function ArtifactStage({
   preview,
   previewError,
   isLoadingPreview,
+  viewMode,
 }: {
   preview: WorkspaceReadRecord | null;
   previewError: string | null;
   isLoadingPreview: boolean;
+  viewMode: ArtifactViewMode;
 }) {
   if (isLoadingPreview) {
     return (
-      <div className="grid place-items-center text-sm text-muted-foreground">
+      <div className="grid min-h-0 flex-1 place-items-center text-sm text-muted-foreground">
         <span className="inline-flex items-center gap-2">
           <LoaderCircle className="size-4 animate-spin" />
           正在读取产物
@@ -184,7 +308,7 @@ function ArtifactStage({
 
   if (previewError) {
     return (
-      <div className="p-4">
+      <div className="min-h-0 flex-1 p-4">
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
           {previewError}
         </div>
@@ -194,21 +318,40 @@ function ArtifactStage({
 
   if (!preview) {
     return (
-      <div className="grid place-items-center p-6 text-center text-sm text-muted-foreground">
-        点击左侧产物文件开始浏览
+      <div className="grid min-h-0 flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
+        点击产物文件开始浏览
       </div>
     );
   }
 
   const rawUrl = resolveArtifactRawUrl(preview.path);
-  const isHtml = preview.media_type.includes("html") || /\.html?$/i.test(preview.path);
-  const isImage = preview.kind === "image" || /\.(png|jpe?g|gif|webp)$/i.test(preview.path);
-  const isMarkdown = preview.media_type.includes("markdown") || /\.(md|markdown)$/i.test(preview.path);
-  const isPdf = preview.kind === "pdf" || /\.pdf$/i.test(preview.path);
+  const { isHtml, isImage, isMarkdown, isPdf } = getArtifactPreviewType(preview);
 
-  if (isHtml || isPdf) {
+  if ((isHtml || isMarkdown) && viewMode === "code") {
+    return <CodePreview preview={preview} />;
+  }
+
+  if (isHtml) {
+    const srcDoc = preview.content
+      ? buildHtmlPreviewDocument(preview.content, rawUrl)
+      : undefined;
+
     return (
-      <div className="min-h-0 p-3">
+      <div className="min-h-0 flex-1">
+        <iframe
+          title={preview.path}
+          src={srcDoc ? undefined : rawUrl}
+          srcDoc={srcDoc}
+          sandbox="allow-scripts allow-forms allow-popups allow-downloads"
+          className="size-full border-0 bg-background"
+        />
+      </div>
+    );
+  }
+
+  if (isPdf) {
+    return (
+      <div className="min-h-0 flex-1 p-3">
         <iframe
           title={preview.path}
           src={rawUrl}
@@ -221,7 +364,7 @@ function ArtifactStage({
 
   if (isImage) {
     return (
-      <div className="grid min-h-0 place-items-center overflow-auto p-3">
+      <div className="grid min-h-0 flex-1 place-items-center overflow-auto p-3">
         <img
           src={rawUrl}
           alt={preview.path.replace(/^artifacts\//, "")}
@@ -233,59 +376,83 @@ function ArtifactStage({
 
   if (isMarkdown) {
     return (
-      <div className="flex min-h-0 flex-col">
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
-          <span className="truncate">
-            {preview.kind} · {preview.media_type} · {formatBytes(preview.size_bytes)}
-          </span>
-          <a
-            href={rawUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex shrink-0 items-center gap-1 hover:text-foreground"
-          >
-            <ExternalLink className="size-3.5" />
-            打开
-          </a>
-        </div>
+      <div className="flex min-h-0 flex-1 flex-col">
         {preview.content?.trim() ? (
           <MarkdownContent
-            className="min-h-0 flex-1 overflow-auto p-4"
+            className="min-h-0 flex-1 overflow-auto px-5 py-4"
             compact
             content={preview.content}
           />
         ) : (
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 text-xs leading-5">
-            {preview.warning || JSON.stringify(preview.metadata, null, 2)}
-          </pre>
+          <CodePreview preview={preview} />
         )}
       </div>
     );
   }
 
+  return <CodePreview preview={preview} />;
+}
+
+function CodePreview({ preview }: { preview: WorkspaceReadRecord }) {
   return (
-    <div className="flex min-h-0 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
         <span className="truncate">
           {preview.kind} · {preview.media_type} · {formatBytes(preview.size_bytes)}
         </span>
-        <a
-          href={rawUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex shrink-0 items-center gap-1 hover:text-foreground"
-        >
-          <ExternalLink className="size-3.5" />
-          打开
-        </a>
       </div>
-      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 text-xs leading-5">
+      <pre
+        className={cn(
+          "min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-muted/20 p-4 text-xs leading-5",
+          "font-mono",
+        )}
+      >
         {preview.content?.trim()
           ? preview.content
           : preview.warning || JSON.stringify(preview.metadata, null, 2)}
       </pre>
     </div>
   );
+}
+
+function getArtifactPreviewType(preview: WorkspaceReadRecord): ArtifactPreviewType {
+  const path = preview.path;
+  const mediaType = preview.media_type;
+  const isHtml = mediaType.includes("html") || /\.html?$/i.test(path);
+  const isMarkdown = mediaType.includes("markdown") || /\.(md|markdown)$/i.test(path);
+  return {
+    isHtml,
+    isMarkdown,
+    isImage: preview.kind === "image" || /\.(png|jpe?g|gif|webp)$/i.test(path),
+    isPdf: preview.kind === "pdf" || /\.pdf$/i.test(path),
+    canSwitchView: isHtml || isMarkdown,
+  };
+}
+
+function buildHtmlPreviewDocument(content: string, rawUrl: string): string {
+  const previewStyle = [
+    "<style data-slotflow-preview>",
+    "html,body{margin:0;min-width:0;width:100%;background:transparent;}",
+    "body{box-sizing:border-box;overflow-wrap:anywhere;}",
+    "*,*::before,*::after{box-sizing:border-box;}",
+    "img,svg,canvas,video,iframe,table{max-width:100%;}",
+    "</style>",
+  ].join("");
+  const baseTag = `<base href="${escapeHtmlAttribute(rawUrl)}">`;
+
+  if (/<head[\s>]/i.test(content)) {
+    return content.replace(/<head([^>]*)>/i, `<head$1>${baseTag}${previewStyle}`);
+  }
+
+  return `<!doctype html><html><head>${baseTag}${previewStyle}</head><body>${content}</body></html>`;
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function formatBytes(value: number): string {

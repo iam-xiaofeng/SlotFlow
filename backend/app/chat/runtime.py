@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -100,7 +100,7 @@ class RuntimeBackedAgentAdapter:
         self,
         runtime_config: SlotFlowRuntimeConfig,
         *,
-        model_factory: Callable[[str], BaseChatModel] | None = None,
+        model_factory: Callable[..., BaseChatModel] | None = None,
     ) -> None:
         self._runtime_config = runtime_config
         self._model_factory = model_factory or create_chat_model
@@ -131,7 +131,11 @@ class RuntimeBackedAgentAdapter:
         refresh_runtime_skills_config(self._runtime_config)
         await self._ensure_mcp_tools_loaded()
         graph = create_langgraph_agent_graph(
-            model=self._model_factory(model_name),
+            model=create_model_for_context(
+                self._model_factory,
+                model_name=model_name,
+                run_context=bundle.context,
+            ),
             runtime_config=self._runtime_config,
             run_context=bundle.context,
             checkpointer=checkpointer,
@@ -627,7 +631,25 @@ async def aclose_checkpointer(checkpointer: Checkpointer | None) -> None:
                 await result
 
 
-def create_chat_model(model_name: str) -> BaseChatModel:
+def create_model_for_context(
+    model_factory: Callable[..., BaseChatModel],
+    *,
+    model_name: str,
+    run_context: RunContext,
+) -> BaseChatModel:
+    """Create a model, passing run context when the factory supports it."""
+
+    signature = inspect.signature(model_factory)
+    if "run_context" in signature.parameters:
+        return model_factory(model_name, run_context=run_context)
+    return model_factory(model_name)
+
+
+def create_chat_model(
+    model_name: str,
+    *,
+    run_context: RunContext | None = None,
+) -> BaseChatModel:
     """Create a chat model from the provider implied by the selected model id."""
 
     provider = infer_model_provider(model_name)
@@ -636,6 +658,7 @@ def create_chat_model(model_name: str) -> BaseChatModel:
     return create_openai_compatible_chat_model(
         model_name=model_name,
         provider=provider,
+        run_context=run_context,
     )
 
 
@@ -654,6 +677,7 @@ def create_openai_compatible_chat_model(
     *,
     model_name: str,
     provider: ModelProvider,
+    run_context: RunContext | None = None,
 ) -> BaseChatModel:
     """Create DeepSeek/OpenAI-compatible chat models."""
 
@@ -671,13 +695,38 @@ def create_openai_compatible_chat_model(
         raise RuntimeError(f"{api_key_name} is required for {provider} runtime")
 
     return ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url=base_url,
-        streaming=True,
-        timeout=30,
-        max_retries=0,
+        **build_openai_compatible_model_kwargs(
+            model_name=model_name,
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider,
+            run_context=run_context,
+        )
     )
+
+
+def build_openai_compatible_model_kwargs(
+    *,
+    model_name: str,
+    api_key: str,
+    base_url: str | None,
+    provider: ModelProvider,
+    run_context: RunContext | None = None,
+) -> dict[str, Any]:
+    """Build ChatOpenAI kwargs, including provider-specific thinking flags."""
+
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "api_key": api_key,
+        "base_url": base_url,
+        "streaming": True,
+        "timeout": 30,
+        "max_retries": 0,
+    }
+    if provider == "deepseek" and run_context and run_context.thinking_enabled:
+        kwargs["reasoning_effort"] = "high"
+        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+    return kwargs
 
 
 def create_anthropic_chat_model(*, model_name: str) -> BaseChatModel:

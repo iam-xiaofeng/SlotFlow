@@ -197,6 +197,30 @@ def test_read_artifact_returns_workspace_read_payload(tmp_path: Path) -> None:
     }
 
 
+def test_read_artifact_returns_html_as_text(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/report.html")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("<!doctype html><title>Report</title>", encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "artifacts/report.html"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "path": "artifacts/report.html",
+        "kind": "text",
+        "media_type": "text/html",
+        "size_bytes": 36,
+        "source": "slotflow_workspace",
+        "metadata": {"format": "html"},
+        "content": "<!doctype html><title>Report</title>",
+        "warning": None,
+    }
+
+
 def test_read_artifact_rejects_non_artifact_paths(tmp_path: Path) -> None:
     client, store = _client(tmp_path)
     upload_path = store.workspace.resolve_path("uploads/file_abc123abc123/note.md")
