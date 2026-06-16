@@ -1,112 +1,100 @@
-# 开发笔记
+# Development
 
-所有开发都在 WSL 里进行。
+This document covers the local development workflow for SlotFlow.
 
-```txt
-workspace: /home/dell/code/SlotFlow
-reference repo: /mnt/d/test/deer-flow
-```
+## Prerequisites
 
-不要把 Python 虚拟环境或 `node_modules` 装到 `/mnt/c`、`/mnt/d` 下面。那些路径是
-Windows 挂载进 WSL 的文件系统，Linux 工具在上面会更慢，也更容易遇到奇怪的权限和
-文件监听问题。
+- Python 3.12+
+- Node.js 22+
+- `uv`
+- `pnpm`
+- WSL or Linux for the recommended local workflow
 
-## 已验证命令
+## Backend
 
-后端：
-
-```bash
-cd ~/code/SlotFlow/backend
-uv run pytest -q
-```
-
-前端：
+Install dependencies and run tests:
 
 ```bash
-cd ~/code/SlotFlow/frontend
+cd backend
+uv run pytest
+```
+
+Start the API server:
+
+```bash
+cd backend
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+## Frontend
+
+Install dependencies and run checks:
+
+```bash
+cd frontend
 pnpm install
 pnpm typecheck
 pnpm build
 ```
 
-整个仓库：
+Start the UI:
 
 ```bash
-cd ~/code/SlotFlow
+cd frontend
+pnpm dev
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+## Environment
+
+The backend reads provider credentials and runtime infrastructure settings from
+environment variables. The selected chat model and mode are sent by the
+frontend with each request.
+
+Common provider variables:
+
+```bash
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.openai.com/v1
+
+ANTHROPIC_API_KEY=...
+ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
+```
+
+Common runtime variables:
+
+```bash
+SLOTFLOW_CHECKPOINTER_BACKEND=memory
+SLOTFLOW_CHAT_REPOSITORY_BACKEND=memory
+SLOTFLOW_SKILLS_ROOT=.slotflow/skills
+SLOTFLOW_WORKSPACE_ROOT=.slotflow/workspace
+```
+
+## Verification
+
+Run the full local check suite from the repository root:
+
+```bash
 make verify
 ```
 
-## Streaming API 决策
+Before opening a pull request, run at least:
 
-当前优先级：先跑通 SlotFlow 自己的后端学习链路，再进入前端。
-
-```txt
-LangGraph v3 typed projections
--> AgentEvent
--> BusinessSseEvent
--> SSE frame
--> FastAPI chat routes
--> backend TestClient chain
--> DeepSeek live smoke test
--> frontend SSE parser
--> frontend chat state
+```bash
+cd backend && uv run pytest
+cd ../frontend && pnpm typecheck
 ```
-
-最新 LangChain/LangGraph 文档推荐新应用使用
-`stream_events(..., version="v3")`。这个 API 会给出 typed projections，例如：
-
-```txt
-messages
-values
-tool_calls
-output
-extensions
-```
-
-SlotFlow 已经把模块四改成这个方向：真实 graph 通过
-`await graph.astream_events(..., version="v3")` 拿到 run stream。FastAPI 使用的是异步
-路径。模块 26A 后，代码只消费官方 typed projections：
-
-```txt
-messages / values / tool_calls
--> AgentEvent
--> BusinessSseEvent
--> SSE frame
-```
-
-这样做比旧式 `astream(stream_mode=[...])` 更贴近官方新接口，也更适合前端消费。
-
-实际规则：
-
-```txt
-1. 默认使用 v3 event streaming。
-2. 业务层只认识 AgentEvent，不直接依赖 LangGraph 投影对象。
-3. SSE 层只认识 AgentEvent，不直接依赖 LangGraph 或 DeepSeek。
-4. 不在生产代码里保留 raw protocol fallback；如果未来需要回退，必须先写清楚具体版本、
-   具体 API、具体失败原因，再作为新设计加入。
-```
-
-## Runtime 边界
-
-当前真实模型路径不再直接写死在 `main.py` 或某个单独的 DeepSeek helper 里，而是统一走
-SlotFlow 本地 runtime 装配层：
-
-```txt
-runtime.py
--> RuntimeBackedAgentAdapter
--> create_langgraph_agent_graph(...)
--> optional checkpointer
-```
-
-这层的目标不是引入 DeerFlow 包，而是本地重写一个更小的运行时边界，让后面继续吸收
-DeerFlow 的有价值能力时，不需要回头拆现有 FastAPI / SSE / AgentEvent 主干。
-
-## Live Smoke Test 原则
-
-真实 DeepSeek 调用不进入 `make verify`。原因是它依赖网络、API key、余额、模型服务状态，
-不适合作为日常健康闸门。
-
-日常测试不调用真实模型。需要稳定输出时，在测试文件里定义轻量 fake adapter，或者通过
-`RuntimeBackedAgentAdapter(model_factory=...)` 注入 LangChain fake chat model。
-
-需要验证真实模型时，单独运行 live smoke test，并临时提供 `DEEPSEEK_API_KEY`。
