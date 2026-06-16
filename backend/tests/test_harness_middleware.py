@@ -76,7 +76,7 @@ def test_runtime_summary_middleware_writes_compact_context_snapshot() -> None:
             "runtime": {
                 "thread_id": "thread_middleware",
                 "run_id": "run_middleware",
-                "model_name": "deepseek-v4-flash",
+                    "model_name": "deepseek-v4-pro",
                 "mode": "ultra",
                 "agent_name": "default",
                 "thinking_enabled": True,
@@ -197,6 +197,35 @@ def test_skills_preflight_middleware_injects_find_skills_result() -> None:
     assert isinstance(message, HumanMessage)
     assert "<slotflow-skills-preflight>" in str(message.content)
     assert str(message.content).endswith("请分析股票数据并生成图表报告")
+
+
+def test_skills_preflight_middleware_prefers_installed_skill_matches(tmp_path) -> None:
+    skill_dir = tmp_path / "skills" / "macro-research"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: macro-research
+description: Research and report on China macroeconomic data, GDP, PMI, CPI and finance.
+---
+
+# Macro Research
+""",
+        encoding="utf-8",
+    )
+    middleware = SlotFlowSkillsPreflightMiddleware(skills_root=tmp_path / "skills")
+
+    update = middleware.before_agent(
+        {"messages": [HumanMessage(content="使用专业的skills分析中国近期经济数据并生成报告")]},
+        Runtime(context=_bundle().context),
+    )
+
+    assert update is not None
+    preflight = update["slotflow"]["skills_preflight"]
+    assert preflight["tool"] == "skill_match"
+    assert preflight["next_action"] == "use_installed_skills"
+    assert preflight["installed_matches"][0]["name"] == "macro-research"
+    message = update["messages"][0]
+    assert "installed_matches" in str(message.content)
 
 
 def test_skills_preflight_middleware_skips_simple_chat() -> None:

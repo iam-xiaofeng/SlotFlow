@@ -13,7 +13,7 @@ from langgraph.runtime import Runtime
 from app.chat.models import RunContext
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.state import SlotFlowAgentState
-from app.harness.tools.customization import find_installable_skills
+from app.harness.tools.customization import find_relevant_skills
 
 
 SKILLS_PREFLIGHT_BLOCK_START = "<slotflow-skills-preflight>"
@@ -67,10 +67,15 @@ class SlotFlowSkillsPreflightMiddleware(AgentMiddleware[SlotFlowAgentState, RunC
         self,
         *,
         sandbox_config: SlotFlowSandboxConfig | None = None,
+        skills_root: Any = None,
+        skills_config_store: Any = None,
         finder: SkillFinder | None = None,
         max_results: int = 5,
     ) -> None:
         self._sandbox_config = sandbox_config or SlotFlowSandboxConfig()
+        self._skills_root = skills_root
+        self._skills_config_store = skills_config_store
+        self._uses_default_finder = finder is None
         self._finder = finder or _default_find_skills
         self._max_results = max_results
 
@@ -92,7 +97,16 @@ class SlotFlowSkillsPreflightMiddleware(AgentMiddleware[SlotFlowAgentState, RunC
         if SKILLS_PREFLIGHT_BLOCK_START in user_text:
             return None
 
-        result = self._finder(user_text, self._max_results, self._sandbox_config)
+        if self._uses_default_finder:
+            result = self._finder(
+                user_text,
+                self._max_results,
+                self._sandbox_config,
+                self._skills_root,
+                self._skills_config_store,
+            )
+        else:
+            result = self._finder(user_text, self._max_results, self._sandbox_config)
         preflight_block = _format_preflight(result)
         messages[-1] = HumanMessage(
             content=_prepend_text(last_message.content, f"{preflight_block}\n\n"),
@@ -111,8 +125,16 @@ def _default_find_skills(
     query: str,
     max_results: int,
     config: SlotFlowSandboxConfig,
+    skills_root: Any = None,
+    skills_config_store: Any = None,
 ) -> dict[str, Any]:
-    return find_installable_skills(query=query, max_results=max_results, config=config)
+    return find_relevant_skills(
+        query=query,
+        max_results=max_results,
+        skills_root=skills_root,
+        skills_config_store=skills_config_store,
+        config=config,
+    )
 
 
 def _should_run_preflight(text: str) -> bool:
@@ -128,9 +150,11 @@ def _should_run_preflight(text: str) -> bool:
 def _format_preflight(result: dict[str, Any]) -> str:
     return (
         f"{SKILLS_PREFLIGHT_BLOCK_START}\n"
-        "Backend preflight already ran find-skills for this specialized request.\n"
-        "Review these results before answering. Install a Skill only when a concrete "
-        "package_url and skill_name are available and relevant.\n"
+        "Backend preflight already checked installed Skills first and only searched "
+        "installable Skills when no local match was found.\n"
+        "If installed_matches is non-empty, use those installed Skills for this run. "
+        "Install a Skill only when a concrete package_url and skill_name are available "
+        "and relevant.\n"
         f"{json.dumps(result, ensure_ascii=False)}\n"
         f"{SKILLS_PREFLIGHT_BLOCK_END}"
     )

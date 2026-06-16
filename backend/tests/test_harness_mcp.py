@@ -120,6 +120,7 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
         "artifact_list",
         "web_fetch",
         "web_search",
+        "skill_match",
         "find-skills",
         "skill_list",
         "skill_install",

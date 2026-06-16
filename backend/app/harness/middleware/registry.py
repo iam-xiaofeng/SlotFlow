@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -44,6 +46,8 @@ def build_harness_middleware(
     config: SlotFlowMiddlewareConfig | None = None,
     memory_store: SlotFlowMemoryStore | None = None,
     sandbox_config: SlotFlowSandboxConfig | None = None,
+    skills_root: Path | None = None,
+    skills_config_store: object | None = None,
     extra_middleware: list[SlotFlowAgentMiddleware] | None = None,
     tools_enabled: bool = True,
 ) -> list[SlotFlowAgentMiddleware]:
@@ -79,7 +83,11 @@ def build_harness_middleware(
 
     if resolved.skills_preflight_enabled:
         middleware.append(
-            SlotFlowSkillsPreflightMiddleware(sandbox_config=sandbox_config)
+            SlotFlowSkillsPreflightMiddleware(
+                sandbox_config=sandbox_config,
+                skills_root=skills_root,
+                skills_config_store=skills_config_store,
+            )
         )
 
     if resolved.uploads_enabled:

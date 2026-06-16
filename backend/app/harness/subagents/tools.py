@@ -25,6 +25,8 @@ class SubagentTaskResult:
     agent_name: str
     task: str
     context: str
+    expected_output: str
+    priority: str
     result: str
     source: str = "slotflow_subagent_task_tool"
 
@@ -35,6 +37,8 @@ class SubagentTaskResult:
                 "agent_name": self.agent_name,
                 "task": self.task,
                 "context": self.context,
+                "expected_output": self.expected_output,
+                "priority": self.priority,
                 "result": self.result,
                 "source": self.source,
             },
@@ -66,16 +70,25 @@ class SubagentTaskRunner:
 
         return bool(self._profiles)
 
+    def profiles(self) -> list[SlotFlowSubagentProfile]:
+        """Return enabled profiles in stable order."""
+
+        return list(self._profiles.values())
+
     async def arun(
         self,
         *,
         agent_name: str,
         task: str,
         context: str = "",
+        expected_output: str = "",
+        priority: str = "normal",
     ) -> SubagentTaskResult:
         clean_agent_name = agent_name.strip()
         clean_task = task.strip()
         clean_context = context.strip()
+        clean_expected_output = expected_output.strip()
+        clean_priority = normalize_priority(priority)
 
         if not clean_task:
             return SubagentTaskResult(
@@ -83,6 +96,8 @@ class SubagentTaskRunner:
                 agent_name=clean_agent_name,
                 task=task,
                 context=context,
+                expected_output=clean_expected_output,
+                priority=clean_priority,
                 result="task must not be blank",
             )
 
@@ -93,6 +108,8 @@ class SubagentTaskRunner:
                 agent_name=clean_agent_name,
                 task=clean_task,
                 context=clean_context,
+                expected_output=clean_expected_output,
+                priority=clean_priority,
                 result=f"unknown subagent: {clean_agent_name}",
             )
 
@@ -116,6 +133,8 @@ class SubagentTaskRunner:
                             "content": build_subagent_user_prompt(
                                 task=clean_task,
                                 context=clean_context,
+                                expected_output=clean_expected_output,
+                                priority=clean_priority,
                                 run_context=self._run_context,
                             ),
                         }
@@ -128,6 +147,8 @@ class SubagentTaskRunner:
                 agent_name=profile.name,
                 task=clean_task,
                 context=clean_context,
+                expected_output=clean_expected_output,
+                priority=clean_priority,
                 result=f"subagent execution failed: {exc.__class__.__name__}: {exc}",
             )
 
@@ -136,6 +157,8 @@ class SubagentTaskRunner:
             agent_name=profile.name,
             task=clean_task,
             context=clean_context,
+            expected_output=clean_expected_output,
+            priority=clean_priority,
             result=latest_assistant_text(result) or "",
         )
 
@@ -164,18 +187,46 @@ def build_subagent_tools(
     if not runner.has_profiles():
         return []
 
+    @tool("subagent_list")
+    async def subagent_list() -> str:
+        """List enabled SlotFlow subagent profiles and their capabilities."""
+
+        return json.dumps(
+            {
+                "source": "slotflow_subagent_list",
+                "subagents": [
+                    {
+                        "name": profile.name,
+                        "description": profile.description,
+                        "capabilities": list(profile.capabilities),
+                        "output_contract": profile.output_contract,
+                    }
+                    for profile in runner.profiles()
+                ],
+            },
+            ensure_ascii=False,
+        )
+
     @tool("task_tool")
-    async def task_tool(agent_name: str, task: str, context: str = "") -> str:
+    async def task_tool(
+        agent_name: str,
+        task: str,
+        context: str = "",
+        expected_output: str = "",
+        priority: str = "normal",
+    ) -> str:
         """Delegate a focused task to a named SlotFlow subagent profile."""
 
         result = await runner.arun(
             agent_name=agent_name,
             task=task,
             context=context,
+            expected_output=expected_output,
+            priority=priority,
         )
         return result.to_json()
 
-    return [task_tool]
+    return [subagent_list, task_tool]
 
 
 def build_subagent_system_prompt(
@@ -193,6 +244,8 @@ def build_subagent_system_prompt(
         f"description={profile.description}",
         f"parent_thread_id={run_context.thread_id}",
         f"parent_run_id={run_context.run_id}",
+        f"capabilities={', '.join(profile.capabilities) if profile.capabilities else 'general'}",
+        f"output_contract={profile.output_contract}",
         "Return a concise, concrete result for the parent agent.",
         "</slotflow-subagent>",
     ]
@@ -221,6 +274,8 @@ def build_subagent_user_prompt(
     *,
     task: str,
     context: str,
+    expected_output: str,
+    priority: str,
     run_context: RunContext,
 ) -> str:
     """Build the user message sent to a subagent."""
@@ -228,12 +283,22 @@ def build_subagent_user_prompt(
     sections = [
         f"Task: {task}",
         "",
+        f"Priority: {priority}",
         f"Parent mode: {run_context.mode}",
         f"Parent agent: {run_context.agent_name}",
     ]
     if context:
         sections.extend(["", f"Context: {context}"])
+    if expected_output:
+        sections.extend(["", f"Expected output: {expected_output}"])
     return "\n".join(sections)
+
+
+def normalize_priority(priority: str) -> str:
+    normalized = priority.strip().lower()
+    if normalized in {"low", "normal", "high"}:
+        return normalized
+    return "normal"
 
 
 def usable_tools_for_model(

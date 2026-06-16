@@ -92,6 +92,7 @@ def test_harness_registers_network_and_extension_tools(tmp_path: Path) -> None:
     assert {
         "web_fetch",
         "web_search",
+        "skill_match",
         "find-skills",
         "skill_install",
         "mcp_add_http",

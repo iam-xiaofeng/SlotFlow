@@ -102,6 +102,7 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         "artifact_list",
         "web_fetch",
         "web_search",
+        "skill_match",
         "find-skills",
         "skill_list",
         "skill_install",

@@ -57,7 +57,7 @@ def test_subagent_tools_are_registered_only_when_feature_is_enabled() -> None:
             model=model,
             run_context=ultra_bundle.context,
         )
-    ] == ["task_tool"]
+    ] == ["subagent_list", "task_tool"]
 
 
 @pytest.mark.asyncio
@@ -66,17 +66,20 @@ async def test_task_tool_runs_real_subagent_and_returns_result() -> None:
     model = ToolAwareFakeMessagesListChatModel(
         responses=[AIMessage(content="真实子 agent 结果")]
     )
-    tool = build_subagent_tools(
+    tools = build_subagent_tools(
         features=features_from_run_context(bundle.context),
         model=model,
         run_context=bundle.context,
-    )[0]
+    )
+    tool = next(item for item in tools if item.name == "task_tool")
 
     raw = await tool.ainvoke(
         {
             "agent_name": "researcher",
             "task": "整理 MCP provider 的官方用法",
             "context": "模块 20 后续验证",
+            "expected_output": "列出官方 API 和风险",
+            "priority": "high",
         }
     )
     result = json.loads(raw)
@@ -85,18 +88,52 @@ async def test_task_tool_runs_real_subagent_and_returns_result() -> None:
     assert result["agent_name"] == "researcher"
     assert result["task"] == "整理 MCP provider 的官方用法"
     assert result["context"] == "模块 20 后续验证"
+    assert result["expected_output"] == "列出官方 API 和风险"
+    assert result["priority"] == "high"
     assert result["result"] == "真实子 agent 结果"
     assert result["source"] == "slotflow_subagent_task_tool"
 
 
 @pytest.mark.asyncio
+async def test_subagent_list_returns_profile_capabilities() -> None:
+    bundle = _bundle(mode="ultra")
+    tool = next(
+        item
+        for item in build_subagent_tools(
+            features=features_from_run_context(bundle.context),
+            model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
+            run_context=bundle.context,
+        )
+        if item.name == "subagent_list"
+    )
+
+    result = json.loads(await tool.ainvoke({}))
+
+    assert result["source"] == "slotflow_subagent_list"
+    assert [item["name"] for item in result["subagents"]] == [
+        "researcher",
+        "analyst",
+        "planner",
+        "coder",
+        "reviewer",
+        "writer",
+    ]
+    assert result["subagents"][0]["capabilities"]
+    assert result["subagents"][0]["output_contract"]
+
+
+@pytest.mark.asyncio
 async def test_task_tool_returns_structured_error_for_unknown_agent() -> None:
     bundle = _bundle(mode="ultra")
-    tool = build_subagent_tools(
+    tool = next(
+        item
+        for item in build_subagent_tools(
         features=features_from_run_context(bundle.context),
         model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
         run_context=bundle.context,
-    )[0]
+        )
+        if item.name == "task_tool"
+    )
 
     result = json.loads(
         await tool.ainvoke(
@@ -130,10 +167,12 @@ def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary()
         "artifact_list",
         "web_fetch",
         "web_search",
+        "skill_match",
         "find-skills",
         "skill_list",
         "skill_install",
         "mcp_add_http",
+        "subagent_list",
         "task_tool",
     ]
 
@@ -172,6 +211,7 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
                             "agent_name": "coder",
                             "task": "检查模块 21 的工具注册顺序",
                             "context": "SlotFlow harness tests",
+                            "expected_output": "返回工具顺序和风险",
                         },
                         "id": "call_task_tool",
                     }
@@ -203,5 +243,6 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
     tool_result = json.loads(str(tool_messages[0].content))
     assert tool_result["agent_name"] == "coder"
     assert tool_result["status"] == "completed"
+    assert tool_result["expected_output"] == "返回工具顺序和风险"
     assert tool_result["result"] == "真实 coder 子任务结果。"
     assert result["messages"][-1].content == "子任务结果已经收到。"

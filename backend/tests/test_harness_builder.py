@@ -79,6 +79,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "artifact_list",
         "web_fetch",
         "web_search",
+        "skill_match",
         "find-skills",
         "skill_list",
         "skill_install",
@@ -100,7 +101,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert "thinking_enabled=True" in captured["system_prompt"]
     assert "plan_enabled=True" in captured["system_prompt"]
     assert "subagent_enabled=False" in captured["system_prompt"]
-    assert "call find-skills before doing the work" in captured["system_prompt"]
+    assert "call skill_match before doing the work" in captured["system_prompt"]
     assert "Backend preflight" not in captured["system_prompt"]
     assert "Use ask_clarification" in captured["system_prompt"]
     assert "User-visible generated files must be written with artifact_write" in captured[
@@ -232,6 +233,7 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
         "artifact_list",
         "web_fetch",
         "web_search",
+        "skill_match",
         "find-skills",
         "skill_list",
         "skill_install",

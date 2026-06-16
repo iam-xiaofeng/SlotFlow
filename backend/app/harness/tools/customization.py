@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from langchain_core.tools import BaseTool, tool
 
@@ -30,6 +31,19 @@ def build_customization_tools(
         result = find_installable_skills(
             query=query,
             max_results=max_results,
+            config=config,
+        )
+        return json.dumps(result, ensure_ascii=False)
+
+    @tool("skill_match")
+    def skill_match(query: str, max_results: int = 5) -> str:
+        """Find relevant installed Skills first; search installable Skills only if needed."""
+
+        result = find_relevant_skills(
+            query=query,
+            max_results=max_results,
+            skills_root=skills_root,
+            skills_config_store=skills_config_store,
             config=config,
         )
         return json.dumps(result, ensure_ascii=False)
@@ -131,7 +145,141 @@ def build_customization_tools(
             ensure_ascii=False,
         )
 
-    return [find_skills, skill_list, skill_install, mcp_add_http]
+    return [skill_match, find_skills, skill_list, skill_install, mcp_add_http]
+
+
+def find_relevant_skills(
+    *,
+    query: str,
+    max_results: int = 5,
+    skills_root,
+    skills_config_store: SlotFlowSkillsConfigStore | None = None,
+    config: SlotFlowSandboxConfig | None = None,
+) -> dict:
+    """Prefer locally installed Skills, then fall back to installable Skill search."""
+
+    installed_matches = match_installed_skills(
+        query=query,
+        max_results=max_results,
+        skills_root=skills_root,
+        skills_config_store=skills_config_store,
+    )
+    result: dict[str, object] = {
+        "query": query,
+        "installed_matches": installed_matches,
+        "tool": "skill_match",
+        "source": "slotflow_customization",
+    }
+    if installed_matches:
+        result["next_action"] = "use_installed_skills"
+        result["hint"] = (
+            "Use the installed Skill matches for this run before searching or installing more Skills."
+        )
+        return result
+
+    installable = find_installable_skills(
+        query=query,
+        max_results=max_results,
+        config=config,
+    )
+    result["next_action"] = "review_find_skills_results"
+    result["installable_search"] = installable
+    result["hint"] = (
+        "No relevant installed Skills were found. Review installable_search and install only "
+        "when a concrete package_url and skill_name are available and relevant."
+    )
+    return result
+
+
+def match_installed_skills(
+    *,
+    query: str,
+    max_results: int = 5,
+    skills_root,
+    skills_config_store: SlotFlowSkillsConfigStore | None = None,
+) -> list[dict[str, object]]:
+    if skills_root is None:
+        return []
+    if skills_config_store is not None:
+        skills_config_store.ensure_default_find_skills()
+        configs = skills_config_store.configs()
+    else:
+        configs = {}
+
+    query_terms = _skill_match_terms(query)
+    matches: list[tuple[int, dict[str, object]]] = []
+    for skill in load_enabled_skills(skills_root=skills_root, enabled_names=None):
+        if skill.name == "find-skills":
+            continue
+        configured = configs.get(skill.name)
+        if configured is not None and not configured.enabled:
+            continue
+        haystack = f"{skill.name} {skill.description}".lower()
+        score = _skill_match_score(
+            query=query,
+            query_terms=query_terms,
+            name=skill.name,
+            haystack=haystack,
+        )
+        if score <= 0:
+            continue
+        matches.append(
+            (
+                score,
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "path": str(skill.skill_dir),
+                    "score": score,
+                    "enabled": configured.enabled if configured is not None else skill.enabled,
+                    "source": configured.source if configured is not None else "local",
+                },
+            )
+        )
+
+    matches.sort(key=lambda item: (-item[0], str(item[1]["name"])))
+    return [item for _, item in matches[:max(1, max_results)]]
+
+
+def _skill_match_score(
+    *,
+    query: str,
+    query_terms: set[str],
+    name: str,
+    haystack: str,
+) -> int:
+    score = 0
+    lowered_query = query.lower()
+    if name.lower() in lowered_query:
+        score += 8
+    for term in query_terms:
+        if term in haystack:
+            score += 1 if len(term) <= 3 else 2
+    return score
+
+
+def _skill_match_terms(query: str) -> set[str]:
+    lowered = query.lower()
+    terms = set(re.findall(r"[a-z0-9][a-z0-9_-]{1,}", lowered))
+    cjk_text = "".join(re.findall(r"[\u4e00-\u9fff]+", lowered))
+    terms.update(
+        cjk_text[index : index + 2]
+        for index in range(max(0, len(cjk_text) - 1))
+    )
+    bridge_terms = {
+        "经济": {"economy", "economic", "macro", "macroeconomic", "finance", "financial"},
+        "金融": {"finance", "financial", "market"},
+        "股票": {"stock", "equity", "market"},
+        "研究": {"research", "analysis"},
+        "分析": {"analysis", "research"},
+        "报告": {"report", "writing"},
+        "数据": {"data", "dataset"},
+        "中国": {"china", "chinese"},
+    }
+    for needle, additions in bridge_terms.items():
+        if needle in query:
+            terms.update(additions)
+    return {term for term in terms if len(term) >= 2}
 
 
 def find_installable_skills(
