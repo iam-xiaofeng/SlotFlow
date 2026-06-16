@@ -22,6 +22,8 @@ import {
   resolveArtifactRawUrl,
 } from "@/lib/chat-stream";
 
+import { MarkdownContent } from "./markdown-content";
+
 type ArtifactWorkspacePanelProps = {
   preview: WorkspaceReadRecord | null;
   previewError: string | null;
@@ -201,6 +203,7 @@ function ArtifactStage({
   const rawUrl = resolveArtifactRawUrl(preview.path);
   const isHtml = preview.media_type.includes("html") || /\.html?$/i.test(preview.path);
   const isImage = preview.kind === "image" || /\.(png|jpe?g|gif|webp)$/i.test(preview.path);
+  const isMarkdown = preview.media_type.includes("markdown") || /\.(md|markdown)$/i.test(preview.path);
   const isPdf = preview.kind === "pdf" || /\.pdf$/i.test(preview.path);
 
   if (isHtml || isPdf) {
@@ -224,6 +227,38 @@ function ArtifactStage({
           alt={preview.path.replace(/^artifacts\//, "")}
           className="max-h-full max-w-full rounded-md border object-contain"
         />
+      </div>
+    );
+  }
+
+  if (isMarkdown) {
+    return (
+      <div className="flex min-h-0 flex-col">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
+          <span className="truncate">
+            {preview.kind} · {preview.media_type} · {formatBytes(preview.size_bytes)}
+          </span>
+          <a
+            href={rawUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex shrink-0 items-center gap-1 hover:text-foreground"
+          >
+            <ExternalLink className="size-3.5" />
+            打开
+          </a>
+        </div>
+        {preview.content?.trim() ? (
+          <MarkdownContent
+            className="min-h-0 flex-1 overflow-auto p-4"
+            compact
+            content={preview.content}
+          />
+        ) : (
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 text-xs leading-5">
+            {preview.warning || JSON.stringify(preview.metadata, null, 2)}
+          </pre>
+        )}
       </div>
     );
   }

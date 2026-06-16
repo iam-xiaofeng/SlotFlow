@@ -1,6 +1,5 @@
 """把一次聊天请求整理成 agent 运行配置。
 
-模块一回答“数据长什么样”，模块二回答“数据先存在哪里”。模块三开始回答：
 当后端准备调用 agent 时，应该把哪些信息放到哪里？
 
 这里最容易混乱的是 `config` 和 `context`：
@@ -30,11 +29,10 @@ def mode_to_feature_flags(mode: ChatMode) -> dict[str, bool]:
     这里先用很简单的三档规则：
 
     - `flash`：快，少想，不启用规划，不启用子 agent；
-    - `pro`：默认学习档，启用思考和规划，但不启用子 agent；
+    - `pro`：默认档，启用思考和规划，但不启用子 agent；
     - `ultra`：完整档，启用思考、规划和子 agent。
 
-    这些名字现在只是学习阶段的抽象。以后接真实 harness 时，可以把这些布尔值
-    映射到 `RuntimeFeatures` 或具体 middleware 开关。
+    这些布尔值会映射到具体 middleware 和工具开关。
     """
 
     return {

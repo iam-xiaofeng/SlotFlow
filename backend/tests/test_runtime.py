@@ -1,6 +1,6 @@
-"""模块七测试：SlotFlow 本地 runtime 装配层。
+"""SlotFlow 本地 runtime 装配层测试。
 
-这一层不直接依赖 DeerFlow 包，而是把 SlotFlow 自己需要的最小运行时装配收拢出来：
+这一层不直接依赖外部应用包，而是把 SlotFlow 自己需要的最小运行时装配收拢出来：
 
 - 创建真实 LangGraph/DeepSeek-compatible agent graph
 - 显式挂接 checkpointer
@@ -79,7 +79,6 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_SQLITE_PATH", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_POSTGRES_URI", raising=False)
     monkeypatch.delenv("SLOTFLOW_CHECKPOINTER_SETUP", raising=False)
-    monkeypatch.delenv("SLOTFLOW_DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("SLOTFLOW_SYSTEM_PROMPT", raising=False)
     isolate_user_config_paths(monkeypatch, tmp_path)
     monkeypatch.delenv("SLOTFLOW_ENABLED_SKILLS", raising=False)
@@ -98,7 +97,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     config = load_runtime_config_from_env()
 
     assert config == SlotFlowRuntimeConfig(
-        model_name="deepseek-v4-flash",
+        model_name="deepseek-v4-pro",
         checkpointer_backend="memory",
         checkpointer_sqlite_path=DEFAULT_CHECKPOINTER_SQLITE_PATH,
         skills_root=tmp_path / "skills",
@@ -109,7 +108,7 @@ def test_load_runtime_config_from_env_reads_checkpointer_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """模块十九后，runtime 可以从环境变量读取持久化 checkpointer 配置。"""
+    """runtime 可以从环境变量读取持久化 checkpointer 配置。"""
 
     sqlite_path = tmp_path / "checkpoints.sqlite3"
     monkeypatch.setenv("SLOTFLOW_CHECKPOINTER_BACKEND", "sqlite")
@@ -235,7 +234,7 @@ def test_create_checkpointer_supports_none_and_memory() -> None:
 
 @pytest.mark.asyncio
 async def test_create_async_checkpointer_supports_sqlite(tmp_path: Path) -> None:
-    """模块十九后，SQLite checkpointer 使用官方 AsyncSqliteSaver。"""
+    """SQLite checkpointer 使用官方 AsyncSqliteSaver。"""
 
     sqlite_path = tmp_path / "checkpoints.sqlite3"
     checkpointer = await create_async_checkpointer(

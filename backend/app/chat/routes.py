@@ -1,6 +1,6 @@
 """聊天相关 FastAPI 路由。
 
-模块六第一次把前面的模块串起来：
+聊天 stream 路由把请求链路串起来：
 
 ```txt
 HTTP 请求
@@ -12,8 +12,8 @@ HTTP 请求
 -> StreamingResponse
 ```
 
-这一层是“编排层”。它不自己生成回答，也不自己解析 LangGraph 投影；那些事情已经分别
-交给模块四和模块五。路由只负责把一次 HTTP 请求变成一次可记录、可流式返回的 run。
+这一层是“编排层”。它不自己生成回答，也不自己解析 LangGraph 投影。路由只负责把
+一次 HTTP 请求变成一次可记录、可流式返回的 run。
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ from app.chat.agent_adapter import AgentAdapter
 from app.chat.models import (
     ChatStreamRequest,
     MessageRecord,
+    ModelCatalogRecord,
     ThreadCreateRequest,
     ThreadRecord,
     UploadedFileContext,
 )
+from app.chat.model_catalog import discover_model_catalog
 from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotFoundError
 from app.chat.run_config import build_run_config
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
@@ -40,6 +42,13 @@ from app.uploads.storage import SlotFlowUploadStore, UploadNotFoundError
 
 
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
+
+
+@router.get("/models", response_model=ModelCatalogRecord)
+async def list_models() -> ModelCatalogRecord:
+    """Return models discovered from configured provider API credentials."""
+
+    return await discover_model_catalog()
 
 
 @router.post("/threads", response_model=ThreadRecord)
@@ -104,7 +113,7 @@ async def stream_thread_run(
 ) -> StreamingResponse:
     """启动一次 assistant run，并用 SSE 返回流式事件。
 
-    这里是后端学习链路的核心入口。它做的事情按顺序是：
+    这里是后端聊天运行链路的核心入口。它做的事情按顺序是：
 
     1. 确认 thread 存在；
     2. 解析请求里的上传文件 ID；
@@ -170,7 +179,9 @@ async def stream_thread_run(
 
     async def frames() -> AsyncIterator[str]:
         assistant_text_parts: list[str] = []
+        assistant_reasoning_parts: list[str] = []
         snapshot_message_content: str | None = None
+        snapshot_reasoning_content: str | None = None
         clarification_saved = False
         completed = False
 
@@ -180,10 +191,14 @@ async def stream_thread_run(
                 if event.event == "message.delta":
                     delta = event.data.get("delta")
                     if isinstance(delta, str):
-                        assistant_text_parts.append(delta)
+                        if event.data.get("channel") == "reasoning":
+                            assistant_reasoning_parts.append(delta)
+                        else:
+                            assistant_text_parts.append(delta)
 
                 if event.event == "state.snapshot":
                     snapshot_message_content = latest_assistant_content(event)
+                    snapshot_reasoning_content = latest_assistant_reasoning_content(event)
 
                 if event.event == "clarification.requested" and not clarification_saved:
                     repo.add_message(
@@ -209,13 +224,16 @@ async def stream_thread_run(
 
                 if event.event == "run.finished":
                     content = snapshot_message_content or "".join(assistant_text_parts)
+                    reasoning_content = (
+                        snapshot_reasoning_content or "".join(assistant_reasoning_parts)
+                    )
                     if content and not clarification_saved:
                         repo.add_message(
                             thread_id,
                             role="assistant",
                             content=content,
                             run_id=run.id,
-                            metadata={"source": "agent"},
+                            metadata=assistant_message_metadata(reasoning_content),
                         )
                     repo.update_run_status(run.id, status="completed")
                     completed = True
@@ -245,6 +263,16 @@ def latest_assistant_content(event: BusinessSseEvent) -> str | None:
     规范化后叫 `ai`。这里先兼容这两个常见名字。
     """
 
+    return latest_assistant_message_field(event, "content")
+
+
+def latest_assistant_reasoning_content(event: BusinessSseEvent) -> str | None:
+    """从 state.snapshot 里取最后一条 assistant reasoning_content。"""
+
+    return latest_assistant_message_field(event, "reasoning_content")
+
+
+def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str | None:
     messages = event.data.get("messages")
     if not isinstance(messages, list):
         return None
@@ -253,10 +281,17 @@ def latest_assistant_content(event: BusinessSseEvent) -> str | None:
         if not isinstance(message, dict):
             continue
         role = message.get("role")
-        content = message.get("content")
-        if role in ("assistant", "ai") and isinstance(content, str):
-            return content
+        value = message.get(field)
+        if role in ("assistant", "ai") and isinstance(value, str):
+            return value
     return None
+
+
+def assistant_message_metadata(reasoning_content: str | None) -> dict:
+    metadata = {"source": "agent"}
+    if isinstance(reasoning_content, str) and reasoning_content.strip():
+        metadata["reasoning_content"] = reasoning_content
+    return metadata
 
 
 def format_clarification_content(payload: dict) -> str:

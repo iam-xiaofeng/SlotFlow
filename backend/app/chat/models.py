@@ -2,8 +2,8 @@
 
 这一层只回答一个问题：前端、后端、agent、测试之间传递的数据到底长什么样？
 
-旧项目里很多复杂度来自“同一份数据同时要适配多个协议”。SlotFlow 第一阶段先
-把业务自己的形状定下来：thread 是一轮会话，message 是会话里的消息，run 是
+生产系统里很多复杂度来自“同一份数据同时要适配多个协议”。SlotFlow 在 API 边界
+固定业务自己的形状：thread 是一轮会话，message 是会话里的消息，run 是
 一次流式执行。后续无论真实 agent 内部怎么变，FastAPI 边界都尽量保持这个形状。
 """
 
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 ChatMode = Literal["flash", "pro", "ultra"]
 MessageRole = Literal["user", "assistant", "system", "tool"]
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+ModelProvider = Literal["deepseek", "openai", "anthropic"]
 
 
 def utc_now() -> datetime:
@@ -33,8 +34,7 @@ def utc_now() -> datetime:
 class ThreadCreateRequest(BaseModel):
     """创建空会话 thread 时的请求体。
 
-    这个模型后面会交给 FastAPI 使用。现在先把它放在模块一，是为了提前固定
-    API 请求里“创建会话”这件事的最小输入。
+    这个模型会交给 FastAPI 使用，用来固定 API 请求里“创建会话”这件事的最小输入。
     """
 
     title: str | None = Field(
@@ -59,7 +59,7 @@ class ThreadRecord(BaseModel):
 class MessageRecord(BaseModel):
     """thread 里保存下来的一条消息。
 
-    第一阶段只保存文本。等真实 harness 接上以后，`metadata` 可以承接工具调用、
+    主字段只保存文本。`metadata` 可以承接工具调用、
     图片附件、引用来源等附加信息，而不用马上改动前端消息列表的主结构。
     """
 
@@ -75,16 +75,16 @@ class MessageRecord(BaseModel):
 class ChatStreamRequest(BaseModel):
     """启动一次 assistant 流式运行时的请求体。
 
-    这是前端点击“发送”时最核心的输入。现在字段很少，是故意的：
+    这是前端点击“发送”时最核心的输入。字段保持小而明确：
 
     - `message` 是用户这次说的话；
-    - `model_name` 暂时只是透传到 run context，让你能看到配置怎么进入后端；
-    - `mode` 模拟不同能力档位，后面会变成真实 feature flags；
+    - `model_name` 是本轮由前端选择的模型；
+    - `mode` 表示本轮能力档位；
     - `files` 是上传 API 返回的 file_id 列表，stream 路由会解析成上传元数据。
     """
 
     message: str = Field(min_length=1)
-    model_name: str = "deepseek-v4-flash"
+    model_name: str = "deepseek-v4-pro"
     mode: ChatMode = "pro"
     agent_name: str = "default"
     files: list[str] = Field(default_factory=list)
@@ -102,6 +102,34 @@ class ChatStreamRequest(BaseModel):
         if not value.strip():
             raise ValueError("message cannot be blank")
         return value
+
+
+class ModelOptionRecord(BaseModel):
+    """A selectable model discovered from a configured provider."""
+
+    id: str
+    provider: ModelProvider
+    label: str
+    available: bool = True
+    source: str = "catalog"
+
+
+class ModelProviderRecord(BaseModel):
+    """Frontend-facing provider status without exposing secrets."""
+
+    provider: ModelProvider
+    configured: bool
+    base_url: str | None = None
+    status: Literal["available", "fallback", "missing", "error"]
+    message: str | None = None
+    models: list[ModelOptionRecord] = Field(default_factory=list)
+
+
+class ModelCatalogRecord(BaseModel):
+    """Model discovery response used by the chat composer."""
+
+    default_model: str
+    providers: list[ModelProviderRecord] = Field(default_factory=list)
 
 
 class UploadedFileContext(BaseModel):

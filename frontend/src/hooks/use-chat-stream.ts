@@ -22,6 +22,7 @@ export type ChatUiMessage = {
   id: string;
   role: ChatUiMessageRole;
   content: string;
+  reasoningContent?: string;
   status: ChatUiMessageStatus;
   runId?: string;
   createdAt?: string;
@@ -55,7 +56,7 @@ export type SendChatMessageResult = {
 };
 
 const fallbackThreadTitle = "SlotFlow chat";
-const fallbackModelName = "deepseek-v4-flash";
+const fallbackModelName = "deepseek-v4-pro";
 const fallbackMode: ChatMode = "pro";
 const fallbackAgentName = "default";
 const fallbackMaxEventLogItems = 12;
@@ -97,33 +98,46 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     [maxEventLogItems],
   );
 
-  const appendAssistantText = useCallback((messageId: string, delta: string) => {
+  const updateAssistantMessage = useCallback((
+    messageId: string,
+    update: (message: ChatUiMessage) => ChatUiMessage,
+  ) => {
     setMessages((current) =>
       current.map((message) =>
-        message.id === messageId
-          ? { ...message, content: message.content + delta }
-          : message,
+        message.id === messageId ? update(message) : message,
       ),
     );
   }, []);
 
-  const replaceAssistantText = useCallback((messageId: string, content: string) => {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === messageId ? { ...message, content } : message,
-      ),
+  const appendAssistantDelta = useCallback((
+    messageId: string,
+    channel: "content" | "reasoning",
+    delta: string,
+  ) => {
+    updateAssistantMessage(messageId, (message) =>
+      channel === "reasoning"
+        ? { ...message, reasoningContent: `${message.reasoningContent ?? ""}${delta}` }
+        : { ...message, content: message.content + delta },
     );
-  }, []);
+  }, [updateAssistantMessage]);
+
+  const replaceAssistantContent = useCallback((
+    messageId: string,
+    channel: "content" | "reasoning",
+    content: string,
+  ) => {
+    updateAssistantMessage(messageId, (message) =>
+      channel === "reasoning"
+        ? { ...message, reasoningContent: content }
+        : { ...message, content },
+    );
+  }, [updateAssistantMessage]);
 
   const patchAssistant = useCallback(
     (messageId: string, patch: Partial<ChatUiMessage>) => {
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === messageId ? { ...message, ...patch } : message,
-        ),
-      );
+      updateAssistantMessage(messageId, (message) => ({ ...message, ...patch }));
     },
-    [],
+    [updateAssistantMessage],
   );
 
   const startNewThread = useCallback(
@@ -160,6 +174,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     setEvents([]);
     setError(null);
     return true;
+  }, []);
+
+  const removeMessage = useCallback((messageId: string) => {
+    setMessages((current) => current.filter((message) => message.id !== messageId));
   }, []);
 
   const loadThread = useCallback(async (targetThread: ThreadRecord): Promise<boolean> => {
@@ -284,7 +302,12 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           if (streamEvent.event === "message.delta") {
             const delta = streamEvent.data.delta;
             if (typeof delta === "string") {
-              appendAssistantText(assistantMessageId, delta);
+              const channel = streamEvent.data.channel;
+              appendAssistantDelta(
+                assistantMessageId,
+                channel === "reasoning" ? "reasoning" : "content",
+                delta,
+              );
             }
           }
 
@@ -305,7 +328,11 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           if (streamEvent.event === "state.snapshot") {
             const content = latestAssistantContent(streamEvent);
             if (content) {
-              replaceAssistantText(assistantMessageId, content);
+              replaceAssistantContent(assistantMessageId, "content", content);
+            }
+            const reasoningContent = latestAssistantReasoningContent(streamEvent);
+            if (reasoningContent) {
+              replaceAssistantContent(assistantMessageId, "reasoning", reasoningContent);
             }
             const nextTodos = latestTodos(streamEvent);
             if (nextTodos) {
@@ -351,10 +378,11 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         }
         isStreamingRef.current = false;
         setIsStreaming(false);
+        setTodos([]);
       }
     },
     [
-      appendAssistantText,
+      appendAssistantDelta,
       appendEvent,
       defaultAgentName,
       defaultMetadata,
@@ -362,7 +390,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       defaultModelName,
       defaultThreadTitle,
       patchAssistant,
-      replaceAssistantText,
+      replaceAssistantContent,
       thread,
     ],
   );
@@ -382,21 +410,29 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     startNewThread,
     cancelStream,
     resetThread,
+    removeMessage,
     loadThread,
     clearError: () => setError(null),
   };
 }
 
 function messageRecordToUiMessage(record: MessageRecord): ChatUiMessage {
+  const reasoningContent = parseReasoningContent(record.metadata);
   return {
     id: record.id,
     role: record.role,
     content: record.content,
+    reasoningContent,
     status: "done",
     runId: record.run_id ?? undefined,
     createdAt: record.created_at,
     metadata: record.metadata,
   };
+}
+
+function parseReasoningContent(metadata: Record<string, unknown> | undefined): string | undefined {
+  const value = metadata?.reasoning_content;
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function latestAssistantContent(event: ChatStreamEvent): string | null {
@@ -414,6 +450,30 @@ function latestAssistantContent(event: ChatStreamEvent): string | null {
     ) {
       const role = message.role;
       const content = message.content;
+      if ((role === "assistant" || role === "ai") && typeof content === "string") {
+        return content;
+      }
+    }
+  }
+
+  return null;
+}
+
+function latestAssistantReasoningContent(event: ChatStreamEvent): string | null {
+  const messages = event.data.messages;
+  if (!Array.isArray(messages)) {
+    return null;
+  }
+
+  for (const message of [...messages].reverse()) {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "role" in message &&
+      "reasoning_content" in message
+    ) {
+      const role = message.role;
+      const content = message.reasoning_content;
       if ((role === "assistant" || role === "ai") && typeof content === "string") {
         return content;
       }

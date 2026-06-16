@@ -1,11 +1,11 @@
-"""模块四测试：LangGraph v3 event streaming 适配层。
+"""LangGraph v3 event streaming 适配层测试。
 
 这组测试不启动 FastAPI，也不调用真实 DeepSeek API。它只验证一个边界：
 
 LangGraph v3 typed projections
 -> SlotFlow AgentEvent
 
-这样做的好处是，真实模型和网络先不参与，事件形状先被我们固定下来。
+这样做的好处是，真实模型和网络不参与，事件形状可以稳定验证。
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from app.chat.agent_adapter import (
     clarification_event_from_snapshot,
     collect_agent_events,
     extract_message_delta,
+    extract_message_delta_parts,
     normalize_values_snapshot,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
@@ -114,9 +115,36 @@ def test_projection_message_item_becomes_message_delta_event() -> None:
             "message_id": "run_test:assistant",
             "role": "assistant",
             "delta": "你好",
+            "channel": "content",
             "index": None,
         },
     )
+
+
+def test_deepseek_reasoning_content_becomes_reasoning_delta_event() -> None:
+    event = projection_item_to_agent_event(
+        projection="messages",
+        item={"delta": {"reasoning_content": "先分析问题"}},
+        bundle=_bundle(),
+    )
+
+    assert event == AgentEvent(
+        event="message.delta",
+        data={
+            "message_id": "run_test:assistant",
+            "role": "assistant",
+            "delta": "先分析问题",
+            "channel": "reasoning",
+            "index": None,
+        },
+    )
+
+
+def test_extract_message_delta_parts_keeps_content_and_reasoning_separate() -> None:
+    assert extract_message_delta_parts({"reasoning_content": "推理"}) == {
+        "reasoning_content": "推理",
+    }
+    assert extract_message_delta_parts({"content": "正文"}) == {"content": "正文"}
 
 
 def test_projection_values_item_becomes_state_snapshot_event() -> None:
@@ -339,3 +367,8 @@ async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_it
         "run.finished",
     ]
     assert "".join(event.data["delta"] for event in events if event.event == "message.delta") == "AB"
+    assert all(
+        event.data["channel"] == "content"
+        for event in events
+        if event.event == "message.delta"
+    )

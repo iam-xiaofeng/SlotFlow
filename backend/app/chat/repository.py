@@ -1,17 +1,16 @@
 """chat thread / message / run 仓库。
 
-模块一只定义了数据“长什么样”。模块二开始回答另一个问题：
 这些 thread、message、run 在进入数据库之前，先放在哪里？
 
-第一阶段我们先用内存字典，不马上引入 SQLite / Postgres。这样做不是为了逃避
-持久化，而是为了把核心业务边界看清楚：
+默认实现先用内存字典，同时保留 SQLite 实现。这样可以让路由层依赖清晰的
+仓库边界，而不是直接绑死某种存储：
 
 - thread 是会话容器；
 - message 属于某个 thread；
 - run 也属于某个 thread；
 - 新增 message 或更新 run 时，thread 的 updated_at 要跟着变化。
 
-等后续链路跑通，再把这个类替换成数据库实现会更稳，因为 API 和测试已经先固定了。
+以后切换默认存储时，只需要替换实现和注入点。
 """
 
 from __future__ import annotations
@@ -271,7 +270,7 @@ class InMemoryChatRepository:
     ) -> RunRecord:
         """为某个 thread 创建一次执行记录。
 
-        run 刚创建时是 `queued`。模块四/五开始流式执行后，才会把它更新为
+        run 刚创建时是 `queued`。流式执行开始后，才会把它更新为
         `running`、`completed` 或 `failed`。
         """
 

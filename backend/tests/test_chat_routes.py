@@ -1,6 +1,6 @@
-"""模块六测试：FastAPI 聊天路由完整后端链路。
+"""FastAPI 聊天路由完整后端链路测试。
 
-这组测试第一次把前面几个模块串起来：
+这组测试把 HTTP 入口、仓库、run 配置、agent adapter 和 SSE 输出串起来：
 
 HTTP 请求
 -> 内存仓库
@@ -118,6 +118,46 @@ class CompletedAgentAdapter:
         )
 
 
+class ReasoningAgentAdapter:
+    """测试用 adapter：模拟 DeepSeek thinking mode 的双通道输出。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        _ = request
+        message_id = f"{bundle.context.run_id}:assistant"
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": "先检索，再交叉验证。",
+                "channel": "reasoning",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": "最终报告正文。",
+                "channel": "content",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="run.finished",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+
+
 class ClarificationAgentAdapter:
     """测试用 adapter：请求用户澄清并结束本轮。"""
 
@@ -172,7 +212,7 @@ def test_create_app_can_use_sqlite_repository_from_env(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """模块十八后，应用启动入口可以通过环境变量切到 SQLite 仓库。"""
+    """应用启动入口可以通过环境变量切到 SQLite 仓库。"""
 
     db_path = tmp_path / "chat.sqlite3"
     monkeypatch.setenv("SLOTFLOW_CHAT_REPOSITORY_BACKEND", "sqlite")
@@ -219,11 +259,11 @@ def test_thread_routes_create_list_get_and_list_messages() -> None:
     repo = InMemoryChatRepository()
     client = _client(repo)
 
-    create_response = client.post("/api/chat/threads", json={"title": "  学习会话  "})
+    create_response = client.post("/api/chat/threads", json={"title": "  测试会话  "})
     thread = create_response.json()
 
     assert create_response.status_code == 200
-    assert thread["title"] == "学习会话"
+    assert thread["title"] == "测试会话"
 
     list_response = client.get("/api/chat/threads")
     get_response = client.get(f"/api/chat/threads/{thread['id']}")
@@ -279,7 +319,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
         f"/api/chat/threads/{thread['id']}/runs/stream",
         json={
             "message": "解释完整链路",
-            "model_name": "deepseek-v4-flash",
+            "model_name": "deepseek-v4-pro",
             "mode": "pro",
             "files": [uploaded["id"]],
         },
@@ -310,8 +350,31 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
     assert "解释完整链路" in messages[1].content
     assert messages[1].run_id == runs[0].id
     assert runs[0].status == "completed"
-    assert runs[0].model_name == "deepseek-v4-flash"
+    assert runs[0].model_name == "deepseek-v4-pro"
     assert runs[0].mode == "pro"
+
+
+def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:
+    repo = InMemoryChatRepository()
+    client = _client(repo, adapter=ReasoningAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "思考链路"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "需要深度分析"},
+    )
+    events = _parse_sse(response.text)
+    messages = repo.list_messages(thread["id"])
+
+    assert response.status_code == 200
+    assert events[0]["data"]["channel"] == "reasoning"
+    assert events[1]["data"]["channel"] == "content"
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[1].content == "最终报告正文。"
+    assert messages[1].metadata == {
+        "source": "agent",
+        "reasoning_content": "先检索，再交叉验证。",
+    }
 
 
 def test_stream_run_can_reuse_user_message_for_edit_or_retry() -> None:

@@ -42,7 +42,7 @@ async def test_deepseek_agent_adapter_streams_v3_events() -> None:
     if not os.environ.get("DEEPSEEK_API_KEY"):
         pytest.skip("DEEPSEEK_API_KEY is required for live DeepSeek smoke test")
 
-    model_name = os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash")
+    model_name = os.environ.get("SLOTFLOW_LIVE_MODEL", "deepseek-v4-pro")
     request = ChatStreamRequest(
         message="用一句中文短句回答：SlotFlow 后端 smoke test 是否通过？",
         model_name=model_name,

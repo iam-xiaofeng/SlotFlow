@@ -31,6 +31,8 @@ import {
   type McpServerRecord,
   type MemoryKind,
   type MemoryRecord,
+  type ModelCatalogRecord,
+  type ModelOptionRecord,
   type SkillRecord,
   type ThreadRecord,
   type UploadedFileRecord,
@@ -44,6 +46,7 @@ import {
   deleteSkill,
   deleteThread,
   installSkill,
+  listChatModels,
   listArtifacts,
   listMcpServers,
   listMemories,
@@ -67,7 +70,7 @@ import { makeThreadTitle } from "./chat-format";
 import { ThreadSidebar, UserMenu } from "./chat-sidebar";
 import { EmptyState, MessageList } from "./message-list";
 
-const defaultModelName = "deepseek-v4-flash";
+const defaultModelName = "deepseek-v4-pro";
 const defaultMode: ChatMode = "pro";
 
 type QueuedChatMessage = {
@@ -76,6 +79,8 @@ type QueuedChatMessage = {
   files: string[];
   metadata: Record<string, unknown>;
   attachmentCount: number;
+  modelName: string;
+  mode: ChatMode;
 };
 
 type ThreadArtifactIndex = Record<string, string[]>;
@@ -94,6 +99,10 @@ export function ChatApp() {
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogRecord | null>(null);
+  const [selectedModelName, setSelectedModelName] = useState(defaultModelName);
+  const [selectedMode, setSelectedMode] = useState<ChatMode>(defaultMode);
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
   const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
   const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
@@ -119,6 +128,7 @@ export function ChatApp() {
     cancelStream,
     loadThread,
     resetThread,
+    removeMessage,
     clearError,
   } = useChatStream({
     defaultThreadTitle: "New chat",
@@ -231,6 +241,7 @@ export function ChatApp() {
     [artifacts],
   );
   const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
+  const modelOptions = useMemo(() => flattenModelOptions(modelCatalog), [modelCatalog]);
 
   const rememberThreadArtifacts = useCallback((threadId: string, paths: string[]) => {
     if (paths.length === 0) {
@@ -258,6 +269,8 @@ export function ChatApp() {
         files: string[];
         metadata: Record<string, unknown>;
         threadTitle: string;
+        modelName: string;
+        mode: ChatMode;
         reuseUserMessageId?: string;
       },
       options: {
@@ -266,8 +279,8 @@ export function ChatApp() {
     ): Promise<boolean> => {
       const previousArtifactPaths = new Set(artifactFiles.map((artifact) => artifact.path));
       const result = await sendMessage(prepared.text, {
-        mode: defaultMode,
-        model_name: defaultModelName,
+        mode: prepared.mode,
+        model_name: prepared.modelName,
         agent_name: "default",
         files: prepared.files,
         metadata: prepared.metadata,
@@ -323,6 +336,40 @@ export function ChatApp() {
   );
 
   useEffect(() => {
+    let active = true;
+
+    async function refreshModelCatalog() {
+      setIsLoadingModels(true);
+      try {
+        const catalog = await listChatModels();
+        if (!active) {
+          return;
+        }
+        setModelCatalog(catalog);
+        setSelectedModelName((current) =>
+          modelExists(catalog, current) ? current : catalog.default_model,
+        );
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : "load models failed";
+        toast.error(message);
+        if (active) {
+          setModelCatalog(null);
+        }
+      } finally {
+        if (active) {
+          setIsLoadingModels(false);
+        }
+      }
+    }
+
+    void refreshModelCatalog();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (
       isStreaming ||
       isUploading ||
@@ -344,6 +391,8 @@ export function ChatApp() {
       files: nextMessage.files,
       metadata: nextMessage.metadata,
       threadTitle: makeThreadTitle(nextMessage.text),
+      modelName: nextMessage.modelName,
+      mode: nextMessage.mode,
     }).finally(() => {
       isDrainingQueueRef.current = false;
       setIsQueueDraining(false);
@@ -446,6 +495,8 @@ export function ChatApp() {
           files,
           metadata,
           attachmentCount: files.length,
+          modelName: selectedModelName,
+          mode: selectedMode,
         },
       ]);
       return true;
@@ -456,6 +507,8 @@ export function ChatApp() {
         text,
         files,
         metadata,
+        modelName: selectedModelName,
+        mode: selectedMode,
         reuseUserMessageId: options.reuseUserMessageId,
         threadTitle: makeThreadTitle(text),
       },
@@ -803,12 +856,14 @@ export function ChatApp() {
   }
 
   async function handleSelectClarification(
+    messageId: string,
     clarification: ClarificationRequestRecord,
     option: ClarificationOptionRecord,
   ) {
     if (isConversationBusy) {
       return;
     }
+    removeMessage(messageId);
     await submitMessage(`我选择 ${option.id}：${option.label}`, {
       files: [],
       metadata: {
@@ -841,6 +896,10 @@ export function ChatApp() {
         attachmentCount: message.attachmentCount,
         position: index + 1,
       }))}
+      modelOptions={modelOptions}
+      selectedMode={selectedMode}
+      selectedModelName={selectedModelName}
+      isLoadingModels={isLoadingModels}
       onAttachFiles={() => fileInputRef.current?.click()}
       onCancel={cancelStream}
       onClearError={clearError}
@@ -849,6 +908,8 @@ export function ChatApp() {
       onRemoveAttachment={handleRemoveAttachment}
       onRemoveQueuedMessage={handleRemoveQueuedMessage}
       onSendMessage={submitMessage}
+      onModeChange={setSelectedMode}
+      onModelChange={setSelectedModelName}
     />
   );
 
@@ -940,8 +1001,8 @@ export function ChatApp() {
                     handleEditLatestUserMessage(messageId, content)
                   }
                   onRetryLatestAssistantMessage={() => void handleRetryLatestAssistantMessage()}
-                  onSelectClarification={(clarification, option) =>
-                    void handleSelectClarification(clarification, option)
+                  onSelectClarification={(messageId, clarification, option) =>
+                    void handleSelectClarification(messageId, clarification, option)
                   }
                 />
                 <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
@@ -1074,6 +1135,30 @@ function extractUploadedFilesFromMetadata(
 
 function makeQueueId() {
   return `queued_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function flattenModelOptions(catalog: ModelCatalogRecord | null): ModelOptionRecord[] {
+  if (!catalog) {
+    return [
+      {
+        id: defaultModelName,
+        provider: "deepseek",
+        label: `DeepSeek · ${defaultModelName}`,
+        available: true,
+        source: "fallback",
+      },
+    ];
+  }
+
+  return catalog.providers.flatMap((provider) =>
+    provider.models.filter((model) => model.available),
+  );
+}
+
+function modelExists(catalog: ModelCatalogRecord, modelName: string): boolean {
+  return catalog.providers.some((provider) =>
+    provider.models.some((model) => model.available && model.id === modelName),
+  );
 }
 
 function formatUploadToast(files: UploadedFileRecord[]) {

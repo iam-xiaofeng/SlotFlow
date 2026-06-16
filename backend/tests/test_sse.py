@@ -1,6 +1,6 @@
-"""模块五测试：AgentEvent 到业务 SSE 帧。
+"""AgentEvent 到业务 SSE 帧的转换测试。
 
-模块四输出 `AgentEvent`。模块五要证明这些事件可以稳定变成浏览器能消费的 SSE：
+这些测试证明 agent 事件可以稳定变成浏览器能消费的 SSE：
 
 AgentEvent -> BusinessSseEvent -> SSE 文本帧
 """
@@ -137,7 +137,7 @@ async def test_iter_sse_frames_encodes_agent_events() -> None:
 
 @pytest.mark.asyncio
 async def test_completed_agent_event_stream_can_be_encoded_as_sse_frames() -> None:
-    """一轮完整 AgentEvent 流可以直接接到模块五的 SSE 编码器。"""
+    """一轮完整 AgentEvent 流可以直接接到 SSE 编码器。"""
 
     frames = [
         frame

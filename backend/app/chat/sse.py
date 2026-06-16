@@ -1,8 +1,5 @@
 """业务事件到 SSE 文本帧的转换工具。
 
-模块四已经把 LangGraph v3 typed projections 翻译成了 `AgentEvent`。模块五继续往
-浏览器方向走一步：
-
 ```txt
 AgentEvent
 -> BusinessSseEvent
@@ -40,7 +37,7 @@ class BusinessSseEvent(BaseModel):
     """SlotFlow 对前端公开的 SSE 事件。
 
     它和 `AgentEvent` 很像，但多了 `event_id`，因为 SSE 协议允许每一帧带一个 id。
-    第一阶段不做断线续传，所以 `event_id` 可选。
+    当前不做断线续传，所以 `event_id` 可选。
     """
 
     event: SseEventName
@@ -49,7 +46,7 @@ class BusinessSseEvent(BaseModel):
 
 
 def agent_event_to_sse_event(event: AgentEvent) -> BusinessSseEvent:
-    """把模块四的 agent 事件转换成前端 SSE 事件。
+    """把 agent 事件转换成前端 SSE 事件。
 
     当前多数事件只是原样转发。这一层仍然有意义：以后如果前端事件名和 agent
     内部事件名不完全一致，只改这里，不改 agent adapter。

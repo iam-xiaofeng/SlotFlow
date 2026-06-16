@@ -40,6 +40,30 @@ export type ClarificationRequestRecord = {
 
 export type ChatMode = "flash" | "pro" | "ultra";
 
+export type ModelProvider = "deepseek" | "openai" | "anthropic";
+
+export type ModelOptionRecord = {
+  id: string;
+  provider: ModelProvider;
+  label: string;
+  available: boolean;
+  source: "api" | "fallback" | "catalog" | string;
+};
+
+export type ModelProviderRecord = {
+  provider: ModelProvider;
+  configured: boolean;
+  base_url?: string | null;
+  status: "available" | "fallback" | "missing" | "error";
+  message?: string | null;
+  models: ModelOptionRecord[];
+};
+
+export type ModelCatalogRecord = {
+  default_model: string;
+  providers: ModelProviderRecord[];
+};
+
 export type ChatStreamRequest = {
   message: string;
   model_name?: string;
@@ -116,6 +140,20 @@ export type MemoryKind = "manual" | "preference" | "profile" | "topic" | "fact";
 export type ChatRequestOptions = {
   signal?: AbortSignal;
 };
+
+export async function listChatModels(
+  options: ChatRequestOptions = {},
+): Promise<ModelCatalogRecord> {
+  const response = await fetch(resolveChatStreamUrl("/api/chat/models"), {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`list chat models failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<ModelCatalogRecord>;
+}
 
 export async function createThread(
   title?: string,

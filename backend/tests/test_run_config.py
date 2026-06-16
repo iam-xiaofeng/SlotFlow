@@ -1,9 +1,8 @@
-"""模块三测试：把前端请求整理成 agent 运行配置。
+"""把前端请求整理成 agent 运行配置的测试。
 
 这个测试文件只盯一个边界：字段到底应该放进 `config` 还是 `context`。
 
-后面接真实 harness 时，如果 `thread_id` 放错位置，多轮记忆可能会静默失效。
-所以这里提前把规则写成测试，而不是等真实 agent 接上以后再靠肉眼排查。
+如果 `thread_id` 放错位置，多轮记忆可能会静默失效，所以这里把规则写成测试。
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ def test_mode_to_feature_flags(mode, expected) -> None:
 
 
 def test_build_run_config_puts_thread_id_in_configurable() -> None:
-    """thread_id 必须在 configurable 里，后续 checkpointer 会靠它找多轮状态。"""
+    """thread_id 必须在 configurable 里，checkpointer 会靠它找多轮状态。"""
 
     request = ChatStreamRequest(message="解释 thread_id")
 
@@ -71,8 +70,8 @@ def test_build_run_config_puts_business_fields_in_context() -> None:
     """业务字段进入 context，而不是混进 config 里。"""
 
     request = ChatStreamRequest(
-        message="开始研究",
-        model_name="gpt-learning",
+        message="开始分析",
+        model_name="gpt-analysis",
         mode="ultra",
         agent_name="researcher",
         files=["upload_1", "upload_2"],
@@ -86,7 +85,7 @@ def test_build_run_config_puts_business_fields_in_context() -> None:
 
     assert bundle.context.thread_id == "thread_123"
     assert bundle.context.run_id == "run_456"
-    assert bundle.context.model_name == "gpt-learning"
+    assert bundle.context.model_name == "gpt-analysis"
     assert bundle.context.mode == "ultra"
     assert bundle.context.agent_name == "researcher"
     assert bundle.context.files == ["upload_1", "upload_2"]

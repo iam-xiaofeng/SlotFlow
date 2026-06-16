@@ -6,11 +6,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { Copy, FileText, List, Pencil, RotateCcw } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
+import {
+  Brain,
+  ChevronDown,
+  Copy,
+  FileText,
+  List,
+  Pencil,
+  RotateCcw,
+  SendHorizontal,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -28,8 +33,8 @@ import {
   displayFileName,
   isImageFile,
   type MessageFile,
-  normalizeMathForMarkdown,
 } from "./chat-format";
+import { MarkdownContent } from "./markdown-content";
 
 type MessageListProps = {
   messages: ChatUiMessage[];
@@ -39,6 +44,7 @@ type MessageListProps = {
   onEditLatestUserMessage: (messageId: string, content: string) => Promise<boolean>;
   onRetryLatestAssistantMessage: () => void;
   onSelectClarification: (
+    messageId: string,
     clarification: ClarificationRequestRecord,
     option: ClarificationOptionRecord,
   ) => void;
@@ -48,6 +54,11 @@ type UserMessageNavItem = {
   id: string;
   index: number;
   content: string;
+};
+
+type AssistantContentParts = {
+  thought: string;
+  body: string;
 };
 
 export function MessageList({
@@ -61,11 +72,13 @@ export function MessageList({
 }: MessageListProps) {
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const userMessageRefs = useRef(new Map<string, HTMLElement>());
+  const userMessagesRef = useRef<UserMessageNavItem[]>([]);
+  const userMessageSignatureRef = useRef("");
   const navigatorCloseTimerRef = useRef<number | null>(null);
   const [activeUserIndex, setActiveUserIndex] = useState(0);
   const [isNavigatorOpen, setIsNavigatorOpen] = useState(false);
   const [editingUserMessageId, setEditingUserMessageId] = useState<string | null>(null);
-  const userMessages = useMemo<UserMessageNavItem[]>(() => {
+  const computedUserMessages = useMemo<UserMessageNavItem[]>(() => {
     let index = 0;
     return messages.flatMap((message) => {
       if (message.role !== "user") {
@@ -75,6 +88,14 @@ export function MessageList({
       return [{ id: message.id, index, content: message.content }];
     });
   }, [messages]);
+  const userMessageSignature = computedUserMessages
+    .map((item) => `${item.id}:${item.content}`)
+    .join("\u0001");
+  if (userMessageSignatureRef.current !== userMessageSignature) {
+    userMessageSignatureRef.current = userMessageSignature;
+    userMessagesRef.current = computedUserMessages;
+  }
+  const userMessages = userMessagesRef.current;
   const latestUserMessageId = userMessages.at(-1)?.id ?? null;
   const latestAssistantMessageId =
     [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null;
@@ -89,26 +110,29 @@ export function MessageList({
 
   const updateActiveUserMessage = useCallback(() => {
     const viewport = getViewport();
-    if (!viewport || userMessages.length === 0) {
-      setActiveUserIndex(0);
+    const currentUserMessages = userMessagesRef.current;
+    if (!viewport || currentUserMessages.length === 0) {
+      setActiveUserIndex((current) => (current === 0 ? current : 0));
       return;
     }
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     if (viewport.scrollTop <= 4) {
-      setActiveUserIndex(userMessages[0].index);
+      const nextIndex = currentUserMessages[0].index;
+      setActiveUserIndex((current) => (current === nextIndex ? current : nextIndex));
       return;
     }
     if (maxScrollTop - viewport.scrollTop <= 4) {
-      setActiveUserIndex(userMessages[userMessages.length - 1].index);
+      const nextIndex = currentUserMessages[currentUserMessages.length - 1].index;
+      setActiveUserIndex((current) => (current === nextIndex ? current : nextIndex));
       return;
     }
 
     const viewportRect = viewport.getBoundingClientRect();
     const targetY = viewportRect.top + viewportRect.height * 0.38;
-    let nextIndex = userMessages[0].index;
+    let nextIndex = currentUserMessages[0].index;
 
-    for (const item of userMessages) {
+    for (const item of currentUserMessages) {
       const element = userMessageRefs.current.get(item.id);
       if (!element) {
         continue;
@@ -118,7 +142,7 @@ export function MessageList({
       }
     }
     setActiveUserIndex((current) => (current === nextIndex ? current : nextIndex));
-  }, [getViewport, userMessages]);
+  }, [getViewport]);
 
   useEffect(() => {
     const viewport = getViewport();
@@ -134,7 +158,7 @@ export function MessageList({
   useEffect(() => {
     const frame = window.requestAnimationFrame(updateActiveUserMessage);
     return () => window.cancelAnimationFrame(frame);
-  }, [messages, updateActiveUserMessage]);
+  }, [userMessageSignature, updateActiveUserMessage]);
 
   useEffect(() => {
     const viewport = getViewport();
@@ -272,6 +296,7 @@ function MessageBubble({
   onSubmitEdit: (content: string) => Promise<boolean>;
   onRetryLatestAssistantMessage: () => void;
   onSelectClarification: (
+    messageId: string,
     clarification: ClarificationRequestRecord,
     option: ClarificationOptionRecord,
   ) => void;
@@ -281,8 +306,16 @@ function MessageBubble({
   const files = getMessageFiles(message);
   const content = message.content;
   const clarification = getClarificationRequest(message);
+  const assistantContent =
+    isUser || clarification
+      ? { thought: "", body: content }
+      : splitAssistantContent(content, message.reasoningContent);
   const isAssistantThinking =
-    !isUser && !clarification && message.status === "streaming" && !content.trim();
+    !isUser &&
+    !clarification &&
+    message.status === "streaming" &&
+    !content.trim() &&
+    !message.reasoningContent?.trim();
   const canShowAssistantActions =
     !clarification &&
     isLatestAssistant &&
@@ -325,12 +358,23 @@ function MessageBubble({
               <ClarificationRequestPanel
                 clarification={clarification}
                 disabled={!canAnswerClarification}
-                onSelect={onSelectClarification}
+                onSelect={(selectedClarification, option) =>
+                  onSelectClarification(message.id, selectedClarification, option)
+                }
               />
             ) : isAssistantThinking ? (
               <ThinkingIndicator />
             ) : (
-              <MarkdownContent content={content} />
+              <>
+                {assistantContent.thought ? (
+                  <AssistantThinkingSummary content={assistantContent.thought} />
+                ) : null}
+                {assistantContent.body.trim() ? (
+                  <MarkdownContent content={assistantContent.body} />
+                ) : message.status === "streaming" ? (
+                  <ThinkingIndicator />
+                ) : null}
+              </>
             )}
           </div>
         )}
@@ -549,7 +593,9 @@ function ClarificationRequestPanel({
         return;
       }
       const option = clarification.options.find(
-        (item) => item.id.toLowerCase() === event.key.toLowerCase(),
+        (item) =>
+          item.id.toLowerCase() === event.key.toLowerCase() &&
+          !isClarificationFreeformOption(item),
       );
       if (!option) {
         return;
@@ -574,26 +620,112 @@ function ClarificationRequestPanel({
       </p>
       {clarification.options.length > 0 ? (
         <div className="mt-3 grid gap-2">
-          {clarification.options.map((option) => (
-            <Button
-              key={option.id}
-              type="button"
-              variant="outline"
-              className="h-auto justify-start gap-3 rounded-lg px-3 py-2.5 text-left"
-              disabled={disabled}
-              onClick={() => onSelect(clarification, option)}
-            >
-              <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted text-xs font-semibold">
-                {option.id}
-              </span>
-              <span className="min-w-0 whitespace-normal break-words leading-6">
-                {option.label}
-              </span>
-            </Button>
-          ))}
+          {clarification.options.map((option) =>
+            isClarificationFreeformOption(option) ? (
+              <ClarificationFreeformOption
+                key={option.id}
+                clarification={clarification}
+                disabled={disabled}
+                option={option}
+                onSelect={onSelect}
+              />
+            ) : (
+              <Button
+                key={option.id}
+                type="button"
+                variant="outline"
+                className="h-auto justify-start gap-3 rounded-lg px-3 py-2.5 text-left"
+                disabled={disabled}
+                onClick={() => onSelect(clarification, option)}
+              >
+                <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted text-xs font-semibold">
+                  {option.id}
+                </span>
+                <span className="min-w-0 whitespace-normal break-words leading-6">
+                  {option.label}
+                </span>
+              </Button>
+            ),
+          )}
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ClarificationFreeformOption({
+  clarification,
+  disabled,
+  option,
+  onSelect,
+}: {
+  clarification: ClarificationRequestRecord;
+  disabled: boolean;
+  option: ClarificationOptionRecord;
+  onSelect: (
+    clarification: ClarificationRequestRecord,
+    option: ClarificationOptionRecord,
+  ) => void;
+}) {
+  const [value, setValue] = useState("");
+  const canSend = Boolean(value.trim()) && !disabled;
+  const placeholder = option.label.replace(/^其他(?:[:：\s-]*|$)/u, "").trim() || "请补充说明";
+
+  function submit() {
+    if (!canSend) {
+      return;
+    }
+    onSelect(clarification, {
+      ...option,
+      label: value.trim(),
+    });
+    setValue("");
+  }
+
+  return (
+    <div className="flex min-h-14 items-center gap-2 rounded-lg border bg-background px-3 py-2">
+      <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted text-xs font-semibold">
+        {option.id}
+      </span>
+      <input
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            submit();
+          }
+        }}
+        className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+      />
+      <Button
+        type="button"
+        size="icon"
+        variant="ghost"
+        className="size-9 shrink-0"
+        disabled={!canSend}
+        title="发送说明"
+        onClick={submit}
+      >
+        <SendHorizontal className="size-4" />
+        <span className="sr-only">发送说明</span>
+      </Button>
+    </div>
+  );
+}
+
+function isClarificationFreeformOption(option: ClarificationOptionRecord): boolean {
+  const text = `${option.id} ${option.label}`.toLowerCase();
+  return (
+    text.includes("其他") ||
+    text.includes("请说明") ||
+    text.includes("other") ||
+    text.includes("specify")
   );
 }
 
@@ -735,16 +867,63 @@ function getClarificationRequest(
   };
 }
 
-function MarkdownContent({ content }: { content: string }) {
+function splitAssistantContent(
+  content: string,
+  reasoningContent?: string,
+): AssistantContentParts {
+  if (reasoningContent?.trim()) {
+    return { thought: reasoningContent.trim(), body: content };
+  }
+
+  const normalized = content.trim();
+  if (!normalized) {
+    return { thought: "", body: "" };
+  }
+
+  const lines = normalized.split(/\r?\n/);
+  const thoughtStart = lines.findIndex((line) =>
+    /^(?:#{1,6}\s*)?(?:Durable Context Summary|思考过程|流程回放|过程回放)\s*$/iu.test(
+      line.trim(),
+    ),
+  );
+  if (thoughtStart < 0) {
+    return { thought: "", body: content };
+  }
+
+  const bodyStart = lines.findIndex((line, index) => {
+    if (index <= thoughtStart + 2) {
+      return false;
+    }
+    const trimmed = line.trim();
+    return /^#{1,3}\s*(?:20\d{2}|[一二三四五六七八九十]+、|报告|.*报告)/u.test(
+      trimmed,
+    );
+  });
+
+  if (bodyStart > thoughtStart) {
+    return {
+      thought: lines.slice(thoughtStart, bodyStart).join("\n").trim(),
+      body: lines.slice(bodyStart).join("\n").trim(),
+    };
+  }
+
+  return { thought: normalized, body: "" };
+}
+
+function AssistantThinkingSummary({ content }: { content: string }) {
   return (
-    <div className="slotflow-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-      >
-        {normalizeMathForMarkdown(content)}
-      </ReactMarkdown>
-    </div>
+    <details className="group/thinking mb-4 overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground shadow-sm" open>
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-medium text-foreground [&::-webkit-details-marker]:hidden">
+        <span className="grid size-5 place-items-center rounded-full bg-primary/10 text-primary">
+          <Brain className="size-3.5" />
+        </span>
+        <span>已思考</span>
+        <ChevronDown className="ml-1 size-4 transition-transform group-open/thinking:rotate-180" />
+      </summary>
+      <div className="max-h-72 overflow-y-auto border-t border-border/70 px-3 py-2">
+        <MarkdownContent content={content} compact />
+      </div>
+    </details>
   );
 }
 

@@ -1,4 +1,4 @@
-"""模块一测试：领域模型和可读 ID。
+"""领域模型和可读 ID 测试。
 
 这组测试不碰 FastAPI，也不碰 agent。它只保护最底层的数据形状：
 
@@ -7,7 +7,7 @@
 - 空白提问和非法枚举是否会被拦住；
 - Pydantic 的默认 list/dict 是否彼此独立，避免一次请求污染下一次请求。
 
-后续模块会站在这些模型上继续往前走，所以这里的测试越清楚，后面定位问题越快。
+这些测试保护最底层的 API 数据契约，方便后续定位边界问题。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def test_id_helpers_create_readable_ids() -> None:
 
 
 def test_id_helpers_do_not_reuse_values_in_a_small_batch() -> None:
-    """本地学习阶段不需要分布式 ID，但至少不能在小批量里重复。"""
+    """本地 ID 至少不能在小批量里重复。"""
 
     ids = {new_thread_id() for _ in range(500)}
 
@@ -60,12 +60,12 @@ def test_thread_create_request_has_optional_title() -> None:
 
 
 def test_chat_stream_request_defaults_match_first_learning_flow() -> None:
-    """最小发送请求只需要 message，其余字段由后端给出学习阶段默认值。"""
+    """最小发送请求只需要 message，其余字段由后端给出默认值。"""
 
     request = ChatStreamRequest(message="解释一下 SlotFlow")
 
     assert request.message == "解释一下 SlotFlow"
-    assert request.model_name == "deepseek-v4-flash"
+    assert request.model_name == "deepseek-v4-pro"
     assert request.mode == "pro"
     assert request.agent_name == "default"
     assert request.files == []
@@ -103,7 +103,7 @@ def test_record_timestamps_are_timezone_aware_utc() -> None:
     """记录时间统一用 UTC，后面前端再按用户时区展示。"""
 
     now = utc_now()
-    thread = ThreadRecord(id="thread_test", title="学习")
+    thread = ThreadRecord(id="thread_test", title="测试")
     message = MessageRecord(id="msg_test", thread_id=thread.id, role="user", content="你好")
     run = RunRecord(
         id="run_test",
@@ -148,7 +148,7 @@ def test_run_record_starts_as_queued() -> None:
 
 
 def test_run_config_bundle_keeps_config_and_context_separate() -> None:
-    """config 和 context 先在模型层分开，模块三再负责具体构建逻辑。"""
+    """config 和 context 在模型层保持独立。"""
 
     context = RunContext(
         thread_id="thread_1",

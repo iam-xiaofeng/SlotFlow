@@ -1,13 +1,12 @@
 """SlotFlow 本地 agent runtime 装配层。
 
-这里不直接依赖 DeerFlow 包，而是把“真实 agent 怎么创建、checkpointer 怎么挂进去”
+这里不直接依赖外部应用包，而是把“真实 agent 怎么创建、checkpointer 怎么挂进去”
 这类运行时装配问题单独收拢成一个更小的本地边界。
 
 当前运行链路只保留真实 LangChain/LangGraph graph。测试如果需要稳定输出，通过
 `model_factory` 注入 fake chat model，而不是在生产代码里保留一套静态 adapter。
 
-后面如果要继续吸收 DeerFlow 的有价值能力，也应该优先在这里本地重写，而不是把旧项目
-整包 import 进来。
+扩展运行时能力时，优先在本地边界内实现，避免把无关应用层代码整包引入。
 """
 
 from __future__ import annotations
@@ -28,7 +27,8 @@ from app.chat.agent_adapter import (
     AgentAdapter,
     LangGraphEventAgentAdapter,
 )
-from app.chat.models import ChatStreamRequest, RunConfigBundle, RunContext
+from app.chat.model_catalog import DEFAULT_CHAT_MODEL, PROVIDER_DEFAULT_BASE_URLS
+from app.chat.models import ChatStreamRequest, ModelProvider, RunConfigBundle, RunContext
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 from app.harness.mcp import (
     McpToolProvider,
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = (
-    "你是 SlotFlow 的学习版助手，回答要简洁、具体。"
+    "你是 SlotFlow 助手，回答要简洁、具体。"
     "专业领域问题会由后端 skills preflight 先查找可用 Skill；"
     "你需要优先阅读该结果，必要时再用 find-skills/skill_install 补充。"
     "用户可见的报告、图表、可视化、流程图、对比表、交互演示和代码预览"
@@ -69,10 +69,10 @@ DEFAULT_MCP_CONFIG_PATH = Path(".slotflow/mcp.json")
 class SlotFlowRuntimeConfig:
     """SlotFlow 本地 runtime 的最小配置。
 
-    先只保留和当前学习链路直接相关的字段，不提前引入 DeerFlow 旧网关里的大而全配置树。
+    只保留运行链路直接需要的字段，避免引入不相关的大配置树。
     """
 
-    model_name: str = "deepseek-v4-flash"
+    model_name: str = DEFAULT_CHAT_MODEL
     checkpointer_backend: CheckpointerBackend = "memory"
     checkpointer_sqlite_path: Path = DEFAULT_CHECKPOINTER_SQLITE_PATH
     checkpointer_postgres_uri: str | None = None
@@ -103,7 +103,7 @@ class RuntimeBackedAgentAdapter:
         model_factory: Callable[[str], BaseChatModel] | None = None,
     ) -> None:
         self._runtime_config = runtime_config
-        self._model_factory = model_factory or (lambda model_name: create_deepseek_chat_model(model_name=model_name))
+        self._model_factory = model_factory or create_chat_model
         self._checkpointer = (
             create_checkpointer(runtime_config)
             if runtime_config.checkpointer_backend in ("none", "memory")
@@ -180,7 +180,7 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
     skills_config_store.ensure_default_find_skills()
 
     return SlotFlowRuntimeConfig(
-        model_name=os.environ.get("SLOTFLOW_DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        model_name=DEFAULT_CHAT_MODEL,
         checkpointer_backend=checkpointer_backend,
         checkpointer_sqlite_path=load_path_from_env(
             "SLOTFLOW_CHECKPOINTER_SQLITE_PATH",
@@ -627,23 +627,84 @@ async def aclose_checkpointer(checkpointer: Checkpointer | None) -> None:
                 await result
 
 
-def create_deepseek_chat_model(*, model_name: str) -> BaseChatModel:
-    """创建 DeepSeek OpenAI-compatible chat model。"""
+def create_chat_model(model_name: str) -> BaseChatModel:
+    """Create a chat model from the provider implied by the selected model id."""
+
+    provider = infer_model_provider(model_name)
+    if provider == "anthropic":
+        return create_anthropic_chat_model(model_name=model_name)
+    return create_openai_compatible_chat_model(
+        model_name=model_name,
+        provider=provider,
+    )
+
+
+def infer_model_provider(model_name: str) -> ModelProvider:
+    """Infer the provider from a frontend-selected model id."""
+
+    normalized = model_name.strip().lower()
+    if normalized.startswith("claude-"):
+        return "anthropic"
+    if normalized.startswith("gpt-") or normalized.startswith("o"):
+        return "openai"
+    return "deepseek"
+
+
+def create_openai_compatible_chat_model(
+    *,
+    model_name: str,
+    provider: ModelProvider,
+) -> BaseChatModel:
+    """Create DeepSeek/OpenAI-compatible chat models."""
 
     from langchain_openai import ChatOpenAI
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if provider == "openai":
+        api_key_name = "OPENAI_API_KEY"
+        base_url = os.environ.get("OPENAI_BASE_URL")
+    else:
+        api_key_name = "DEEPSEEK_API_KEY"
+        base_url = os.environ.get("DEEPSEEK_BASE_URL") or PROVIDER_DEFAULT_BASE_URLS["deepseek"]
+
+    api_key = os.environ.get(api_key_name)
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY is required for DeepSeek runtime")
+        raise RuntimeError(f"{api_key_name} is required for {provider} runtime")
 
     return ChatOpenAI(
         model=model_name,
         api_key=api_key,
-        base_url="https://api.deepseek.com",
+        base_url=base_url,
         streaming=True,
         timeout=30,
         max_retries=0,
     )
+
+
+def create_anthropic_chat_model(*, model_name: str) -> BaseChatModel:
+    """Create an Anthropic chat model for Claude ids."""
+
+    try:
+        from langchain_anthropic import ChatAnthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "langchain-anthropic is required for Anthropic runtime"
+        ) from exc
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is required for Anthropic runtime")
+
+    kwargs: dict[str, object] = {
+        "model": model_name,
+        "api_key": api_key,
+        "streaming": True,
+        "timeout": 30,
+        "max_retries": 0,
+    }
+    base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    if base_url and base_url.strip():
+        kwargs["base_url"] = base_url.strip()
+    return ChatAnthropic(**kwargs)
 
 
 def create_langgraph_agent_graph(

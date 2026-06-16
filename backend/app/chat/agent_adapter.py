@@ -1,7 +1,5 @@
 """LangGraph v3 event streaming 的业务适配层。
 
-模块四开始接近真实 agent，但它仍然不碰 FastAPI，也不直接产出 SSE。
-
 这一层只做一件事：把 LangGraph / LangChain agent 的 v3 typed projections
 整理成 SlotFlow 自己的 `AgentEvent`。
 
@@ -16,8 +14,6 @@
 - `tool.delta`：工具调用相关片段；
 - `state.snapshot`：本次 run 的状态快照；
 - `run.finished`：agent 已经完成。
-
-模块五会继续把这些 `AgentEvent` 编码成 SSE 文本帧。
 """
 
 from __future__ import annotations
@@ -42,6 +38,8 @@ AgentEventName = Literal[
     "state.snapshot",
     "run.finished",
 ]
+REASONING_TEXT_KEYS = ("reasoning_content", "reasoning", "reasoning_delta", "thinking")
+REASONING_NESTED_KEYS = ("additional_kwargs", "response_metadata", "delta")
 
 
 class AgentEvent(BaseModel):
@@ -256,7 +254,7 @@ def build_agent_input(
     """把 SlotFlow 请求体整理成 LangChain agent 输入。
 
     LangChain agent 的标准输入是 `{"messages": [...]}`。这里先只放一条 user
-    message。后续模块六会从仓库里读取 thread 历史，再把多轮 messages 拼进去。
+    message。后续可以从仓库里读取 thread 历史，再把多轮 messages 拼进去。
     """
 
     return {
@@ -348,8 +346,9 @@ def projection_item_to_agent_event(
     """
 
     if projection == "messages":
-        delta = extract_message_delta(item)
-        if not delta:
+        message_delta = extract_message_delta_parts(item)
+        delta = message_delta.get("content") or message_delta.get("reasoning_content")
+        if not isinstance(delta, str) or not delta:
             return None
         return AgentEvent(
             event="message.delta",
@@ -357,6 +356,7 @@ def projection_item_to_agent_event(
                 "message_id": assistant_message_id(bundle),
                 "role": "assistant",
                 "delta": delta,
+                "channel": "content" if message_delta.get("content") else "reasoning",
                 "index": None,
             },
         )
@@ -388,36 +388,92 @@ def extract_message_delta(item: Any) -> str:
     这里只抽取文本，不尝试理解更多元数据。复杂字段后面可以单独加测试扩展。
     """
 
+    parts = extract_message_delta_parts(item)
+    return str(parts.get("content") or parts.get("reasoning_content") or "")
+
+
+def extract_message_delta_parts(item: Any) -> dict[str, str]:
+    """Extract DeepSeek-style message deltas split by output channel.
+
+    DeepSeek thinking mode returns assistant output as separate `content` and
+    `reasoning_content` fields. SlotFlow preserves that distinction so the UI
+    can render reasoning in a separate collapsible block instead of mixing it
+    into the final answer.
+    """
+
     if isinstance(item, tuple) and item:
-        return extract_message_delta(item[0])
+        return extract_message_delta_parts(item[0])
 
     if isinstance(item, dict):
+        reasoning = extract_reasoning_text(item)
+        if reasoning:
+            return {"reasoning_content": reasoning}
+
         event_type = item.get("event")
         if event_type == "content-block-delta":
             delta = item.get("delta")
             if isinstance(delta, dict):
+                reasoning = extract_reasoning_text(delta)
+                if reasoning:
+                    return {"reasoning_content": reasoning}
                 text = delta.get("text")
                 if isinstance(text, str):
-                    return text
+                    return {"content": text}
         if event_type == "content-block-start":
             content = item.get("content")
             if isinstance(content, dict):
+                reasoning = extract_reasoning_text(content)
+                if reasoning:
+                    return {"reasoning_content": reasoning}
                 text = content.get("text")
                 if isinstance(text, str) and text:
-                    return text
+                    return {"content": text}
         for key in ("delta", "content", "text"):
             value = item.get(key)
             if isinstance(value, str):
-                return value
+                return {"content": value}
         message = item.get("message")
         if message is not None:
-            return extract_message_delta(message)
-        return ""
+            return extract_message_delta_parts(message)
+        return {}
 
+    reasoning = extract_reasoning_text(item)
+    if reasoning:
+        return {"reasoning_content": reasoning}
     content = getattr(item, "content", None)
     if isinstance(content, str):
-        return content
+        return {"content": content}
 
+    return {}
+
+
+def extract_reasoning_text(item: Any) -> str:
+    """Return a reasoning/thinking text fragment from common model shapes."""
+
+    if isinstance(item, dict):
+        for key in REASONING_TEXT_KEYS:
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+        nested = extract_nested_reasoning_text(item)
+        if nested:
+            return nested
+        return ""
+
+    for attr in REASONING_TEXT_KEYS:
+        value = getattr(item, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return extract_nested_reasoning_text(item)
+
+
+def extract_nested_reasoning_text(item: Any) -> str:
+    for key in REASONING_NESTED_KEYS:
+        nested = item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+        if isinstance(nested, dict):
+            text = extract_reasoning_text(nested)
+            if text:
+                return text
     return ""
 
 
@@ -537,6 +593,9 @@ def normalize_message(message: Any) -> dict[str, Any]:
             "role": role,
             "content": content,
         }
+        reasoning = extract_reasoning_text(message)
+        if reasoning:
+            normalized["reasoning_content"] = reasoning
         if isinstance(message.get("id"), str):
             normalized["id"] = message["id"]
         if isinstance(message.get("name"), str):
@@ -549,6 +608,9 @@ def normalize_message(message: Any) -> dict[str, Any]:
         "role": role,
         "content": content,
     }
+    reasoning = extract_reasoning_text(message)
+    if reasoning:
+        normalized["reasoning_content"] = reasoning
     message_id = getattr(message, "id", None)
     if isinstance(message_id, str):
         normalized["id"] = message_id

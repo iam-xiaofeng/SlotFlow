@@ -1,10 +1,11 @@
 import {
   type ChangeEvent,
   type ClipboardEvent,
+  type CompositionEvent,
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
-  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -37,9 +38,21 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { type UploadedFileRecord, resolveUploadRawUrl } from "@/lib/chat-stream";
-import { cn } from "@/lib/utils";
+import {
+  type ChatMode,
+  type ModelOptionRecord,
+  type UploadedFileRecord,
+  resolveUploadRawUrl,
+} from "@/lib/chat-stream";
 
 import { displayFileName, formatFileSize, isImageFile } from "./chat-format";
 
@@ -49,7 +62,11 @@ type ChatComposerProps = {
   fileInputRef: RefObject<HTMLInputElement | null>;
   isStreaming: boolean;
   isUploading: boolean;
+  isLoadingModels: boolean;
+  modelOptions: ModelOptionRecord[];
   queuedMessages: ComposerQueuedMessage[];
+  selectedMode: ChatMode;
+  selectedModelName: string;
   onAttachFiles: () => void;
   onCancel: () => void;
   onClearError: () => void;
@@ -57,6 +74,8 @@ type ChatComposerProps = {
   onPasteFiles: (files: File[]) => void | Promise<void>;
   onRemoveAttachment: (fileId: string) => void;
   onRemoveQueuedMessage: (messageId: string) => void;
+  onModeChange: (mode: ChatMode) => void;
+  onModelChange: (modelName: string) => void;
   onSendMessage: (message: string) => Promise<boolean>;
 };
 
@@ -73,7 +92,11 @@ export function ChatComposer({
   fileInputRef,
   isStreaming,
   isUploading,
+  isLoadingModels,
+  modelOptions,
   queuedMessages,
+  selectedMode,
+  selectedModelName,
   onAttachFiles,
   onCancel,
   onClearError,
@@ -81,22 +104,38 @@ export function ChatComposer({
   onPasteFiles,
   onRemoveAttachment,
   onRemoveQueuedMessage,
+  onModeChange,
+  onModelChange,
   onSendMessage,
 }: ChatComposerProps) {
   const [input, setInput] = useState("");
-  const [isExpanded, setIsExpanded] = useState(false);
+  const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const canSend = (Boolean(input.trim()) || attachments.length > 0) && !isUploading;
+
+  useLayoutEffect(() => {
+    resizeComposerTextarea(textareaRef.current);
+  }, [input]);
 
   function handleInputChange(event: ChangeEvent<HTMLTextAreaElement>) {
     const nextValue = event.target.value;
     setInput(nextValue);
-    const nextExpanded = shouldUseExpandedComposer(nextValue);
-    setIsExpanded((current) => (current === nextExpanded ? current : nextExpanded));
+    resizeComposerTextarea(event.currentTarget);
+  }
+
+  function handleCompositionStart() {
+    isComposingRef.current = true;
+  }
+
+  function handleCompositionEnd(event: CompositionEvent<HTMLTextAreaElement>) {
+    isComposingRef.current = false;
+    const nextValue = event.currentTarget.value;
+    setInput(nextValue);
+    resizeComposerTextarea(event.currentTarget);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.nativeEvent.isComposing) {
+    if (event.nativeEvent.isComposing || isComposingRef.current) {
       return;
     }
 
@@ -113,11 +152,9 @@ export function ChatComposer({
     }
 
     setInput("");
-    setIsExpanded(false);
     const accepted = await onSendMessage(text);
     if (!accepted) {
       setInput(text);
-      setIsExpanded(shouldUseExpandedComposer(text));
     }
   }
 
@@ -157,58 +194,36 @@ export function ChatComposer({
         />
 
         <div
-          className={cn(
-            "rounded-3xl border border-input bg-background shadow-sm",
-            isExpanded ? "px-4 py-3" : "flex min-h-14 items-center gap-2 px-3 py-2",
-          )}
+          className="rounded-3xl border border-input bg-background px-4 py-3 shadow-sm"
         >
-          {isExpanded ? (
-            <>
-              <ComposerTextarea
-                input={input}
-                textareaRef={textareaRef}
-                onInputChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                onPasteFiles={onPasteFiles}
-              />
-              <div className="mt-3 flex items-center justify-between gap-2">
-                <ComposerTools
-                  disabled={isUploading}
-                  isUploading={isUploading}
-                  onAttachFiles={onAttachFiles}
-                />
-                <ComposerActions
-                  canSend={canSend}
-                  isStreaming={isStreaming}
-                  onCancel={onCancel}
-                  onSend={() => void submitCurrentInput()}
-                />
-              </div>
-            </>
-          ) : (
-            <>
-              <ComposerTools
-                compact
-                disabled={isUploading}
-                isUploading={isUploading}
-                onAttachFiles={onAttachFiles}
-              />
-              <ComposerTextarea
-                compact
-                input={input}
-                textareaRef={textareaRef}
-                onInputChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                onPasteFiles={onPasteFiles}
-              />
-              <ComposerActions
-                canSend={canSend}
-                isStreaming={isStreaming}
-                onCancel={onCancel}
-                onSend={() => void submitCurrentInput()}
-              />
-            </>
-          )}
+          <ComposerTextarea
+            input={input}
+            textareaRef={textareaRef}
+            onCompositionEnd={handleCompositionEnd}
+            onCompositionStart={handleCompositionStart}
+            onInputChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            onPasteFiles={onPasteFiles}
+          />
+          <div className="mt-3 flex items-center justify-between gap-2">
+            <ComposerTools
+              disabled={isUploading}
+              isUploading={isUploading}
+              onAttachFiles={onAttachFiles}
+            />
+            <ComposerActions
+              canSend={canSend}
+              isStreaming={isStreaming}
+              isLoadingModels={isLoadingModels}
+              modelOptions={modelOptions}
+              selectedMode={selectedMode}
+              selectedModelName={selectedModelName}
+              onCancel={onCancel}
+              onModeChange={onModeChange}
+              onModelChange={onModelChange}
+              onSend={() => void submitCurrentInput()}
+            />
+          </div>
         </div>
       </div>
     </form>
@@ -327,16 +342,18 @@ function ComposerAttachments({
 }
 
 function ComposerTextarea({
-  compact = false,
   input,
   textareaRef,
+  onCompositionEnd,
+  onCompositionStart,
   onInputChange,
   onKeyDown,
   onPasteFiles,
 }: {
-  compact?: boolean;
   input: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
+  onCompositionEnd: (event: CompositionEvent<HTMLTextAreaElement>) => void;
+  onCompositionStart: () => void;
   onInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onPasteFiles: (files: File[]) => void | Promise<void>;
@@ -355,17 +372,28 @@ function ComposerTextarea({
       ref={textareaRef}
       value={input}
       onChange={onInputChange}
+      onCompositionEnd={onCompositionEnd}
+      onCompositionStart={onCompositionStart}
       rows={1}
       placeholder="有问题，尽管问"
       onKeyDown={onKeyDown}
       onPaste={handlePaste}
       wrap="soft"
-      className={cn(
-        "max-h-[min(40dvh,12rem)] min-h-8 min-w-0 resize-none overflow-y-auto border-0 bg-transparent px-0 py-0 text-lg leading-7 shadow-none [overflow-wrap:anywhere] focus-visible:ring-0",
-        compact && "flex-1 break-words",
-      )}
+      className="block max-h-[min(40dvh,12rem)] min-h-8 w-full min-w-0 resize-none overflow-hidden border-0 bg-transparent px-0 py-0 text-lg leading-7 shadow-none [field-sizing:fixed] [overflow-wrap:anywhere] focus-visible:ring-0"
     />
   );
+}
+
+function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
+  if (!element) {
+    return;
+  }
+
+  const maxHeight = Math.min(window.innerHeight * 0.4, 192);
+  element.style.height = "0px";
+  const nextHeight = Math.min(element.scrollHeight, maxHeight);
+  element.style.height = `${Math.max(nextHeight, 32)}px`;
+  element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function extractClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>): File[] {
@@ -396,25 +424,19 @@ function defaultAttachmentMessage(files: UploadedFileRecord[]) {
   return "请查看这些附件。";
 }
 
-function shouldUseExpandedComposer(value: string) {
-  return value.includes("\n") || value.length > 48;
-}
-
 type ComposerToolsProps = {
-  compact?: boolean;
   disabled: boolean;
   isUploading: boolean;
   onAttachFiles: () => void;
 };
 
 function ComposerTools({
-  compact = false,
   disabled,
   isUploading,
   onAttachFiles,
 }: ComposerToolsProps) {
   return (
-    <div className={cn("flex items-center gap-1", compact && "shrink-0")}>
+    <div className="flex items-center gap-1">
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
@@ -488,18 +510,41 @@ function ComposerTools({
 type ComposerActionsProps = {
   canSend: boolean;
   isStreaming: boolean;
+  isLoadingModels: boolean;
+  modelOptions: ModelOptionRecord[];
+  selectedMode: ChatMode;
+  selectedModelName: string;
   onCancel: () => void;
+  onModeChange: (mode: ChatMode) => void;
+  onModelChange: (modelName: string) => void;
   onSend: () => void;
 };
 
 function ComposerActions({
   canSend,
   isStreaming,
+  isLoadingModels,
+  modelOptions,
+  selectedMode,
+  selectedModelName,
   onCancel,
+  onModeChange,
+  onModelChange,
   onSend,
 }: ComposerActionsProps) {
   return (
-    <div className="flex shrink-0 items-center gap-1">
+    <div className="flex min-w-0 shrink-0 items-center gap-1">
+      <ComposerModeSelect
+        value={selectedMode}
+        disabled={isStreaming}
+        onChange={onModeChange}
+      />
+      <ComposerModelSelect
+        value={selectedModelName}
+        options={modelOptions}
+        disabled={isLoadingModels || isStreaming}
+        onChange={onModelChange}
+      />
       <Button
         type="button"
         variant="ghost"
@@ -552,5 +597,77 @@ function ComposerActions({
         </Button>
       )}
     </div>
+  );
+}
+
+function ComposerModeSelect({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: ChatMode;
+  disabled: boolean;
+  onChange: (mode: ChatMode) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => onChange(nextValue as ChatMode)}
+      disabled={disabled}
+    >
+      <SelectTrigger size="sm" className="w-[74px] rounded-full border-transparent bg-muted/70">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent side="top" align="end" className="min-w-28">
+        <SelectGroup>
+          {(["flash", "pro", "ultra"] as ChatMode[]).map((mode) => (
+            <SelectItem key={mode} value={mode}>
+              {mode}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+function ComposerModelSelect({
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  options: ModelOptionRecord[];
+  disabled: boolean;
+  onChange: (modelName: string) => void;
+}) {
+  const hasOptions = options.length > 0;
+  return (
+    <Select
+      value={hasOptions ? value : ""}
+      onValueChange={(nextValue) => {
+        if (nextValue) {
+          onChange(nextValue);
+        }
+      }}
+      disabled={disabled || !hasOptions}
+    >
+      <SelectTrigger
+        size="sm"
+        className="max-w-[13rem] rounded-full border-transparent bg-muted/70 sm:w-[12rem]"
+      >
+        <SelectValue>{hasOptions ? value : "models"}</SelectValue>
+      </SelectTrigger>
+      <SelectContent side="top" align="end" className="min-w-64">
+        <SelectGroup>
+          {options.map((model) => (
+            <SelectItem key={`${model.provider}:${model.id}`} value={model.id}>
+              <span className="truncate">{model.label}</span>
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
   );
 }
