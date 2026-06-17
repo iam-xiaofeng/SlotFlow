@@ -2,7 +2,6 @@
 
 from app.harness.mcp.config import SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.mcp.loader import (
-    AsyncMcpToolProvider,
     EmptyMcpToolProvider,
     McpToolProvider,
     MultiServerMcpToolProvider,
@@ -18,7 +17,6 @@ from app.harness.mcp.store import (
 )
 
 __all__ = [
-    "AsyncMcpToolProvider",
     "EmptyMcpToolProvider",
     "McpServerNotFoundError",
     "McpToolProvider",

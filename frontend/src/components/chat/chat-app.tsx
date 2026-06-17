@@ -15,7 +15,7 @@ import {
   SidebarInset,
   SidebarProvider,
 } from "@/components/ui/sidebar";
-import { type ChatUiMessage, useChatStream } from "@/hooks/use-chat-stream";
+import { useChatStream } from "@/hooks/use-chat-stream";
 import { mergeWorkspaceEntries } from "@/hooks/use-chat-stream-helpers";
 import {
   type ChatMode,
@@ -88,8 +88,6 @@ type QueuedChatMessage = {
   mode: ChatMode;
   thinkingEnabled: boolean;
 };
-
-const artifactPanelWidthVariable = "--slotflow-artifact-panel-width";
 
 export function ChatApp() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
@@ -201,7 +199,7 @@ export function ChatApp() {
 
     async function bootstrap() {
       setIsLoadingThreads(true);
-      const nextThreads = await refreshThreads();
+      await refreshThreads();
       if (!active) {
         return;
       }

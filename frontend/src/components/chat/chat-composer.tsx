@@ -19,7 +19,6 @@ import {
 import {
   type ComposerQueuedMessage,
   type ComposerTodo,
-  MODE_OPTIONS,
   ComposerActions,
   ComposerAttachments,
   ComposerError,
