@@ -24,7 +24,6 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.chat.agent_adapter import AgentAdapter
 from app.chat.models import (
     ChatStreamRequest,
     MessageRecord,
@@ -39,6 +38,7 @@ from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotF
 from app.chat.run_config import build_run_config, request_thinking_enabled
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
 from app.chat.title_generation import maybe_generate_thread_title
+from app.dependencies import get_agent_adapter, get_chat_repo, get_upload_store
 from app.uploads.models import UploadedFileRecord
 from app.uploads.storage import SlotFlowUploadStore, UploadNotFoundError
 
@@ -64,14 +64,14 @@ async def create_thread(
     `runs/stream` 接口。
     """
 
-    return get_repo(request).create_thread(title=body.title)
+    return get_chat_repo(request).create_thread(title=body.title)
 
 
 @router.get("/threads", response_model=list[ThreadRecord])
 async def list_threads(request: Request) -> list[ThreadRecord]:
     """列出所有会话，最近活动的排在前面。"""
 
-    return get_repo(request).list_threads()
+    return get_chat_repo(request).list_threads()
 
 
 @router.get("/search", response_model=list[ThreadSearchResultRecord])
@@ -82,14 +82,14 @@ async def search_threads(
 ) -> list[ThreadSearchResultRecord]:
     """Search stored thread titles and message content."""
 
-    return get_repo(request).search_threads(q, limit=limit)
+    return get_chat_repo(request).search_threads(q, limit=limit)
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadRecord)
 async def get_thread(thread_id: str, request: Request) -> ThreadRecord:
     """读取单条会话，不存在时返回 404。"""
 
-    repo = get_repo(request)
+    repo = get_chat_repo(request)
     try:
         return repo.get_thread(thread_id)
     except ThreadNotFoundError as exc:
@@ -100,7 +100,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadRecord:
 async def delete_thread(thread_id: str, request: Request) -> None:
     """删除一条会话及其消息记录。"""
 
-    repo = get_repo(request)
+    repo = get_chat_repo(request)
     try:
         repo.delete_thread(thread_id)
     except ThreadNotFoundError as exc:
@@ -111,7 +111,7 @@ async def delete_thread(thread_id: str, request: Request) -> None:
 async def list_messages(thread_id: str, request: Request) -> list[MessageRecord]:
     """读取某个 thread 下已经保存的消息。"""
 
-    repo = get_repo(request)
+    repo = get_chat_repo(request)
     try:
         return repo.list_messages(thread_id)
     except ThreadNotFoundError as exc:
@@ -138,7 +138,7 @@ async def stream_thread_run(
     8. 根据流式结果更新 run 状态和 assistant 消息。
     """
 
-    repo = get_repo(request)
+    repo = get_chat_repo(request)
     adapter = get_agent_adapter(request)
 
     try:
@@ -457,21 +457,3 @@ def uploaded_file_to_context(record: UploadedFileRecord) -> UploadedFileContext:
     """把上传存储层记录转换成 chat runtime 使用的上下文记录。"""
 
     return UploadedFileContext.model_validate(record.model_dump())
-
-
-def get_repo(request: Request) -> ChatRepository:
-    """从 app.state 取 chat 仓库。"""
-
-    return request.app.state.chat_repo
-
-
-def get_agent_adapter(request: Request) -> AgentAdapter:
-    """从 app.state 取 agent adapter。"""
-
-    return request.app.state.agent_adapter
-
-
-def get_upload_store(request: Request) -> SlotFlowUploadStore:
-    """从 app.state 取上传文件存储边界。"""
-
-    return request.app.state.upload_store

@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -341,17 +341,7 @@ def validate_install_request(*, package_url: str, skill_name: str) -> None:
 
 
 def replace_skill_config(config: SkillConfig, **updates: Any) -> SkillConfig:
-    values = {
-        "enabled": config.enabled,
-        "protected": config.protected,
-        "source": config.source,
-        "package_url": config.package_url,
-        "order": config.order,
-        "pinned": config.pinned,
-        "parent": config.parent,
-    }
-    values.update(updates)
-    return SkillConfig(**values)
+    return replace(config, **updates)
 
 
 def next_skill_order(configs: dict[str, SkillConfig]) -> int:

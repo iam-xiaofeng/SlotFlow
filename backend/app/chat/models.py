@@ -9,26 +9,18 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.clock import utc_now
 
 
 ChatMode = Literal["flash", "pro", "ultra"]
 MessageRole = Literal["user", "assistant", "system", "tool"]
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 ModelProvider = Literal["deepseek", "openai", "anthropic"]
-
-
-def utc_now() -> datetime:
-    """返回当前 UTC 时间。
-
-    用一个小函数包起来，是为了让所有记录的时间来源一致。以后如果测试需要固定
-    时间，或者要换成数据库自动时间戳，也只需要调整这一处附近的代码。
-    """
-
-    return datetime.now(UTC)
 
 
 class ThreadCreateRequest(BaseModel):

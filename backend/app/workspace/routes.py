@@ -7,8 +7,8 @@ import mimetypes
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
+from app.dependencies import get_upload_store
 from app.harness.sandbox import WorkspacePathError
-from app.uploads.storage import SlotFlowUploadStore
 from app.workspace.models import WorkspaceEntryRecord, WorkspaceReadRecord
 
 
@@ -109,9 +109,3 @@ async def delete_artifact(
 
     target.unlink()
     return Response(status_code=204)
-
-
-def get_upload_store(request: Request) -> SlotFlowUploadStore:
-    """Read upload store from app.state."""
-
-    return request.app.state.upload_store

@@ -7,9 +7,9 @@ import mimetypes
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
+from app.dependencies import get_upload_store
 from app.uploads.models import UploadedFileRecord
 from app.uploads.storage import (
-    SlotFlowUploadStore,
     UploadFileTooLargeError,
     UploadNotFoundError,
 )
@@ -72,9 +72,3 @@ async def raw_uploaded_file(
         media_type=media_type or "application/octet-stream",
         headers={"Content-Disposition": "inline"},
     )
-
-
-def get_upload_store(request: Request) -> SlotFlowUploadStore:
-    """Read upload store from app.state."""
-
-    return request.app.state.upload_store

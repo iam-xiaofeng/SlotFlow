@@ -18,6 +18,7 @@ from app.harness.middleware import build_harness_middleware
 from app.harness.skills import build_skills_prompt, load_enabled_skills
 from app.harness.state import SlotFlowAgentState
 from app.harness.tools import build_harness_tools
+from app.harness.utils import model_supports_tools
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import AgentMiddleware
@@ -82,14 +83,6 @@ def build_slotflow_harness_graph(
         ),
         checkpointer=checkpointer,
     )
-
-
-def model_supports_tools(model: str | BaseChatModel) -> bool:
-    """Return whether the selected model can bind LangChain tools."""
-
-    if isinstance(model, str):
-        return True
-    return type(model).bind_tools is not BaseChatModel.bind_tools
 
 
 def build_system_prompt(

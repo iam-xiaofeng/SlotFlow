@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Literal
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.clock import utc_now
+
 MemoryKind = Literal["manual", "preference", "profile", "topic", "fact"]
 MEMORY_KINDS: set[str] = {"manual", "preference", "profile", "topic", "fact"}
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 class MemoryRecord(BaseModel):

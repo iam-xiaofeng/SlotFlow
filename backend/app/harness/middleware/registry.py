@@ -33,6 +33,7 @@ from app.harness.middleware.tool_safety import SlotFlowToolSafetyMiddleware
 from app.harness.middleware.uploads_middleware import SlotFlowUploadsMiddleware
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.state import SlotFlowAgentState
+from app.harness.utils import dedupe_by_name
 
 
 SlotFlowAgentMiddleware = AgentMiddleware[SlotFlowAgentState, RunContext]
@@ -107,19 +108,4 @@ def build_harness_middleware(
     if resolved.runtime_summary_enabled:
         middleware.append(SlotFlowRuntimeSummaryMiddleware(features=features))
 
-    return dedupe_middleware_by_name(middleware)
-
-
-def dedupe_middleware_by_name(
-    middleware: list[SlotFlowAgentMiddleware],
-) -> list[SlotFlowAgentMiddleware]:
-    """Deduplicate by middleware.name, preserving the first instance."""
-
-    seen_names: set[str] = set()
-    unique: list[SlotFlowAgentMiddleware] = []
-    for item in middleware:
-        if item.name in seen_names:
-            continue
-        unique.append(item)
-        seen_names.add(item.name)
-    return unique
+    return dedupe_by_name(middleware)
