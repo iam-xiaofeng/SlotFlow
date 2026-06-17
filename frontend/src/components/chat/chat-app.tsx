@@ -58,7 +58,7 @@ import {
 
 import { ArtifactWorkspacePanel } from "./artifact-panel";
 import { ChatComposer } from "./chat-composer";
-import { makeThreadTitle } from "./chat-format";
+import { filterThreadArtifacts, makeThreadTitle } from "./chat-format";
 import { ThreadSidebar } from "./chat-sidebar";
 import { EmptyState, MessageList } from "./message-list";
 
@@ -225,10 +225,6 @@ export function ChatApp() {
     writeThreadArtifactIndex(threadArtifactPaths);
   }, [threadArtifactPaths]);
 
-  const filteredThreads = useMemo(() => {
-    return threads;
-  }, [threads]);
-
   const artifactFiles = useMemo(
     () => artifacts.filter((artifact) => artifact.kind === "file"),
     [artifacts],
@@ -237,7 +233,7 @@ export function ChatApp() {
     if (!thread) {
       return [];
     }
-    return getThreadArtifactFiles(thread.id, artifactFiles, threadArtifactPaths, messages);
+    return filterThreadArtifacts(thread.id, artifactFiles, threadArtifactPaths, messages);
   }, [artifactFiles, messages, thread?.id, threadArtifactPaths]);
   const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
   const isRunSettingsLocked = messages.length > 0;
@@ -819,7 +815,7 @@ export function ChatApp() {
         setArtifactPreview(null);
         setArtifactPreviewError(null);
         const nextFile = thread
-          ? getThreadArtifactFiles(
+          ? filterThreadArtifacts(
               thread.id,
               nextArtifacts.filter((item) => item.kind === "file"),
               removeArtifactPathFromThreadIndex(threadArtifactPaths, artifact.path),
@@ -984,7 +980,7 @@ export function ChatApp() {
         <ThreadSidebar
           activeThreadId={thread?.id ?? null}
           disabled={isConversationBusy}
-          filteredThreads={filteredThreads}
+          filteredThreads={threads}
           artifacts={artifacts}
           threadArtifactPaths={threadArtifactPaths}
           skills={skills}
@@ -1147,24 +1143,6 @@ function mergeWorkspaceEntries(
     merged.set(entry.path, entry);
   }
   return [...merged.values()];
-}
-
-function getThreadArtifactFiles(
-  threadId: string,
-  artifacts: WorkspaceEntryRecord[],
-  threadArtifactPaths: ThreadArtifactIndex,
-  messages: ChatUiMessage[] = [],
-): WorkspaceEntryRecord[] {
-  const explicitPaths = new Set(threadArtifactPaths[threadId] ?? []);
-  const threadPrefix = `artifacts/${threadId}/`;
-  const messageText = messages.map((message) => message.content).join("\n");
-  return artifacts.filter(
-    (artifact) =>
-      explicitPaths.has(artifact.path) ||
-      artifact.path.startsWith(threadPrefix) ||
-      messageText.includes(artifact.path) ||
-      messageText.includes(artifact.path.replace(/^artifacts\//, "")),
-  );
 }
 
 function removeArtifactPathFromThreadIndex(

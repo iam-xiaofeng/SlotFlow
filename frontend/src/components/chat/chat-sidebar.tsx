@@ -69,6 +69,8 @@ import {
 } from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
 
+import { filterThreadArtifacts, formatFileSize } from "./chat-format";
+
 type ThreadSidebarProps = {
   activeThreadId: string | null;
   artifacts: WorkspaceEntryRecord[];
@@ -940,7 +942,7 @@ function ArtifactList({
           const title = artifact.path.replace(/^artifacts\//, "");
           const description = [
             artifact.kind,
-            typeof artifact.size_bytes === "number" ? formatBytes(artifact.size_bytes) : null,
+            typeof artifact.size_bytes === "number" ? formatFileSize(artifact.size_bytes) : null,
           ].filter(Boolean).join(" · ");
           return (
             <ContextRecordRow
@@ -968,16 +970,6 @@ function ArtifactList({
       </div>
     </div>
   );
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ContextRecordRow({
@@ -1519,8 +1511,8 @@ function ThreadHistory({
               </div>
             ) : (
               filteredThreads.map((item) => {
-                const threadArtifacts = getThreadArtifacts(
-                  item,
+                const threadArtifacts = filterThreadArtifacts(
+                  item.id,
                   artifactFiles,
                   threadArtifactPaths,
                 );
@@ -1623,26 +1615,6 @@ function ThreadArtifactSubmenu({
         )}
       </DropdownMenuSubContent>
     </DropdownMenuSub>
-  );
-}
-
-function getThreadArtifacts(
-  thread: ThreadRecord,
-  artifacts: WorkspaceEntryRecord[],
-  threadArtifactPaths: Record<string, string[]>,
-): WorkspaceEntryRecord[] {
-  return getThreadArtifactsById(thread.id, artifacts, threadArtifactPaths);
-}
-
-function getThreadArtifactsById(
-  threadId: string,
-  artifacts: WorkspaceEntryRecord[],
-  threadArtifactPaths: Record<string, string[]>,
-): WorkspaceEntryRecord[] {
-  const explicitPaths = new Set(threadArtifactPaths[threadId] ?? []);
-  const threadPrefix = `artifacts/${threadId}/`;
-  return artifacts.filter(
-    (artifact) => explicitPaths.has(artifact.path) || artifact.path.startsWith(threadPrefix),
   );
 }
 
