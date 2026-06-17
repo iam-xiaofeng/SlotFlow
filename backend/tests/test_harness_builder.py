@@ -286,7 +286,7 @@ def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None
         return fake_graph
 
     monkeypatch.setattr(
-        runtime_module,
+        runtime_module.adapter,
         "build_slotflow_harness_graph",
         fake_build_slotflow_harness_graph,
     )

@@ -199,7 +199,7 @@ def test_runtime_passes_sandbox_config_to_harness(monkeypatch, tmp_path: Path) -
         return object()
 
     monkeypatch.setattr(
-        runtime_module,
+        runtime_module.adapter,
         "build_slotflow_harness_graph",
         fake_build_slotflow_harness_graph,
     )

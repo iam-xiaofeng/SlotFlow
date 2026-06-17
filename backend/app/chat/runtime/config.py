@@ -1,0 +1,356 @@
+"""SlotFlow 本地 runtime 的配置与环境装配。
+
+把 “这次运行用什么模型、checkpointer、skills、MCP、middleware、sandbox” 收拢成一个
+最小配置 `SlotFlowRuntimeConfig`，并提供从环境变量装配它的入口。这里只读配置，不创建
+模型，也不组装 graph。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+from app.chat.model_catalog import DEFAULT_CHAT_MODEL
+from app.chat.runtime.env import (
+    load_bool_from_env,
+    load_optional_csv_list_from_env,
+    load_optional_csv_set_from_env,
+    load_optional_path_from_env,
+    load_optional_text_from_env,
+    load_path_from_env,
+    load_positive_int_from_env,
+)
+from app.harness.mcp import (
+    McpToolProvider,
+    MultiServerMcpToolProvider,
+    SlotFlowMcpConfig,
+    SlotFlowMcpConfigStore,
+    SlotFlowMcpServerConfig,
+    is_removed_default_mcp_server,
+)
+from app.harness.memory import SlotFlowMemoryStore
+from app.harness.middleware import SlotFlowMiddlewareConfig
+from app.harness.sandbox import SlotFlowSandboxConfig
+from app.harness.skills import SlotFlowSkillsConfigStore, load_enabled_skills
+
+
+CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
+
+DEFAULT_DEEPSEEK_SYSTEM_PROMPT = (
+    "你是 SlotFlow 助手，回答要简洁、具体。"
+    "专业领域问题会由后端 skills preflight 先查找可用 Skill；"
+    "你需要优先阅读该结果，必要时再用 find-skills/skill_install 补充。"
+    "用户可见的报告、图表、可视化、流程图、对比表、交互演示和代码预览"
+    "默认写入 artifact。"
+)
+DEFAULT_CHECKPOINTER_SQLITE_PATH = Path(".slotflow/checkpoints.sqlite3")
+DEFAULT_SKILLS_ROOT = Path(".slotflow/skills")
+DEFAULT_SKILLS_CONFIG_PATH = Path(".slotflow/skills.json")
+DEFAULT_MEMORY_SQLITE_PATH = Path(".slotflow/memory.sqlite3")
+DEFAULT_MCP_CONFIG_PATH = Path(".slotflow/mcp.json")
+
+
+@dataclass(slots=True)
+class SlotFlowRuntimeConfig:
+    """SlotFlow 本地 runtime 的最小配置。
+
+    只保留运行链路直接需要的字段，避免引入不相关的大配置树。
+    """
+
+    model_name: str = DEFAULT_CHAT_MODEL
+    checkpointer_backend: CheckpointerBackend = "memory"
+    checkpointer_sqlite_path: Path = DEFAULT_CHECKPOINTER_SQLITE_PATH
+    checkpointer_postgres_uri: str | None = None
+    checkpointer_setup: bool = True
+    system_prompt: str = DEFAULT_DEEPSEEK_SYSTEM_PROMPT
+    skills_root: Path | None = None
+    enabled_skills: set[str] | None = None
+    skills_config_store: SlotFlowSkillsConfigStore | None = field(default=None, compare=False)
+    memory_store: SlotFlowMemoryStore | None = field(default=None, compare=False)
+    mcp_config: SlotFlowMcpConfig = field(default_factory=SlotFlowMcpConfig)
+    mcp_tool_provider: McpToolProvider | None = None
+    mcp_config_store: SlotFlowMcpConfigStore | None = field(default=None, compare=False)
+    middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
+    sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
+
+
+def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
+    """从环境变量读取一个很小的 runtime 配置。
+
+    默认使用 DeepSeek-compatible 真实 graph。日常测试通过 `model_factory` 注入 fake
+    model，不再让生产配置携带测试模式。
+    """
+
+    checkpointer_backend = os.environ.get("SLOTFLOW_CHECKPOINTER_BACKEND", "memory").strip().lower()
+    if checkpointer_backend not in ("none", "memory", "sqlite", "postgres"):
+        raise ValueError(
+            "SLOTFLOW_CHECKPOINTER_BACKEND must be 'none', 'memory', 'sqlite', "
+            "or 'postgres', "
+            f"got {checkpointer_backend!r}",
+        )
+
+    middleware_config = load_middleware_config_from_env()
+    env_mcp_config = load_mcp_config_from_env()
+    mcp_config_store = build_mcp_config_store_from_env(env_mcp_config)
+    mcp_config = mcp_config_store.load_config()
+    skills_root = load_path_from_env("SLOTFLOW_SKILLS_ROOT", default=DEFAULT_SKILLS_ROOT)
+    skills_config_store = build_skills_config_store_from_env(skills_root)
+    skills_config_store.ensure_default_find_skills()
+
+    return SlotFlowRuntimeConfig(
+        model_name=DEFAULT_CHAT_MODEL,
+        checkpointer_backend=checkpointer_backend,
+        checkpointer_sqlite_path=load_path_from_env(
+            "SLOTFLOW_CHECKPOINTER_SQLITE_PATH",
+            default=DEFAULT_CHECKPOINTER_SQLITE_PATH,
+        ),
+        checkpointer_postgres_uri=load_optional_text_from_env(
+            "SLOTFLOW_CHECKPOINTER_POSTGRES_URI",
+        ),
+        checkpointer_setup=load_bool_from_env(
+            "SLOTFLOW_CHECKPOINTER_SETUP",
+            default=True,
+        ),
+        system_prompt=os.environ.get("SLOTFLOW_SYSTEM_PROMPT", DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
+        skills_root=skills_root,
+        enabled_skills=load_optional_csv_set_from_env("SLOTFLOW_ENABLED_SKILLS"),
+        skills_config_store=skills_config_store,
+        memory_store=build_memory_store_from_env(middleware_config),
+        mcp_config=mcp_config,
+        mcp_tool_provider=build_mcp_tool_provider(mcp_config),
+        mcp_config_store=mcp_config_store,
+        middleware_config=middleware_config,
+        sandbox_config=load_sandbox_config_from_env(),
+    )
+
+
+def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
+    """Read SlotFlow-owned middleware switches from environment variables."""
+
+    defaults = SlotFlowMiddlewareConfig()
+    return SlotFlowMiddlewareConfig(
+        runtime_summary_enabled=load_bool_from_env(
+            "SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE",
+            default=True,
+        ),
+        dangling_tool_call_enabled=load_bool_from_env(
+            "SLOTFLOW_DANGLING_TOOL_CALL_MIDDLEWARE",
+            default=True,
+        ),
+        tool_safety_enabled=load_bool_from_env(
+            "SLOTFLOW_TOOL_SAFETY_MIDDLEWARE",
+            default=True,
+        ),
+        artifact_discovery_enabled=load_bool_from_env(
+            "SLOTFLOW_ARTIFACT_DISCOVERY_MIDDLEWARE",
+            default=True,
+        ),
+        summarization_enabled=load_bool_from_env(
+            "SLOTFLOW_SUMMARIZATION_MIDDLEWARE",
+            default=True,
+        ),
+        summarization_trigger_tokens=load_positive_int_from_env(
+            "SLOTFLOW_SUMMARIZATION_TRIGGER_TOKENS",
+            default=defaults.summarization_trigger_tokens,
+        ),
+        summarization_keep_messages=load_positive_int_from_env(
+            "SLOTFLOW_SUMMARIZATION_KEEP_MESSAGES",
+            default=defaults.summarization_keep_messages,
+        ),
+        summarization_trim_tokens=load_positive_int_from_env(
+            "SLOTFLOW_SUMMARIZATION_TRIM_TOKENS",
+            default=defaults.summarization_trim_tokens,
+        ),
+        long_term_memory_enabled=load_bool_from_env(
+            "SLOTFLOW_LONG_TERM_MEMORY_ENABLED",
+            default=True,
+        ),
+        skills_preflight_enabled=load_bool_from_env(
+            "SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE",
+            default=True,
+        ),
+        clarification_enabled=load_bool_from_env(
+            "SLOTFLOW_CLARIFICATION_MIDDLEWARE",
+            default=True,
+        ),
+        uploads_enabled=load_bool_from_env(
+            "SLOTFLOW_UPLOADS_MIDDLEWARE",
+            default=True,
+        ),
+        todo_enabled=load_bool_from_env(
+            "SLOTFLOW_TODO_MIDDLEWARE",
+            default=True,
+        ),
+    )
+
+
+def build_memory_store_from_env(
+    middleware_config: SlotFlowMiddlewareConfig,
+) -> SlotFlowMemoryStore | None:
+    """Create the local long-term memory store when the middleware is enabled."""
+
+    if not middleware_config.long_term_memory_enabled:
+        return None
+    return SlotFlowMemoryStore(
+        load_path_from_env(
+            "SLOTFLOW_MEMORY_SQLITE_PATH",
+            default=DEFAULT_MEMORY_SQLITE_PATH,
+        )
+    )
+
+
+def build_mcp_config_store_from_env(
+    base_config: SlotFlowMcpConfig,
+) -> SlotFlowMcpConfigStore:
+    """Create the persistent user MCP config store."""
+
+    return SlotFlowMcpConfigStore(
+        load_path_from_env("SLOTFLOW_MCP_CONFIG_PATH", default=DEFAULT_MCP_CONFIG_PATH),
+        base_config=base_config,
+    )
+
+
+def build_skills_config_store_from_env(
+    skills_root: Path,
+) -> SlotFlowSkillsConfigStore:
+    """Create the persistent user skill config store."""
+
+    return SlotFlowSkillsConfigStore(
+        load_path_from_env("SLOTFLOW_SKILLS_CONFIG_PATH", default=DEFAULT_SKILLS_CONFIG_PATH),
+        skills_root=skills_root,
+    )
+
+
+def refresh_runtime_skills_config(runtime_config: SlotFlowRuntimeConfig) -> set[str] | None:
+    """Refresh enabled skills from the persistent config store."""
+
+    if runtime_config.skills_root is None or runtime_config.skills_config_store is None:
+        return runtime_config.enabled_skills
+
+    runtime_config.skills_config_store.ensure_default_find_skills()
+    all_skills = load_enabled_skills(
+        skills_root=runtime_config.skills_root,
+        enabled_names=None,
+    )
+    discovered_names = {skill.name for skill in all_skills}
+    runtime_config.enabled_skills = runtime_config.skills_config_store.enabled_skill_names(discovered_names)
+    return runtime_config.enabled_skills
+
+
+def refresh_runtime_mcp_config(runtime_config: SlotFlowRuntimeConfig) -> SlotFlowMcpConfig:
+    """Refresh user-managed MCP config without restarting the backend."""
+
+    if runtime_config.mcp_config_store is None:
+        return runtime_config.mcp_config
+
+    next_config = runtime_config.mcp_config_store.load_config()
+    if next_config != runtime_config.mcp_config:
+        runtime_config.mcp_config = next_config
+        runtime_config.mcp_tool_provider = build_mcp_tool_provider(next_config)
+    return runtime_config.mcp_config
+
+
+def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
+    """Read SlotFlow workspace/sandbox limits from environment variables."""
+
+    return SlotFlowSandboxConfig(
+        workspace_root=load_optional_path_from_env("SLOTFLOW_WORKSPACE_ROOT"),
+        writes_enabled=load_bool_from_env(
+            "SLOTFLOW_WORKSPACE_WRITES_ENABLED",
+            default=False,
+        ),
+        max_read_bytes=load_positive_int_from_env(
+            "SLOTFLOW_WORKSPACE_MAX_READ_BYTES",
+            default=SlotFlowSandboxConfig().max_read_bytes,
+        ),
+        max_write_bytes=load_positive_int_from_env(
+            "SLOTFLOW_WORKSPACE_MAX_WRITE_BYTES",
+            default=SlotFlowSandboxConfig().max_write_bytes,
+        ),
+        network_enabled=load_bool_from_env(
+            "SLOTFLOW_NETWORK_ENABLED",
+            default=True,
+        ),
+        allow_private_network=load_bool_from_env(
+            "SLOTFLOW_NETWORK_ALLOW_PRIVATE",
+            default=False,
+        ),
+        max_fetch_bytes=load_positive_int_from_env(
+            "SLOTFLOW_NETWORK_MAX_FETCH_BYTES",
+            default=SlotFlowSandboxConfig().max_fetch_bytes,
+        ),
+        network_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_NETWORK_TIMEOUT_SECONDS",
+            default=SlotFlowSandboxConfig().network_timeout_seconds,
+        ),
+    )
+
+
+def load_mcp_config_from_env() -> SlotFlowMcpConfig:
+    """Read the first SlotFlow MCP config shape from environment variables."""
+
+    raw_config = load_optional_text_from_env("SLOTFLOW_MCP_CONFIG_JSON")
+    enabled = load_bool_from_env("SLOTFLOW_MCP_ENABLED", default=raw_config is not None)
+    if raw_config is not None:
+        return SlotFlowMcpConfig(
+            enabled=enabled,
+            servers=tuple(load_mcp_servers_from_json(raw_config)),
+        )
+
+    server_names = [
+        name
+        for name in load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
+        if not is_removed_default_mcp_server(name)
+    ]
+    return SlotFlowMcpConfig(
+        enabled=enabled,
+        servers=tuple(SlotFlowMcpServerConfig(name=name) for name in server_names),
+    )
+
+
+def load_mcp_servers_from_json(raw_config: str) -> list[SlotFlowMcpServerConfig]:
+    """Parse real MCP server connection config from JSON."""
+
+    try:
+        data = json.loads(raw_config)
+    except json.JSONDecodeError as exc:
+        raise ValueError("SLOTFLOW_MCP_CONFIG_JSON must be valid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("SLOTFLOW_MCP_CONFIG_JSON must be an object keyed by server name")
+
+    servers: list[SlotFlowMcpServerConfig] = []
+    for name, raw_server_config in data.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("SLOTFLOW_MCP_CONFIG_JSON server names must be non-empty strings")
+        if is_removed_default_mcp_server(name):
+            continue
+        if not isinstance(raw_server_config, dict):
+            raise ValueError(f"MCP server {name!r} config must be an object")
+
+        server_config = dict(raw_server_config)
+        enabled = server_config.pop("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"MCP server {name!r} enabled must be a boolean")
+
+        servers.append(
+            SlotFlowMcpServerConfig(
+                name=name.strip(),
+                enabled=enabled,
+                config=server_config,
+            )
+        )
+    return servers
+
+
+def build_mcp_tool_provider(config: SlotFlowMcpConfig) -> McpToolProvider | None:
+    """Create the real MCP provider only when full connection config exists."""
+
+    if not config.enabled:
+        return None
+    if any(server.config is not None for server in config.active_servers()):
+        return MultiServerMcpToolProvider()
+    return None
