@@ -1501,7 +1501,7 @@ function ThreadHistory({
 
   return (
     <SidebarGroup className="px-0 pb-3 pt-5 group-data-[collapsible=icon]:hidden">
-      <SidebarGroupLabel className="h-7 px-2 text-[0.78rem] font-medium text-muted-foreground">
+      <SidebarGroupLabel className="h-7 px-2 text-[0.95rem] font-semibold text-foreground">
         最近
       </SidebarGroupLabel>
       <SidebarGroupContent>
@@ -1631,8 +1631,16 @@ function getThreadArtifacts(
   artifacts: WorkspaceEntryRecord[],
   threadArtifactPaths: Record<string, string[]>,
 ): WorkspaceEntryRecord[] {
-  const explicitPaths = new Set(threadArtifactPaths[thread.id] ?? []);
-  const threadPrefix = `artifacts/${thread.id}/`;
+  return getThreadArtifactsById(thread.id, artifacts, threadArtifactPaths);
+}
+
+function getThreadArtifactsById(
+  threadId: string,
+  artifacts: WorkspaceEntryRecord[],
+  threadArtifactPaths: Record<string, string[]>,
+): WorkspaceEntryRecord[] {
+  const explicitPaths = new Set(threadArtifactPaths[threadId] ?? []);
+  const threadPrefix = `artifacts/${threadId}/`;
   return artifacts.filter(
     (artifact) => explicitPaths.has(artifact.path) || artifact.path.startsWith(threadPrefix),
   );

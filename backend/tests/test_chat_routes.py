@@ -158,6 +158,52 @@ class ReasoningAgentAdapter:
         )
 
 
+class LeakedThinkingContentAgentAdapter:
+    """测试用 adapter：模拟模型把内部思考误放进 content delta。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        _ = request
+        message_id = f"{bundle.context.run_id}:assistant"
+        leaked_thinking = "We need analyze the user's request and verify sources."
+        final_answer = "最终报告正文。"
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": leaked_thinking,
+                "channel": "content",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="state.snapshot",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+                "messages": [
+                    {
+                        "id": message_id,
+                        "role": "assistant",
+                        "content": final_answer,
+                    }
+                ],
+            },
+        )
+        yield AgentEvent(
+            event="run.finished",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+
+
 class ClarificationAgentAdapter:
     """测试用 adapter：请求用户澄清并结束本轮。"""
 
@@ -366,6 +412,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
     ).read_text(encoding="utf-8") == "# report"
     assert "解释完整链路" in messages[1].content
     assert messages[1].run_id == runs[0].id
+    assert messages[1].metadata["thinking_enabled"] is True
     assert runs[0].status == "completed"
     assert runs[0].model_name == "deepseek-v4-pro"
     assert runs[0].mode == "pro"
@@ -391,7 +438,29 @@ def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:
     assert messages[1].content == "最终报告正文。"
     assert messages[1].metadata == {
         "source": "agent",
+        "thinking_enabled": True,
         "reasoning_content": "先检索，再交叉验证。",
+    }
+
+
+def test_stream_run_promotes_replaced_content_delta_to_reasoning_metadata() -> None:
+    repo = InMemoryChatRepository()
+    client = _client(repo, adapter=LeakedThinkingContentAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "泄漏思考"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "需要深度分析"},
+    )
+    messages = repo.list_messages(thread["id"])
+
+    assert response.status_code == 200
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[1].content == "最终报告正文。"
+    assert messages[1].metadata == {
+        "source": "agent",
+        "thinking_enabled": True,
+        "reasoning_content": "We need analyze the user's request and verify sources.",
     }
 
 

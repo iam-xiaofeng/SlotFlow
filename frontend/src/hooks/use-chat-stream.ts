@@ -23,6 +23,7 @@ export type ChatUiMessage = {
   role: ChatUiMessageRole;
   content: string;
   reasoningContent?: string;
+  thinkingStarted?: boolean;
   status: ChatUiMessageStatus;
   runId?: string;
   createdAt?: string;
@@ -74,11 +75,13 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const [thread, setThread] = useState<ThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [todos, setTodos] = useState<ChatTodo[]>([]);
+  const [todoRevision, setTodoRevision] = useState(0);
   const [events, setEvents] = useState<ChatStreamEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isStreamingRef = useRef(false);
+  const hasTodoListForCurrentRunRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -97,6 +100,17 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     },
     [maxEventLogItems],
   );
+
+  const replaceTodos = useCallback((nextTodos: ChatTodo[]) => {
+    if (nextTodos.length === 0 && !hasTodoListForCurrentRunRef.current) {
+      return;
+    }
+    setTodos(nextTodos);
+    if (nextTodos.length > 0 && !hasTodoListForCurrentRunRef.current) {
+      hasTodoListForCurrentRunRef.current = true;
+      setTodoRevision((current) => current + 1);
+    }
+  }, []);
 
   const updateAssistantMessage = useCallback((
     messageId: string,
@@ -133,6 +147,26 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     );
   }, [updateAssistantMessage]);
 
+  const replaceAssistantSnapshotContent = useCallback((
+    messageId: string,
+    content: string,
+  ) => {
+    updateAssistantMessage(messageId, (message) => {
+      const shouldPromotePreviousContent =
+        message.thinkingStarted === true &&
+        !message.reasoningContent?.trim() &&
+        shouldPromoteStreamedContentToReasoning(message.content, content);
+
+      return {
+        ...message,
+        content,
+        reasoningContent: shouldPromotePreviousContent
+          ? message.content.trim()
+          : message.reasoningContent,
+      };
+    });
+  }, [updateAssistantMessage]);
+
   const patchAssistant = useCallback(
     (messageId: string, patch: Partial<ChatUiMessage>) => {
       updateAssistantMessage(messageId, (message) => ({ ...message, ...patch }));
@@ -152,6 +186,8 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         setThread(nextThread);
         setMessages([]);
         setTodos([]);
+        setTodoRevision(0);
+        hasTodoListForCurrentRunRef.current = false;
         setEvents([]);
         return nextThread;
       } catch (caught) {
@@ -171,6 +207,8 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     setThread(null);
     setMessages([]);
     setTodos([]);
+    setTodoRevision(0);
+    hasTodoListForCurrentRunRef.current = false;
     setEvents([]);
     setError(null);
     return true;
@@ -191,6 +229,8 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       setThread(targetThread);
       setMessages(storedMessages.map(messageRecordToUiMessage));
       setTodos([]);
+      setTodoRevision(0);
+      hasTodoListForCurrentRunRef.current = false;
       setEvents([]);
       return true;
     } catch (caught) {
@@ -215,6 +255,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         ...defaultMetadata,
         ...(overrides.metadata ?? {}),
       };
+      const effectiveMode = overrides.mode ?? defaultMode;
       const reusedUserMessageId = overrides.reuse_user_message_id ?? null;
       const userMessage: ChatUiMessage = {
         id: reusedUserMessageId ?? makeId("user"),
@@ -228,14 +269,15 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         id: assistantMessageId,
         role: "assistant",
         content: "",
+        thinkingStarted: effectiveMode !== "flash",
         status: "streaming",
       };
 
       abortControllerRef.current = controller;
       isStreamingRef.current = true;
+      hasTodoListForCurrentRunRef.current = false;
       setIsStreaming(true);
       setError(null);
-      setTodos([]);
 
       let activeThread: ThreadRecord | null = thread;
       let accepted = false;
@@ -279,7 +321,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         const body: ChatStreamRequest = {
           message: text,
           model_name: overrides.model_name ?? defaultModelName,
-          mode: overrides.mode ?? defaultMode,
+          mode: effectiveMode,
           agent_name: overrides.agent_name ?? defaultAgentName,
           files: overrides.files ?? [],
           metadata: messageMetadata,
@@ -303,6 +345,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             const delta = streamEvent.data.delta;
             if (typeof delta === "string") {
               const channel = streamEvent.data.channel;
+              if (channel === "reasoning") {
+                patchAssistant(assistantMessageId, { thinkingStarted: true });
+              }
               appendAssistantDelta(
                 assistantMessageId,
                 channel === "reasoning" ? "reasoning" : "content",
@@ -322,13 +367,13 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           }
 
           if (streamEvent.event === "todo.updated") {
-            setTodos(parseTodos(streamEvent.data.todos));
+            replaceTodos(parseTodos(streamEvent.data.todos));
           }
 
           if (streamEvent.event === "state.snapshot") {
             const content = latestAssistantContent(streamEvent);
             if (content) {
-              replaceAssistantContent(assistantMessageId, "content", content);
+              replaceAssistantSnapshotContent(assistantMessageId, content);
             }
             const reasoningContent = latestAssistantReasoningContent(streamEvent);
             if (reasoningContent) {
@@ -336,7 +381,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
             const nextTodos = latestTodos(streamEvent);
             if (nextTodos) {
-              setTodos(nextTodos);
+              replaceTodos(nextTodos);
             }
             const nextArtifacts = latestDiscoveredArtifacts(streamEvent);
             if (nextArtifacts.length > 0) {
@@ -378,7 +423,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         }
         isStreamingRef.current = false;
         setIsStreaming(false);
-        setTodos([]);
       }
     },
     [
@@ -391,6 +435,8 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       defaultThreadTitle,
       patchAssistant,
       replaceAssistantContent,
+      replaceAssistantSnapshotContent,
+      replaceTodos,
       thread,
     ],
   );
@@ -403,6 +449,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     thread,
     messages,
     todos,
+    todoRevision,
     events,
     isStreaming,
     error,
@@ -418,11 +465,13 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
 function messageRecordToUiMessage(record: MessageRecord): ChatUiMessage {
   const reasoningContent = parseReasoningContent(record.metadata);
+  const thinkingStarted = parseThinkingStarted(record.metadata, reasoningContent);
   return {
     id: record.id,
     role: record.role,
     content: record.content,
     reasoningContent,
+    thinkingStarted,
     status: "done",
     runId: record.run_id ?? undefined,
     createdAt: record.created_at,
@@ -433,6 +482,34 @@ function messageRecordToUiMessage(record: MessageRecord): ChatUiMessage {
 function parseReasoningContent(metadata: Record<string, unknown> | undefined): string | undefined {
   const value = metadata?.reasoning_content;
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function parseThinkingStarted(
+  metadata: Record<string, unknown> | undefined,
+  reasoningContent: string | undefined,
+): boolean {
+  return Boolean(reasoningContent) || metadata?.thinking_enabled === true;
+}
+
+function shouldPromoteStreamedContentToReasoning(
+  streamedContent: string,
+  snapshotContent: string,
+): boolean {
+  const streamed = normalizeComparableText(streamedContent);
+  const snapshot = normalizeComparableText(snapshotContent);
+  if (!streamed || !snapshot || streamed === snapshot) {
+    return false;
+  }
+
+  return (
+    !streamed.startsWith(snapshot) &&
+    !snapshot.startsWith(streamed) &&
+    !snapshot.includes(streamed)
+  );
+}
+
+function normalizeComparableText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function latestAssistantContent(event: ChatStreamEvent): string | null {

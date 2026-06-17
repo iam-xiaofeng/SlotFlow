@@ -58,6 +58,7 @@ async def read_artifact(
 async def raw_artifact(
     request: Request,
     path: str = Query(min_length=1),
+    download: bool = False,
 ) -> FileResponse:
     """Serve one generated artifact for browser preview."""
 
@@ -73,6 +74,14 @@ async def raw_artifact(
         raise HTTPException(status_code=404, detail="artifact not found")
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if download:
+        return FileResponse(
+            target,
+            media_type=media_type,
+            filename=target.name,
+            content_disposition_type="attachment",
+        )
+
     return FileResponse(
         target,
         media_type=media_type,

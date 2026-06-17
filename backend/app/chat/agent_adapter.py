@@ -38,9 +38,6 @@ AgentEventName = Literal[
     "state.snapshot",
     "run.finished",
 ]
-REASONING_TEXT_KEYS = ("reasoning_content", "reasoning", "reasoning_delta", "thinking")
-REASONING_NESTED_KEYS = ("additional_kwargs", "response_metadata", "delta")
-
 
 class AgentEvent(BaseModel):
     """SlotFlow 自己理解的 agent 流式事件。
@@ -379,13 +376,8 @@ def projection_item_to_agent_event(
 def extract_message_delta(item: Any) -> str:
     """从 message projection item 中提取文本增量。
 
-    LangGraph v3 的 message item 在不同模型和 transformer 下可能略有差异：
-
-    - 有些直接给消息对象，文本在 `.content`；
-    - 有些给 dict，文本在 `content` 或 `delta`；
-    - 有些把消息放在 `(message, metadata)` 这样的 tuple 里。
-
-    这里只抽取文本，不尝试理解更多元数据。复杂字段后面可以单独加测试扩展。
+    reasoning 和正文都属于 message 增量；调用方如果需要区分通道，应使用
+    `extract_message_delta_parts()`。
     """
 
     parts = extract_message_delta_parts(item)
@@ -393,53 +385,36 @@ def extract_message_delta(item: Any) -> str:
 
 
 def extract_message_delta_parts(item: Any) -> dict[str, str]:
-    """Extract DeepSeek-style message deltas split by output channel.
+    """Extract message deltas split by output channel.
 
-    DeepSeek thinking mode returns assistant output as separate `content` and
-    `reasoning_content` fields. SlotFlow preserves that distinction so the UI
-    can render reasoning in a separate collapsible block instead of mixing it
-    into the final answer.
+    官方 LangChain content block 是 reasoning 的主入口。DeepSeek 通过
+    `langchain-openai` 接入时，provider hook 会把 `delta.reasoning_content`
+    放进 `AIMessageChunk.additional_kwargs`，这里只保留这个明确 fallback。
     """
 
     if isinstance(item, tuple) and item:
         return extract_message_delta_parts(item[0])
 
-    if isinstance(item, dict):
-        reasoning = extract_reasoning_text(item)
-        if reasoning:
-            return {"reasoning_content": reasoning}
+    reasoning = extract_reasoning_text(item)
+    if reasoning:
+        return {"reasoning_content": reasoning}
 
+    if isinstance(item, dict):
         event_type = item.get("event")
         if event_type == "content-block-delta":
-            delta = item.get("delta")
-            if isinstance(delta, dict):
-                reasoning = extract_reasoning_text(delta)
-                if reasoning:
-                    return {"reasoning_content": reasoning}
-                text = delta.get("text")
-                if isinstance(text, str):
-                    return {"content": text}
+            parts = extract_content_block_delta(item.get("delta"))
+            if parts:
+                return parts
         if event_type == "content-block-start":
-            content = item.get("content")
-            if isinstance(content, dict):
-                reasoning = extract_reasoning_text(content)
-                if reasoning:
-                    return {"reasoning_content": reasoning}
-                text = content.get("text")
-                if isinstance(text, str) and text:
-                    return {"content": text}
+            parts = extract_content_block_delta(item.get("content"))
+            if parts:
+                return parts
         for key in ("delta", "content", "text"):
             value = item.get(key)
             if isinstance(value, str):
                 return {"content": value}
-        message = item.get("message")
-        if message is not None:
-            return extract_message_delta_parts(message)
         return {}
 
-    reasoning = extract_reasoning_text(item)
-    if reasoning:
-        return {"reasoning_content": reasoning}
     content = getattr(item, "content", None)
     if isinstance(content, str):
         return {"content": content}
@@ -447,34 +422,84 @@ def extract_message_delta_parts(item: Any) -> dict[str, str]:
     return {}
 
 
-def extract_reasoning_text(item: Any) -> str:
-    """Return a reasoning/thinking text fragment from common model shapes."""
+def extract_content_block_delta(item: Any) -> dict[str, str]:
+    reasoning = extract_reasoning_from_content_block(item)
+    if reasoning:
+        return {"reasoning_content": reasoning}
 
-    if isinstance(item, dict):
-        for key in REASONING_TEXT_KEYS:
-            value = item.get(key)
-            if isinstance(value, str) and value:
-                return value
-        nested = extract_nested_reasoning_text(item)
-        if nested:
-            return nested
+    text = extract_text_block_text(item)
+    if text:
+        return {"content": text}
+
+    return {}
+
+
+def extract_reasoning_text(item: Any) -> str:
+    """Return reasoning from LangChain standard blocks, then DeepSeek fallback."""
+
+    reasoning = extract_standard_reasoning_text(item)
+    if reasoning:
+        return reasoning
+    return extract_deepseek_reasoning_content(item)
+
+
+def extract_standard_reasoning_text(item: Any) -> str:
+    direct = extract_reasoning_from_content_block(item)
+    if direct:
+        return direct
+
+    for block in iter_content_blocks(item):
+        reasoning = extract_reasoning_from_content_block(block)
+        if reasoning:
+            return reasoning
+    return ""
+
+
+def extract_reasoning_from_content_block(item: Any) -> str:
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
         return ""
 
-    for attr in REASONING_TEXT_KEYS:
-        value = getattr(item, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    return extract_nested_reasoning_text(item)
+    reasoning = item.get("reasoning")
+    return reasoning if isinstance(reasoning, str) and reasoning else ""
 
 
-def extract_nested_reasoning_text(item: Any) -> str:
-    for key in REASONING_NESTED_KEYS:
-        nested = item.get(key) if isinstance(item, dict) else getattr(item, key, None)
-        if isinstance(nested, dict):
-            text = extract_reasoning_text(nested)
-            if text:
-                return text
-    return ""
+def iter_content_blocks(item: Any) -> Iterable[Any]:
+    if isinstance(item, dict):
+        for key in ("content_blocks", "contentBlocks"):
+            yield from list_content_blocks(item.get(key))
+        yield from list_content_blocks(item.get("content"))
+        return
+
+    for attr in ("content_blocks", "contentBlocks"):
+        try:
+            value = getattr(item, attr, None)
+        except Exception:
+            continue
+        yield from list_content_blocks(value)
+
+    try:
+        content = getattr(item, "content", None)
+    except Exception:
+        return
+    yield from list_content_blocks(content)
+
+
+def list_content_blocks(value: Any) -> Iterable[Any]:
+    if isinstance(value, list):
+        yield from value
+
+
+def extract_deepseek_reasoning_content(item: Any) -> str:
+    additional_kwargs = (
+        item.get("additional_kwargs")
+        if isinstance(item, dict)
+        else getattr(item, "additional_kwargs", None)
+    )
+    if not isinstance(additional_kwargs, dict):
+        return ""
+
+    reasoning = additional_kwargs.get("reasoning_content")
+    return reasoning if isinstance(reasoning, str) and reasoning else ""
 
 
 def normalize_values_snapshot(*, item: Any, bundle: RunConfigBundle) -> dict[str, Any]:

@@ -5,6 +5,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -61,6 +62,7 @@ import { displayFileName, formatFileSize, isImageFile } from "./chat-format";
 type ChatComposerProps = {
   attachments: UploadedFileRecord[];
   todos: ComposerTodo[];
+  todoRevision: number;
   error: string | null;
   fileInputRef: RefObject<HTMLInputElement | null>;
   isStreaming: boolean;
@@ -113,6 +115,7 @@ const MODE_OPTIONS: Record<ChatMode, { label: string; description: string }> = {
 export function ChatComposer({
   attachments,
   todos,
+  todoRevision,
   error,
   fileInputRef,
   isStreaming,
@@ -219,7 +222,11 @@ export function ChatComposer({
           onChange={(event) => void onFileChange(event)}
         />
 
-        <ComposerTodoPanel todos={todos} />
+        <ComposerTodoPanel
+          todos={todos}
+          todoRevision={todoRevision}
+          isStreaming={isStreaming}
+        />
 
         <div className="relative z-10 overflow-hidden rounded-[1.7rem] border border-border/80 bg-background shadow-[0_18px_50px_-34px_rgba(15,23,42,0.55),0_1px_2px_rgba(15,23,42,0.04)] transition-shadow focus-within:border-foreground/15 focus-within:shadow-[0_24px_70px_-38px_rgba(15,23,42,0.62),0_1px_2px_rgba(15,23,42,0.05)]">
           <div className="px-5 pb-2 pt-4 sm:px-6">
@@ -265,8 +272,32 @@ export function ChatComposer({
   );
 }
 
-function ComposerTodoPanel({ todos }: { todos: ComposerTodo[] }) {
+function ComposerTodoPanel({
+  todos,
+  todoRevision,
+  isStreaming,
+}: {
+  todos: ComposerTodo[];
+  todoRevision: number;
+  isStreaming: boolean;
+}) {
   const [isCollapsed, setIsCollapsed] = useState(true);
+  const previousTodoRevisionRef = useRef(todoRevision);
+  const previousStreamingRef = useRef(isStreaming);
+
+  useEffect(() => {
+    if (previousTodoRevisionRef.current !== todoRevision && todos.length > 0) {
+      setIsCollapsed(false);
+    }
+    previousTodoRevisionRef.current = todoRevision;
+  }, [todoRevision, todos.length]);
+
+  useEffect(() => {
+    if (previousStreamingRef.current && !isStreaming && todos.length > 0) {
+      setIsCollapsed(true);
+    }
+    previousStreamingRef.current = isStreaming;
+  }, [isStreaming, todos.length]);
 
   if (todos.length === 0) {
     return null;

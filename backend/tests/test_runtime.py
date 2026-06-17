@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -23,6 +24,7 @@ import app.chat.runtime as runtime_module
 from app.chat.run_config import build_run_config
 from app.chat.runtime import (
     DEFAULT_CHECKPOINTER_SQLITE_PATH,
+    DeepSeekChatOpenAI,
     RuntimeBackedAgentAdapter,
     SlotFlowRuntimeConfig,
     aclose_checkpointer,
@@ -175,6 +177,35 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
     assert pro_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
     assert "reasoning_effort" not in flash_kwargs
     assert "extra_body" not in flash_kwargs
+
+
+def test_deepseek_chat_openai_preserves_reasoning_stream_delta() -> None:
+    model = DeepSeekChatOpenAI(
+        model="deepseek-v4-pro",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        streaming=True,
+    )
+
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "",
+                        "reasoning_content": "先理解问题",
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        AIMessageChunk,
+        None,
+    )
+
+    assert chunk is not None
+    assert chunk.message.content == ""
+    assert chunk.message.additional_kwargs["reasoning_content"] == "先理解问题"
 
 
 def test_load_runtime_config_from_env_reads_real_mcp_json_config(

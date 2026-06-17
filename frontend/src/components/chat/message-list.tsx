@@ -310,6 +310,10 @@ function MessageBubble({
     isUser || clarification
       ? { thought: "", body: content }
       : splitAssistantContent(content, message.reasoningContent);
+  const shouldShowThinkingCard =
+    !isUser &&
+    !clarification &&
+    (Boolean(assistantContent.thought) || message.thinkingStarted === true);
   const isAssistantThinking =
     !isUser &&
     !clarification &&
@@ -366,7 +370,7 @@ function MessageBubble({
               <AssistantThinkingSummary content="" isStreaming />
             ) : (
               <>
-                {assistantContent.thought ? (
+                {shouldShowThinkingCard ? (
                   <AssistantThinkingSummary
                     content={assistantContent.thought}
                     isStreaming={message.status === "streaming"}
@@ -374,7 +378,7 @@ function MessageBubble({
                 ) : null}
                 {assistantContent.body.trim() ? (
                   <MarkdownContent content={assistantContent.body} />
-                ) : message.status === "streaming" ? (
+                ) : message.status === "streaming" && !shouldShowThinkingCard ? (
                   <ThinkingIndicator />
                 ) : null}
               </>
@@ -936,39 +940,75 @@ function AssistantThinkingSummary({
 }) {
   const displayContent = stripThoughtHeading(content);
   const hasContent = Boolean(displayContent.trim());
+  const steps = splitThinkingSteps(displayContent);
 
   return (
     <details
-      className="group/thinking mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground shadow-sm"
+      className="group/thinking mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground"
       open
     >
-      <summary className="flex h-9 cursor-pointer list-none items-center gap-2 bg-muted/30 px-3 font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <span className="grid size-5 place-items-center text-muted-foreground">
-          <Lightbulb className="size-4" />
-        </span>
-        <span>{isStreaming && !hasContent ? "思考中" : "思考过程"}</span>
-        <ChevronDown className="ml-auto size-4 transition-transform group-open/thinking:rotate-180" />
+      <summary className="flex h-9 cursor-pointer list-none items-center gap-2 px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+        <ChevronDown className="size-3.5 transition-transform group-open/thinking:rotate-180" />
+        <span>{isStreaming && !hasContent ? "思考中" : "隐藏步骤"}</span>
       </summary>
-      <div className="border-t border-border/60 px-4 pb-4 pt-3">
-        <div className="max-h-[26rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]">
-          <div className="border-l border-border/70 pl-4 leading-6">
-            {hasContent ? (
-              <MarkdownContent
-                className="text-muted-foreground"
-                content={displayContent}
-                compact
-              />
-            ) : (
-              <div className="flex h-8 items-center gap-2 text-muted-foreground">
-                <span>正在分析请求并组织步骤</span>
-                <ThinkingDots />
+      <div className="px-4 pb-4 pt-1">
+        <div className="max-h-[30rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]">
+          {hasContent ? (
+            <ol className="space-y-3">
+              {steps.map((step, index) => (
+                <li key={`${index}:${step.slice(0, 24)}`} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-3">
+                  <span className="relative flex justify-center">
+                    <span className="grid size-4 place-items-center rounded-sm border border-border bg-background text-muted-foreground">
+                      <Lightbulb className="size-3" />
+                    </span>
+                    {index < steps.length - 1 ? (
+                      <span className="absolute top-5 bottom-[-0.75rem] w-px bg-border" />
+                    ) : null}
+                  </span>
+                  <MarkdownContent
+                    className="min-w-0 text-[0.82rem] leading-6 text-muted-foreground"
+                    content={step}
+                    compact
+                  />
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <div className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-3">
+              <span className="grid size-4 place-items-center rounded-sm border border-border bg-background text-muted-foreground">
+                <Lightbulb className="size-3" />
+              </span>
+              <div className="flex min-h-8 items-center gap-2 text-[0.82rem] leading-6 text-muted-foreground">
+                <span>{isStreaming ? "思考中..." : "已完成思考，模型未返回可展示的思考内容。"}</span>
+                {isStreaming ? <ThinkingDots /> : null}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </details>
   );
+}
+
+function splitThinkingSteps(content: string): string[] {
+  const normalized = content.trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const paragraphSteps = normalized
+    .split(/\n{2,}/)
+    .map((step) => step.trim())
+    .filter(Boolean);
+  if (paragraphSteps.length > 1) {
+    return paragraphSteps;
+  }
+
+  const lineSteps = normalized
+    .split(/\n(?=(?:[-*]\s+|\d+[.)、]\s+|#{1,6}\s+))/u)
+    .map((step) => step.trim())
+    .filter(Boolean);
+  return lineSteps.length > 1 ? lineSteps : [normalized];
 }
 
 function stripThoughtHeading(content: string): string {

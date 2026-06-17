@@ -237,8 +237,12 @@ async def stream_thread_run(
 
                 if event.event == "run.finished":
                     content = snapshot_message_content or "".join(assistant_text_parts)
-                    reasoning_content = (
-                        snapshot_reasoning_content or "".join(assistant_reasoning_parts)
+                    reasoning_content = select_assistant_reasoning_content(
+                        snapshot_reasoning_content=snapshot_reasoning_content,
+                        streamed_reasoning_content="".join(assistant_reasoning_parts),
+                        snapshot_message_content=snapshot_message_content,
+                        streamed_message_content="".join(assistant_text_parts),
+                        thinking_enabled=bundle.context.thinking_enabled,
                     )
                     if content and not clarification_saved:
                         repo.add_message(
@@ -246,7 +250,10 @@ async def stream_thread_run(
                             role="assistant",
                             content=content,
                             run_id=run.id,
-                            metadata=assistant_message_metadata(reasoning_content),
+                            metadata=assistant_message_metadata(
+                                reasoning_content,
+                                thinking_enabled=bundle.context.thinking_enabled,
+                            ),
                         )
                         await update_thread_title_after_first_exchange(
                             repo,
@@ -307,6 +314,53 @@ def latest_assistant_reasoning_content(event: BusinessSseEvent) -> str | None:
     return latest_assistant_message_field(event, "reasoning_content")
 
 
+def select_assistant_reasoning_content(
+    *,
+    snapshot_reasoning_content: str | None,
+    streamed_reasoning_content: str,
+    snapshot_message_content: str | None,
+    streamed_message_content: str,
+    thinking_enabled: bool,
+) -> str | None:
+    if isinstance(snapshot_reasoning_content, str) and snapshot_reasoning_content.strip():
+        return snapshot_reasoning_content
+
+    if streamed_reasoning_content.strip():
+        return streamed_reasoning_content
+
+    if (
+        thinking_enabled
+        and snapshot_message_content
+        and should_promote_streamed_content_to_reasoning(
+            streamed_message_content,
+            snapshot_message_content,
+        )
+    ):
+        return streamed_message_content
+
+    return None
+
+
+def should_promote_streamed_content_to_reasoning(
+    streamed_content: str,
+    snapshot_content: str,
+) -> bool:
+    streamed = normalize_comparable_text(streamed_content)
+    snapshot = normalize_comparable_text(snapshot_content)
+    if not streamed or not snapshot or streamed == snapshot:
+        return False
+
+    return not (
+        streamed.startswith(snapshot)
+        or snapshot.startswith(streamed)
+        or streamed in snapshot
+    )
+
+
+def normalize_comparable_text(value: str) -> str:
+    return " ".join(value.split())
+
+
 def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str | None:
     messages = event.data.get("messages")
     if not isinstance(messages, list):
@@ -322,8 +376,14 @@ def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str |
     return None
 
 
-def assistant_message_metadata(reasoning_content: str | None) -> dict:
+def assistant_message_metadata(
+    reasoning_content: str | None,
+    *,
+    thinking_enabled: bool = False,
+) -> dict:
     metadata = {"source": "agent"}
+    if thinking_enabled:
+        metadata["thinking_enabled"] = True
     if isinstance(reasoning_content, str) and reasoning_content.strip():
         metadata["reasoning_content"] = reasoning_content
     return metadata

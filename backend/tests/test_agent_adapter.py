@@ -11,6 +11,7 @@ LangGraph v3 typed projections
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -122,9 +123,14 @@ def test_projection_message_item_becomes_message_delta_event() -> None:
 
 
 def test_deepseek_reasoning_content_becomes_reasoning_delta_event() -> None:
+    chunk = SimpleNamespace(
+        additional_kwargs={"reasoning_content": "先分析问题"},
+        content="",
+    )
+
     event = projection_item_to_agent_event(
         projection="messages",
-        item={"delta": {"reasoning_content": "先分析问题"}},
+        item=chunk,
         bundle=_bundle(),
     )
 
@@ -141,10 +147,43 @@ def test_deepseek_reasoning_content_becomes_reasoning_delta_event() -> None:
 
 
 def test_extract_message_delta_parts_keeps_content_and_reasoning_separate() -> None:
-    assert extract_message_delta_parts({"reasoning_content": "推理"}) == {
+    assert extract_message_delta_parts(
+        {"content_blocks": [{"type": "reasoning", "reasoning": "推理"}]},
+    ) == {
         "reasoning_content": "推理",
     }
     assert extract_message_delta_parts({"content": "正文"}) == {"content": "正文"}
+
+
+def test_extract_message_delta_parts_reads_standard_reasoning_delta() -> None:
+    assert extract_message_delta_parts(
+        {
+            "event": "content-block-delta",
+            "delta": {"type": "reasoning", "reasoning": "先理解需求"},
+        },
+    ) == {"reasoning_content": "先理解需求"}
+
+
+def test_extract_message_delta_parts_reads_deepseek_additional_kwargs() -> None:
+    chunk = SimpleNamespace(
+        additional_kwargs={"reasoning_content": "拆解任务"},
+        content="",
+    )
+
+    assert extract_message_delta_parts((chunk, {"langgraph_node": "model"})) == {
+        "reasoning_content": "拆解任务",
+    }
+
+
+def test_extract_message_delta_parts_reads_reasoning_content_block() -> None:
+    assert extract_message_delta_parts(
+        {
+            "content": [
+                {"type": "reasoning", "reasoning": "先判断用户意图"},
+                {"type": "text", "text": "正文"},
+            ],
+        },
+    ) == {"reasoning_content": "先判断用户意图"}
 
 
 def test_projection_values_item_becomes_state_snapshot_event() -> None:

@@ -310,8 +310,14 @@ export async function readArtifact(
   return response.json() as Promise<WorkspaceReadRecord>;
 }
 
-export function resolveArtifactRawUrl(path: string): string {
+export function resolveArtifactRawUrl(
+  path: string,
+  options: { download?: boolean } = {},
+): string {
   const params = new URLSearchParams({ path });
+  if (options.download) {
+    params.set("download", "true");
+  }
   return joinBaseUrl(
     resolveChatStreamBaseUrl(),
     `/api/workspace/artifacts/raw?${params.toString()}`,

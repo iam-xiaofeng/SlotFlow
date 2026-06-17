@@ -46,10 +46,12 @@ from app.harness.skills import SlotFlowSkillsConfigStore, load_enabled_skills
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import BaseMessageChunk
     from langgraph.types import Checkpointer
 
 
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
+DEEPSEEK_REASONING_DELTA_KEYS = ("reasoning_content", "reasoning", "thinking")
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = (
     "你是 SlotFlow 助手，回答要简洁、具体。"
@@ -87,6 +89,40 @@ class SlotFlowRuntimeConfig:
     mcp_config_store: SlotFlowMcpConfigStore | None = field(default=None, compare=False)
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
+
+
+def preserve_deepseek_reasoning_delta(
+    message: "BaseMessageChunk",
+    delta: dict[str, Any],
+) -> None:
+    """Restore DeepSeek reasoning fields dropped by langchain-openai.
+
+    The OpenAI-compatible DeepSeek stream includes `choices[].delta.reasoning_content`,
+    but langchain-openai currently only converts `content`, tool calls, and function
+    calls into AIMessageChunk fields. Without this hook, LangGraph receives hundreds
+    of empty chunks and SlotFlow never sees the thinking text.
+    """
+
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return
+
+    for key in DEEPSEEK_REASONING_DELTA_KEYS:
+        value = delta.get(key)
+        if isinstance(value, str) and value:
+            additional_kwargs["reasoning_content"] = value
+            return
+
+
+def deepseek_delta_from_stream_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
+    choices = (
+        chunk.get("choices", [])
+        or chunk.get("chunk", {}).get("choices", [])
+    )
+    if not choices:
+        return {}
+    delta = choices[0].get("delta")
+    return delta if isinstance(delta, dict) else {}
 
 
 class RuntimeBackedAgentAdapter:
@@ -694,7 +730,9 @@ def create_openai_compatible_chat_model(
     if not api_key:
         raise RuntimeError(f"{api_key_name} is required for {provider} runtime")
 
-    return ChatOpenAI(
+    chat_model_class = DeepSeekChatOpenAI if provider == "deepseek" else ChatOpenAI
+
+    return chat_model_class(
         **build_openai_compatible_model_kwargs(
             model_name=model_name,
             api_key=api_key,
@@ -703,6 +741,34 @@ def create_openai_compatible_chat_model(
             run_context=run_context,
         )
     )
+
+
+class DeepSeekChatOpenAI:
+    """ChatOpenAI subclass that preserves DeepSeek reasoning deltas."""
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        from langchain_openai import ChatOpenAI
+
+        class _DeepSeekChatOpenAI(ChatOpenAI):
+            def _convert_chunk_to_generation_chunk(
+                self,
+                chunk: dict[str, Any],
+                default_chunk_class: type,
+                base_generation_info: dict | None,
+            ) -> Any:
+                generation_chunk = super()._convert_chunk_to_generation_chunk(
+                    chunk,
+                    default_chunk_class,
+                    base_generation_info,
+                )
+                if generation_chunk is not None:
+                    preserve_deepseek_reasoning_delta(
+                        generation_chunk.message,
+                        deepseek_delta_from_stream_chunk(chunk),
+                    )
+                return generation_chunk
+
+        return _DeepSeekChatOpenAI(*args, **kwargs)
 
 
 def build_openai_compatible_model_kwargs(

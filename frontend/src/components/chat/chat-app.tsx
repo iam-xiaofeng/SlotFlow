@@ -114,6 +114,7 @@ export function ChatApp() {
     thread,
     messages,
     todos,
+    todoRevision,
     isStreaming,
     error,
     sendMessage,
@@ -228,6 +229,12 @@ export function ChatApp() {
     () => artifacts.filter((artifact) => artifact.kind === "file"),
     [artifacts],
   );
+  const activeThreadArtifactFiles = useMemo(() => {
+    if (!thread) {
+      return [];
+    }
+    return getThreadArtifactFiles(thread.id, artifactFiles, threadArtifactPaths, messages);
+  }, [artifactFiles, messages, thread?.id, threadArtifactPaths]);
   const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
   const modelOptions = useMemo(() => flattenModelOptions(modelCatalog), [modelCatalog]);
 
@@ -765,7 +772,7 @@ export function ChatApp() {
   }
 
   function handleOpenArtifactPanel() {
-    const firstFile = artifactFiles[0];
+    const firstFile = activeThreadArtifactFiles[0];
     if (!firstFile) {
       toast.info("暂无产物");
       return;
@@ -785,11 +792,19 @@ export function ChatApp() {
     try {
       await deleteArtifact(artifact.path);
       const nextArtifacts = await refreshArtifacts();
+      setThreadArtifactPaths((current) => removeArtifactPathFromThreadIndex(current, artifact.path));
       if (selectedArtifactPath === artifact.path || artifactPreview?.path === artifact.path) {
         setSelectedArtifactPath(null);
         setArtifactPreview(null);
         setArtifactPreviewError(null);
-        const nextFile = nextArtifacts.find((item) => item.kind === "file");
+        const nextFile = thread
+          ? getThreadArtifactFiles(
+              thread.id,
+              nextArtifacts.filter((item) => item.kind === "file"),
+              removeArtifactPathFromThreadIndex(threadArtifactPaths, artifact.path),
+              messages,
+            )[0]
+          : undefined;
         if (nextFile && isArtifactPanelOpen) {
           void handlePreviewArtifact(nextFile);
         } else if (!nextFile) {
@@ -802,6 +817,33 @@ export function ChatApp() {
       toast.error(message);
     }
   }
+
+  useEffect(() => {
+    if (!isArtifactPanelOpen) {
+      return;
+    }
+
+    if (activeThreadArtifactFiles.length === 0) {
+      setSelectedArtifactPath(null);
+      setArtifactPreview(null);
+      setArtifactPreviewError(null);
+      setIsArtifactPanelOpen(false);
+      return;
+    }
+
+    const activePaths = new Set(activeThreadArtifactFiles.map((artifact) => artifact.path));
+    const currentPath = selectedArtifactPath ?? artifactPreview?.path ?? null;
+    if (currentPath && activePaths.has(currentPath)) {
+      return;
+    }
+
+    void handlePreviewArtifact(activeThreadArtifactFiles[0]);
+  }, [
+    activeThreadArtifactFiles,
+    artifactPreview?.path,
+    isArtifactPanelOpen,
+    selectedArtifactPath,
+  ]);
 
   async function handleCopyMessage(content: string) {
     if (!content.trim()) {
@@ -875,6 +917,7 @@ export function ChatApp() {
     <ChatComposer
       attachments={attachments}
       todos={todos}
+      todoRevision={todoRevision}
       error={error}
       fileInputRef={fileInputRef}
       isStreaming={isStreaming}
@@ -982,10 +1025,10 @@ export function ChatApp() {
             )}
           </section>
 
-          {isArtifactPanelOpen && artifactFiles.length > 0 ? (
+          {isArtifactPanelOpen && activeThreadArtifactFiles.length > 0 ? (
             <ArtifactWorkspacePanel
               activePath={selectedArtifactPath ?? artifactPreview?.path ?? null}
-              artifacts={artifactFiles}
+              artifacts={activeThreadArtifactFiles}
               preview={artifactPreview}
               previewError={artifactPreviewError}
               isLoadingPreview={isLoadingArtifactPreview}
@@ -1080,6 +1123,39 @@ function mergeWorkspaceEntries(
     merged.set(entry.path, entry);
   }
   return [...merged.values()];
+}
+
+function getThreadArtifactFiles(
+  threadId: string,
+  artifacts: WorkspaceEntryRecord[],
+  threadArtifactPaths: ThreadArtifactIndex,
+  messages: ChatUiMessage[] = [],
+): WorkspaceEntryRecord[] {
+  const explicitPaths = new Set(threadArtifactPaths[threadId] ?? []);
+  const threadPrefix = `artifacts/${threadId}/`;
+  const messageText = messages.map((message) => message.content).join("\n");
+  return artifacts.filter(
+    (artifact) =>
+      explicitPaths.has(artifact.path) ||
+      artifact.path.startsWith(threadPrefix) ||
+      messageText.includes(artifact.path) ||
+      messageText.includes(artifact.path.replace(/^artifacts\//, "")),
+  );
+}
+
+function removeArtifactPathFromThreadIndex(
+  index: ThreadArtifactIndex,
+  path: string,
+): ThreadArtifactIndex {
+  let changed = false;
+  const nextEntries = Object.entries(index).flatMap(([threadId, paths]) => {
+    const nextPaths = paths.filter((item) => item !== path);
+    if (nextPaths.length !== paths.length) {
+      changed = true;
+    }
+    return nextPaths.length > 0 ? [[threadId, nextPaths] as const] : [];
+  });
+  return changed ? Object.fromEntries(nextEntries) : index;
 }
 
 function readThreadArtifactIndex(): ThreadArtifactIndex {

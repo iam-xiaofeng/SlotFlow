@@ -253,6 +253,40 @@ def test_raw_artifact_serves_html_inline(tmp_path: Path) -> None:
     assert response.text == "<button>zoom</button>"
 
 
+def test_raw_artifact_can_be_downloaded_as_attachment(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/chart.html")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("<button>zoom</button>", encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/raw",
+        params={"path": "artifacts/chart.html", "download": "true"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="chart.html"'
+    assert response.text == "<button>zoom</button>"
+
+
+def test_raw_artifact_download_uses_encoded_non_ascii_filename(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/广州天气.html")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("<button>zoom</button>", encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/raw",
+        params={"path": "artifacts/广州天气.html", "download": "true"},
+    )
+
+    assert response.status_code == 200
+    content_disposition = response.headers["content-disposition"]
+    assert content_disposition.startswith("attachment; filename*=utf-8''")
+    assert "%E5%B9%BF%E5%B7%9E%E5%A4%A9%E6%B0%94.html" in content_disposition
+    assert response.text == "<button>zoom</button>"
+
+
 def test_delete_artifact_removes_file(tmp_path: Path) -> None:
     client, store = _client(tmp_path)
     artifact_path = store.workspace.resolve_path("artifacts/chart.html")

@@ -172,6 +172,7 @@ export function ArtifactWorkspaceToolbar({
 }: ArtifactWorkspaceToolbarProps) {
   const selectedPath = activePath ?? artifacts[0]?.path ?? "";
   const rawUrl = preview ? resolveArtifactRawUrl(preview.path) : "";
+  const downloadUrl = preview ? resolveArtifactRawUrl(preview.path, { download: true }) : "";
   const canSwitchView = preview ? getArtifactPreviewType(preview).canSwitchView : false;
 
   return (
@@ -254,19 +255,15 @@ export function ArtifactWorkspaceToolbar({
           size="icon-sm"
           title="下载"
           className="size-8 text-muted-foreground hover:text-foreground"
-          disabled={!rawUrl}
+          disabled={!downloadUrl}
+          onClick={() => {
+            if (preview && downloadUrl) {
+              downloadArtifact(downloadUrl, preview.path);
+            }
+          }}
         >
-          {rawUrl ? (
-            <a href={rawUrl} download target="_blank" rel="noreferrer">
-              <Download className="size-4" />
-              <span className="sr-only">下载</span>
-            </a>
-          ) : (
-            <>
-              <Download className="size-4" />
-              <span className="sr-only">下载</span>
-            </>
-          )}
+          <Download className="size-4" />
+          <span className="sr-only">下载</span>
         </Button>
         <Button
           type="button"
@@ -282,6 +279,16 @@ export function ArtifactWorkspaceToolbar({
       </div>
     </div>
   );
+}
+
+function downloadArtifact(url: string, path: string) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = path.split("/").pop() || "artifact";
+  link.rel = "noreferrer";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 function ArtifactStage({
