@@ -79,7 +79,7 @@ Common runtime variables:
 
 ```bash
 SLOTFLOW_CHECKPOINTER_BACKEND=memory
-SLOTFLOW_CHAT_REPOSITORY_BACKEND=memory
+SLOTFLOW_CHAT_SQLITE_PATH=.slotflow/chat.sqlite3
 SLOTFLOW_SKILLS_ROOT=.slotflow/skills
 SLOTFLOW_WORKSPACE_ROOT=.slotflow/workspace
 ```
