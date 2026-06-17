@@ -23,6 +23,7 @@ from app.chat.agent_adapter import (
     collect_agent_events,
     extract_message_delta,
     extract_message_delta_parts,
+    flatten_message_projection_items,
     normalize_values_snapshot,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
@@ -184,6 +185,19 @@ def test_extract_message_delta_parts_reads_reasoning_content_block() -> None:
             ],
         },
     ) == {"reasoning_content": "先判断用户意图"}
+
+
+def test_summarization_projection_delta_is_not_public_message_delta() -> None:
+    event = projection_item_to_agent_event(
+        projection="messages",
+        item=(
+            {"delta": "Here is a concise summary of the conversation."},
+            {"metadata": {"lc_source": "summarization"}},
+        ),
+        bundle=_bundle(),
+    )
+
+    assert event is None
 
 
 def test_projection_values_item_becomes_state_snapshot_event() -> None:
@@ -411,3 +425,27 @@ async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_it
         for event in events
         if event.event == "message.delta"
     )
+
+
+@pytest.mark.asyncio
+async def test_message_projection_flattening_preserves_parent_metadata() -> None:
+    class ProjectionChannel:
+        def __aiter__(self):
+            async def iterator():
+                yield {"delta": "internal summary"}
+
+            return iterator()
+
+    items = [
+        item
+        async for item in flatten_message_projection_items(
+            (ProjectionChannel(), {"metadata": {"lc_source": "summarization"}})
+        )
+    ]
+
+    assert items == [
+        (
+            {"delta": "internal summary"},
+            {"metadata": {"lc_source": "summarization"}},
+        )
+    ]

@@ -231,8 +231,9 @@ async def flatten_message_projection_items(item: Any) -> AsyncIterator[Any]:
         return
 
     if isinstance(item, tuple) and item and hasattr(item[0], "__aiter__"):
+        metadata = item[1] if len(item) > 1 else None
         async for nested in item[0]:
-            yield nested
+            yield (nested, metadata)
         return
 
     if isinstance(item, list):
@@ -392,6 +393,9 @@ def extract_message_delta_parts(item: Any) -> dict[str, str]:
     放进 `AIMessageChunk.additional_kwargs`，这里只保留这个明确 fallback。
     """
 
+    if is_summarization_item(item):
+        return {}
+
     if isinstance(item, tuple) and item:
         return extract_message_delta_parts(item[0])
 
@@ -420,6 +424,34 @@ def extract_message_delta_parts(item: Any) -> dict[str, str]:
         return {"content": content}
 
     return {}
+
+
+def is_summarization_item(item: Any) -> bool:
+    """LangChain summarization calls are internal context maintenance, not chat output."""
+
+    if isinstance(item, tuple) and len(item) > 1:
+        return has_lc_source_summarization(item[1])
+    return has_lc_source_summarization(item)
+
+
+def has_lc_source_summarization(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("lc_source") == "summarization":
+            return True
+        for key in ("metadata", "config", "additional_kwargs", "response_metadata"):
+            nested = value.get(key)
+            if nested is not None and has_lc_source_summarization(nested):
+                return True
+        return False
+
+    for attr in ("metadata", "additional_kwargs", "response_metadata"):
+        try:
+            nested = getattr(value, attr, None)
+        except Exception:
+            continue
+        if nested is not None and has_lc_source_summarization(nested):
+            return True
+    return False
 
 
 def extract_content_block_delta(item: Any) -> dict[str, str]:

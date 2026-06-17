@@ -147,26 +147,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     );
   }, [updateAssistantMessage]);
 
-  const replaceAssistantSnapshotContent = useCallback((
-    messageId: string,
-    content: string,
-  ) => {
-    updateAssistantMessage(messageId, (message) => {
-      const shouldPromotePreviousContent =
-        message.thinkingStarted === true &&
-        !message.reasoningContent?.trim() &&
-        shouldPromoteStreamedContentToReasoning(message.content, content);
-
-      return {
-        ...message,
-        content,
-        reasoningContent: shouldPromotePreviousContent
-          ? message.content.trim()
-          : message.reasoningContent,
-      };
-    });
-  }, [updateAssistantMessage]);
-
   const patchAssistant = useCallback(
     (messageId: string, patch: Partial<ChatUiMessage>) => {
       updateAssistantMessage(messageId, (message) => ({ ...message, ...patch }));
@@ -373,7 +353,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           if (streamEvent.event === "state.snapshot") {
             const content = latestAssistantContent(streamEvent);
             if (content) {
-              replaceAssistantSnapshotContent(assistantMessageId, content);
+              replaceAssistantContent(assistantMessageId, "content", content);
             }
             const reasoningContent = latestAssistantReasoningContent(streamEvent);
             if (reasoningContent) {
@@ -435,7 +415,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       defaultThreadTitle,
       patchAssistant,
       replaceAssistantContent,
-      replaceAssistantSnapshotContent,
       replaceTodos,
       thread,
     ],
@@ -489,27 +468,6 @@ function parseThinkingStarted(
   reasoningContent: string | undefined,
 ): boolean {
   return Boolean(reasoningContent) || metadata?.thinking_enabled === true;
-}
-
-function shouldPromoteStreamedContentToReasoning(
-  streamedContent: string,
-  snapshotContent: string,
-): boolean {
-  const streamed = normalizeComparableText(streamedContent);
-  const snapshot = normalizeComparableText(snapshotContent);
-  if (!streamed || !snapshot || streamed === snapshot) {
-    return false;
-  }
-
-  return (
-    !streamed.startsWith(snapshot) &&
-    !snapshot.startsWith(streamed) &&
-    !snapshot.includes(streamed)
-  );
-}
-
-function normalizeComparableText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function latestAssistantContent(event: ChatStreamEvent): string | null {

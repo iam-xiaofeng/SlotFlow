@@ -158,8 +158,8 @@ class ReasoningAgentAdapter:
         )
 
 
-class LeakedThinkingContentAgentAdapter:
-    """测试用 adapter：模拟模型把内部思考误放进 content delta。"""
+class ReplacedContentAgentAdapter:
+    """测试用 adapter：模拟 state snapshot 替换之前流出的 content。"""
 
     async def stream_events(
         self,
@@ -169,14 +169,14 @@ class LeakedThinkingContentAgentAdapter:
     ) -> AsyncIterator[AgentEvent]:
         _ = request
         message_id = f"{bundle.context.run_id}:assistant"
-        leaked_thinking = "We need analyze the user's request and verify sources."
+        transient_content = "这段会被 snapshot 替换。"
         final_answer = "最终报告正文。"
         yield AgentEvent(
             event="message.delta",
             data={
                 "message_id": message_id,
                 "role": "assistant",
-                "delta": leaked_thinking,
+                "delta": transient_content,
                 "channel": "content",
                 "index": 0,
             },
@@ -443,10 +443,10 @@ def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:
     }
 
 
-def test_stream_run_promotes_replaced_content_delta_to_reasoning_metadata() -> None:
+def test_stream_run_does_not_guess_replaced_content_delta_as_reasoning_metadata() -> None:
     repo = InMemoryChatRepository()
-    client = _client(repo, adapter=LeakedThinkingContentAgentAdapter())
-    thread = client.post("/api/chat/threads", json={"title": "泄漏思考"}).json()
+    client = _client(repo, adapter=ReplacedContentAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "替换正文"}).json()
 
     response = client.post(
         f"/api/chat/threads/{thread['id']}/runs/stream",
@@ -460,7 +460,6 @@ def test_stream_run_promotes_replaced_content_delta_to_reasoning_metadata() -> N
     assert messages[1].metadata == {
         "source": "agent",
         "thinking_enabled": True,
-        "reasoning_content": "We need analyze the user's request and verify sources.",
     }
 
 
