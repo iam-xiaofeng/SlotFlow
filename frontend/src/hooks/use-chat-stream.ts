@@ -24,6 +24,7 @@ export type ChatUiMessage = {
   content: string;
   reasoningContent?: string;
   thinkingStarted?: boolean;
+  compressionStarted?: boolean;
   status: ChatUiMessageStatus;
   runId?: string;
   createdAt?: string;
@@ -31,6 +32,8 @@ export type ChatUiMessage = {
 };
 
 export type ChatTodoStatus = "pending" | "in_progress" | "completed";
+type AssistantDeltaChannel = "content" | "reasoning";
+type PendingAssistantDeltas = Record<AssistantDeltaChannel, string>;
 
 export type ChatTodo = {
   content: string;
@@ -61,6 +64,7 @@ const fallbackModelName = "deepseek-v4-pro";
 const fallbackMode: ChatMode = "pro";
 const fallbackAgentName = "default";
 const fallbackMaxEventLogItems = 12;
+const streamingDeltaFlushMs = 80;
 
 export function useChatStream(options: UseChatStreamOptions = {}) {
   const {
@@ -82,10 +86,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const abortControllerRef = useRef<AbortController | null>(null);
   const isStreamingRef = useRef(false);
   const hasTodoListForCurrentRunRef = useRef(false);
+  const pendingAssistantDeltasRef = useRef(new Map<string, PendingAssistantDeltas>());
+  const pendingFlushTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
+      if (pendingFlushTimerRef.current !== null) {
+        window.clearTimeout(pendingFlushTimerRef.current);
+      }
+      pendingAssistantDeltasRef.current.clear();
     };
   }, []);
 
@@ -123,28 +133,94 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     );
   }, []);
 
+  const flushPendingAssistantDeltas = useCallback(() => {
+    if (pendingFlushTimerRef.current !== null) {
+      window.clearTimeout(pendingFlushTimerRef.current);
+      pendingFlushTimerRef.current = null;
+    }
+
+    const pendingDeltas = pendingAssistantDeltasRef.current;
+    if (pendingDeltas.size === 0) {
+      return;
+    }
+
+    const deltasByMessage = new Map(pendingDeltas);
+    pendingDeltas.clear();
+    setMessages((current) =>
+      current.map((message) => {
+        const deltas = deltasByMessage.get(message.id);
+        if (!deltas) {
+          return message;
+        }
+
+        let nextMessage = message;
+        if (deltas.reasoning) {
+          nextMessage = {
+            ...nextMessage,
+            compressionStarted: false,
+            thinkingStarted: true,
+            reasoningContent: `${nextMessage.reasoningContent ?? ""}${deltas.reasoning}`,
+          };
+        }
+        if (deltas.content) {
+          nextMessage = {
+            ...nextMessage,
+            compressionStarted: false,
+            content: nextMessage.content + deltas.content,
+          };
+        }
+        return nextMessage;
+      }),
+    );
+  }, []);
+
+  const scheduleAssistantDeltaFlush = useCallback(() => {
+    if (pendingFlushTimerRef.current !== null) {
+      return;
+    }
+    pendingFlushTimerRef.current = window.setTimeout(() => {
+      pendingFlushTimerRef.current = null;
+      flushPendingAssistantDeltas();
+    }, streamingDeltaFlushMs);
+  }, [flushPendingAssistantDeltas]);
+
   const appendAssistantDelta = useCallback((
     messageId: string,
-    channel: "content" | "reasoning",
+    channel: AssistantDeltaChannel,
     delta: string,
   ) => {
-    updateAssistantMessage(messageId, (message) =>
-      channel === "reasoning"
-        ? { ...message, reasoningContent: `${message.reasoningContent ?? ""}${delta}` }
-        : { ...message, content: message.content + delta },
-    );
-  }, [updateAssistantMessage]);
+    if (!delta) {
+      return;
+    }
+    const pending = pendingAssistantDeltasRef.current.get(messageId) ?? {
+      content: "",
+      reasoning: "",
+    };
+    pending[channel] += delta;
+    pendingAssistantDeltasRef.current.set(messageId, pending);
+    scheduleAssistantDeltaFlush();
+  }, [scheduleAssistantDeltaFlush]);
 
   const replaceAssistantContent = useCallback((
     messageId: string,
     channel: "content" | "reasoning",
     content: string,
   ) => {
-    updateAssistantMessage(messageId, (message) =>
-      channel === "reasoning"
-        ? { ...message, reasoningContent: content }
-        : { ...message, content },
-    );
+    updateAssistantMessage(messageId, (message) => {
+      if (channel === "reasoning") {
+        return {
+          ...message,
+          compressionStarted: false,
+          thinkingStarted: true,
+          reasoningContent: mergeReasoningContent(message.reasoningContent, content),
+        };
+      }
+      return {
+        ...message,
+        compressionStarted: false,
+        content,
+      };
+    });
   }, [updateAssistantMessage]);
 
   const patchAssistant = useCallback(
@@ -236,6 +312,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         ...(overrides.metadata ?? {}),
       };
       const effectiveMode = overrides.mode ?? defaultMode;
+      const effectiveThinkingEnabled = overrides.thinking_enabled ?? effectiveMode !== "flash";
       const reusedUserMessageId = overrides.reuse_user_message_id ?? null;
       const userMessage: ChatUiMessage = {
         id: reusedUserMessageId ?? makeId("user"),
@@ -249,7 +326,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         id: assistantMessageId,
         role: "assistant",
         content: "",
-        thinkingStarted: effectiveMode !== "flash",
+        thinkingStarted: effectiveThinkingEnabled,
         status: "streaming",
       };
 
@@ -302,6 +379,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           message: text,
           model_name: overrides.model_name ?? defaultModelName,
           mode: effectiveMode,
+          thinking_enabled: effectiveThinkingEnabled,
           agent_name: overrides.agent_name ?? defaultAgentName,
           files: overrides.files ?? [],
           metadata: messageMetadata,
@@ -321,6 +399,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
           }
 
+          if (streamEvent.event === "context.compressing") {
+            patchAssistant(assistantMessageId, { compressionStarted: true });
+          }
+
           if (streamEvent.event === "message.delta") {
             const delta = streamEvent.data.delta;
             if (typeof delta === "string") {
@@ -337,6 +419,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           }
 
           if (streamEvent.event === "clarification.requested") {
+            flushPendingAssistantDeltas();
             const clarification = parseClarificationRequest(streamEvent.data);
             if (clarification) {
               patchAssistant(assistantMessageId, {
@@ -351,6 +434,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           }
 
           if (streamEvent.event === "state.snapshot") {
+            flushPendingAssistantDeltas();
             const content = latestAssistantContent(streamEvent);
             if (content) {
               replaceAssistantContent(assistantMessageId, "content", content);
@@ -373,29 +457,47 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           }
 
           if (streamEvent.event === "run.error") {
+            flushPendingAssistantDeltas();
             failed = true;
             const message = String(streamEvent.data.message ?? "agent stream failed");
             setError(message);
-            patchAssistant(assistantMessageId, { status: "error" });
+            patchAssistant(assistantMessageId, {
+              compressionStarted: false,
+              status: "error",
+            });
           }
         }
 
+        flushPendingAssistantDeltas();
         if (controller.signal.aborted) {
-          patchAssistant(assistantMessageId, { status: "cancelled" });
+          patchAssistant(assistantMessageId, {
+            compressionStarted: false,
+            status: "cancelled",
+          });
         } else if (!failed) {
-          patchAssistant(assistantMessageId, { status: "done" });
+          patchAssistant(assistantMessageId, {
+            compressionStarted: false,
+            status: "done",
+          });
         }
 
         return { accepted: true, thread: activeThread, artifacts: discoveredArtifacts };
       } catch (caught) {
+        flushPendingAssistantDeltas();
         if (controller.signal.aborted) {
-          patchAssistant(assistantMessageId, { status: "cancelled" });
+          patchAssistant(assistantMessageId, {
+            compressionStarted: false,
+            status: "cancelled",
+          });
           return { accepted, thread: activeThread, artifacts: [] };
         }
 
         const message = caught instanceof Error ? caught.message : "stream failed";
         setError(message);
-        patchAssistant(assistantMessageId, { status: "error" });
+        patchAssistant(assistantMessageId, {
+          compressionStarted: false,
+          status: "error",
+        });
         return { accepted, thread: activeThread, artifacts: [] };
       } finally {
         if (abortControllerRef.current === controller) {
@@ -413,6 +515,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       defaultMode,
       defaultModelName,
       defaultThreadTitle,
+      flushPendingAssistantDeltas,
       patchAssistant,
       replaceAssistantContent,
       replaceTodos,
@@ -470,6 +573,23 @@ function parseThinkingStarted(
   return Boolean(reasoningContent) || metadata?.thinking_enabled === true;
 }
 
+function mergeReasoningContent(
+  current: string | undefined,
+  incoming: string,
+): string {
+  // LangGraph values snapshot may keep only the latest reasoning chunk; preserve
+  // the longer live stream accumulated from message.delta.
+  const currentText = current ?? "";
+  if (!currentText.trim()) {
+    return incoming;
+  }
+  if (!incoming.trim()) {
+    return currentText;
+  }
+
+  return incoming.length > currentText.length ? incoming : currentText;
+}
+
 function latestAssistantContent(event: ChatStreamEvent): string | null {
   const messages = event.data.messages;
   if (!Array.isArray(messages)) {
@@ -485,8 +605,10 @@ function latestAssistantContent(event: ChatStreamEvent): string | null {
     ) {
       const role = message.role;
       const content = message.content;
-      if ((role === "assistant" || role === "ai") && typeof content === "string") {
-        return content;
+      if (role === "assistant" || role === "ai") {
+        if (typeof content === "string") {
+          return content;
+        }
       }
     }
   }
@@ -501,16 +623,14 @@ function latestAssistantReasoningContent(event: ChatStreamEvent): string | null 
   }
 
   for (const message of [...messages].reverse()) {
-    if (
-      typeof message === "object" &&
-      message !== null &&
-      "role" in message &&
-      "reasoning_content" in message
-    ) {
-      const role = message.role;
-      const content = message.reasoning_content;
-      if ((role === "assistant" || role === "ai") && typeof content === "string") {
-        return content;
+    if (typeof message === "object" && message !== null && "role" in message) {
+      const record = message as Record<string, unknown>;
+      const role = record.role;
+      if (role === "assistant" || role === "ai") {
+        const reasoningContent = record.reasoning_content;
+        if (typeof reasoningContent === "string" && reasoningContent.trim()) {
+          return reasoningContent;
+        }
       }
     }
   }

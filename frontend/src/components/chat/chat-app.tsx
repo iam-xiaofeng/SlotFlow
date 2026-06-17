@@ -73,6 +73,7 @@ type QueuedChatMessage = {
   attachmentCount: number;
   modelName: string;
   mode: ChatMode;
+  thinkingEnabled: boolean;
 };
 
 type ThreadArtifactIndex = Record<string, string[]>;
@@ -94,6 +95,9 @@ export function ChatApp() {
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogRecord | null>(null);
   const [selectedModelName, setSelectedModelName] = useState(defaultModelName);
   const [selectedMode, setSelectedMode] = useState<ChatMode>(defaultMode);
+  const [selectedThinkingEnabled, setSelectedThinkingEnabled] = useState(
+    defaultMode !== "flash",
+  );
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
   const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
@@ -236,6 +240,7 @@ export function ChatApp() {
     return getThreadArtifactFiles(thread.id, artifactFiles, threadArtifactPaths, messages);
   }, [artifactFiles, messages, thread?.id, threadArtifactPaths]);
   const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
+  const isRunSettingsLocked = messages.length > 0;
   const modelOptions = useMemo(() => flattenModelOptions(modelCatalog), [modelCatalog]);
 
   const rememberThreadArtifacts = useCallback((threadId: string, paths: string[]) => {
@@ -266,6 +271,7 @@ export function ChatApp() {
         threadTitle: string;
         modelName: string;
         mode: ChatMode;
+        thinkingEnabled: boolean;
         reuseUserMessageId?: string;
       },
       options: {
@@ -276,6 +282,7 @@ export function ChatApp() {
       const result = await sendMessage(prepared.text, {
         mode: prepared.mode,
         model_name: prepared.modelName,
+        thinking_enabled: prepared.thinkingEnabled,
         agent_name: "default",
         files: prepared.files,
         metadata: prepared.metadata,
@@ -388,6 +395,7 @@ export function ChatApp() {
       threadTitle: makeThreadTitle(nextMessage.text),
       modelName: nextMessage.modelName,
       mode: nextMessage.mode,
+      thinkingEnabled: nextMessage.thinkingEnabled,
     }).finally(() => {
       isDrainingQueueRef.current = false;
       setIsQueueDraining(false);
@@ -412,6 +420,14 @@ export function ChatApp() {
       setAttachments([]);
       setQueuedMessages([]);
     }
+  }
+
+  function handleModeChange(nextMode: ChatMode) {
+    if (isRunSettingsLocked) {
+      return;
+    }
+    setSelectedMode(nextMode);
+    setSelectedThinkingEnabled(nextMode !== "flash");
   }
 
   async function handleDeleteThread(targetThread: ThreadRecord) {
@@ -479,6 +495,9 @@ export function ChatApp() {
       ...(options.metadata ?? {}),
       uploaded_file_count: uploadedFilesMetadata.length,
       uploaded_files: uploadedFilesMetadata,
+      model_name: selectedModelName,
+      mode: selectedMode,
+      thinking_enabled: selectedThinkingEnabled,
     };
 
     if (isStreaming || isQueueDraining || queuedMessages.length > 0) {
@@ -492,6 +511,7 @@ export function ChatApp() {
           attachmentCount: files.length,
           modelName: selectedModelName,
           mode: selectedMode,
+          thinkingEnabled: selectedThinkingEnabled,
         },
       ]);
       return true;
@@ -504,6 +524,7 @@ export function ChatApp() {
         metadata,
         modelName: selectedModelName,
         mode: selectedMode,
+        thinkingEnabled: selectedThinkingEnabled,
         reuseUserMessageId: options.reuseUserMessageId,
         threadTitle: makeThreadTitle(text),
       },
@@ -929,8 +950,10 @@ export function ChatApp() {
         position: index + 1,
       }))}
       modelOptions={modelOptions}
+      isRunSettingsLocked={isRunSettingsLocked}
       selectedMode={selectedMode}
       selectedModelName={selectedModelName}
+      selectedThinkingEnabled={selectedThinkingEnabled}
       showPromptChips={messages.length === 0}
       isLoadingModels={isLoadingModels}
       onAttachFiles={() => fileInputRef.current?.click()}
@@ -941,8 +964,9 @@ export function ChatApp() {
       onRemoveAttachment={handleRemoveAttachment}
       onRemoveQueuedMessage={handleRemoveQueuedMessage}
       onSendMessage={submitMessage}
-      onModeChange={setSelectedMode}
+      onModeChange={handleModeChange}
       onModelChange={setSelectedModelName}
+      onThinkingEnabledChange={setSelectedThinkingEnabled}
     />
   );
 

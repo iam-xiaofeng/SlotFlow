@@ -76,6 +76,7 @@ export type ChatStreamRequest = {
   message: string;
   model_name?: string;
   mode?: ChatMode;
+  thinking_enabled?: boolean;
   agent_name?: string;
   files?: string[];
   metadata?: Record<string, unknown>;

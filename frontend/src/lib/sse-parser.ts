@@ -1,5 +1,6 @@
 export type ChatStreamEventName =
   | "run.prepared"
+  | "context.compressing"
   | "message.delta"
   | "tool.delta"
   | "clarification.requested"

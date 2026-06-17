@@ -75,6 +75,7 @@ export function MessageList({
   const userMessagesRef = useRef<UserMessageNavItem[]>([]);
   const userMessageSignatureRef = useRef("");
   const navigatorCloseTimerRef = useRef<number | null>(null);
+  const firstTokenScrolledMessageIdsRef = useRef(new Set<string>());
   const [activeUserIndex, setActiveUserIndex] = useState(0);
   const [isNavigatorOpen, setIsNavigatorOpen] = useState(false);
   const [editingUserMessageId, setEditingUserMessageId] = useState<string | null>(null);
@@ -97,8 +98,20 @@ export function MessageList({
   }
   const userMessages = userMessagesRef.current;
   const latestUserMessageId = userMessages.at(-1)?.id ?? null;
-  const latestAssistantMessageId =
-    [...messages].reverse().find((message) => message.role === "assistant")?.id ?? null;
+  const latestAssistantMessage = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "assistant") {
+        return messages[index];
+      }
+    }
+    return null;
+  }, [messages]);
+  const latestAssistantMessageId = latestAssistantMessage?.id ?? null;
+  const latestAssistantFirstTokenScrollKey =
+    latestAssistantMessage?.status === "streaming" &&
+    assistantMessageHasOutput(latestAssistantMessage)
+      ? latestAssistantMessage.id
+      : null;
 
   const getViewport = useCallback(
     () =>
@@ -161,16 +174,22 @@ export function MessageList({
   }, [userMessageSignature, updateActiveUserMessage]);
 
   useEffect(() => {
+    const messageId = latestAssistantFirstTokenScrollKey;
+    if (!messageId || firstTokenScrolledMessageIdsRef.current.has(messageId)) {
+      return;
+    }
+
     const viewport = getViewport();
     if (!viewport) {
       return;
     }
 
+    firstTokenScrolledMessageIdsRef.current.add(messageId);
     const frame = window.requestAnimationFrame(() => {
-      viewport.scrollTo({ top: viewport.scrollHeight });
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [getViewport, messages]);
+  }, [getViewport, latestAssistantFirstTokenScrollKey]);
 
   useEffect(() => {
     return () => {
@@ -309,22 +328,37 @@ function MessageBubble({
   const assistantContent =
     isUser || clarification
       ? { thought: "", body: content }
-      : splitAssistantContent(content, message.reasoningContent);
+      : splitAssistantContent(
+          content,
+          message.reasoningContent,
+        );
+  const hasAssistantThought = Boolean(assistantContent.thought.trim());
+  const hasAssistantBody = Boolean(assistantContent.body.trim());
+  const isCompressingContext =
+    !isUser &&
+    !clarification &&
+    message.status === "streaming" &&
+    message.compressionStarted === true;
   const shouldShowThinkingCard =
     !isUser &&
     !clarification &&
-    (Boolean(assistantContent.thought) || message.thinkingStarted === true);
+    (hasAssistantThought ||
+      (message.status === "streaming" &&
+        message.thinkingStarted === true &&
+        !hasAssistantBody &&
+        !isCompressingContext));
   const isAssistantThinking =
     !isUser &&
     !clarification &&
     message.status === "streaming" &&
-    !content.trim() &&
+    !isCompressingContext &&
+    !hasAssistantBody &&
     !message.reasoningContent?.trim();
   const canShowAssistantActions =
     !clarification &&
     isLatestAssistant &&
     message.status === "done" &&
-    Boolean(content.trim());
+    hasAssistantBody;
   const canAnswerClarification =
     Boolean(clarification) && isLatestAssistant && !isStreaming;
 
@@ -366,6 +400,8 @@ function MessageBubble({
                   onSelectClarification(message.id, selectedClarification, option)
                 }
               />
+            ) : isCompressingContext ? (
+              <ContextCompressingIndicator />
             ) : isAssistantThinking ? (
               <AssistantThinkingSummary content="" isStreaming />
             ) : (
@@ -376,8 +412,11 @@ function MessageBubble({
                     isStreaming={message.status === "streaming"}
                   />
                 ) : null}
-                {assistantContent.body.trim() ? (
-                  <MarkdownContent content={assistantContent.body} />
+                {hasAssistantBody ? (
+                  <SoftStreamingMarkdown
+                    content={assistantContent.body}
+                    isStreaming={message.status === "streaming"}
+                  />
                 ) : message.status === "streaming" && !shouldShowThinkingCard ? (
                   <ThinkingIndicator />
                 ) : null}
@@ -395,7 +434,7 @@ function MessageBubble({
           />
         ) : canShowAssistantActions ? (
           <AssistantMessageActions
-            content={content}
+            content={assistantContent.body}
             onCopyMessage={onCopyMessage}
             onRetryLatestAssistantMessage={onRetryLatestAssistantMessage}
           />
@@ -569,6 +608,15 @@ function ThinkingIndicator() {
           style={{ animationDelay: `${index * 120}ms` }}
         />
       ))}
+    </div>
+  );
+}
+
+function ContextCompressingIndicator() {
+  return (
+    <div className="flex h-8 items-center gap-2 text-sm text-muted-foreground">
+      <span>正在压缩上下文</span>
+      <ThinkingDots />
     </div>
   );
 }
@@ -879,55 +927,62 @@ function splitAssistantContent(
   reasoningContent?: string,
 ): AssistantContentParts {
   if (reasoningContent?.trim()) {
-    return { thought: reasoningContent.trim(), body: content };
-  }
-
-  const normalized = content.trim();
-  if (!normalized) {
-    return { thought: "", body: "" };
-  }
-
-  const lines = normalized.split(/\r?\n/);
-  const thoughtStart = lines.findIndex((line) => isThoughtHeading(line));
-  if (thoughtStart < 0) {
-    return { thought: "", body: content };
-  }
-
-  const bodyBeforeThought = lines.slice(0, thoughtStart).join("\n").trim();
-  const bodyStart = lines.findIndex((line, index) => {
-    if (index <= thoughtStart + 2) {
-      return false;
-    }
-    const trimmed = line.trim();
-    return (
-      /^#{1,3}\s*(?:20\d{2}|[一二三四五六七八九十]+、|报告|.*报告|结果|结论|总结|最终答复|最终回答|产物)/u.test(
-        trimmed,
-      ) || /^(?:最终答复|最终回答|结果|结论|总结|产物)[:：]/u.test(trimmed)
-    );
-  });
-
-  if (bodyStart > thoughtStart) {
-    const bodyAfterThought = lines.slice(bodyStart).join("\n").trim();
     return {
-      thought: lines.slice(thoughtStart, bodyStart).join("\n").trim(),
-      body: [bodyBeforeThought, bodyAfterThought].filter(Boolean).join("\n\n"),
+      thought: reasoningContent.trim(),
+      body: content.trim(),
     };
   }
 
   return {
-    thought: lines.slice(thoughtStart).join("\n").trim(),
-    body: bodyBeforeThought,
+    thought: "",
+    body: content.trim(),
   };
 }
 
-function isThoughtHeading(line: string) {
-  const normalized = line
-    .trim()
-    .replace(/^#{1,6}\s*/, "")
-    .replace(/^[^\w\u4e00-\u9fff]{0,8}\s*/, "")
-    .trim();
-  return /^(?:Durable Context Summary|思考过程|(?:我的)?(?:实际)?推理过程(?:（[^）]+）)?|流程回放|过程回放|隐藏步骤|Thinking|Reasoning)\s*[:：]?\s*$/iu.test(
-    normalized,
+function assistantMessageHasOutput(message: ChatUiMessage): boolean {
+  return Boolean(message.content.trim() || message.reasoningContent?.trim());
+}
+
+function SoftStreamingMarkdown({
+  className,
+  compact = false,
+  content,
+  isStreaming,
+}: {
+  className?: string;
+  compact?: boolean;
+  content: string;
+  isStreaming: boolean;
+}) {
+  const [isSoft, setIsSoft] = useState(false);
+  const lastContentRef = useRef(content);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      lastContentRef.current = content;
+      setIsSoft(false);
+      return;
+    }
+    if (content === lastContentRef.current) {
+      return;
+    }
+
+    lastContentRef.current = content;
+    setIsSoft(true);
+    const timer = window.setTimeout(() => setIsSoft(false), 220);
+    return () => window.clearTimeout(timer);
+  }, [content, isStreaming]);
+
+  return (
+    <MarkdownContent
+      className={cn(
+        "transition-opacity duration-300 ease-out motion-reduce:transition-none",
+        isSoft && "opacity-80",
+        className,
+      )}
+      compact={compact}
+      content={content}
+    />
   );
 }
 
@@ -938,7 +993,7 @@ function AssistantThinkingSummary({
   content: string;
   isStreaming?: boolean;
 }) {
-  const displayContent = stripThoughtHeading(content);
+  const displayContent = content.trim();
   const hasContent = Boolean(displayContent.trim());
   const steps = splitThinkingSteps(displayContent);
 
@@ -965,10 +1020,11 @@ function AssistantThinkingSummary({
                       <span className="absolute top-5 bottom-[-0.75rem] w-px bg-border" />
                     ) : null}
                   </span>
-                  <MarkdownContent
+                  <SoftStreamingMarkdown
                     className="min-w-0 text-[0.82rem] leading-6 text-muted-foreground"
                     content={step}
                     compact
+                    isStreaming={isStreaming && index === steps.length - 1}
                   />
                 </li>
               ))}
@@ -1009,15 +1065,6 @@ function splitThinkingSteps(content: string): string[] {
     .map((step) => step.trim())
     .filter(Boolean);
   return lineSteps.length > 1 ? lineSteps : [normalized];
-}
-
-function stripThoughtHeading(content: string): string {
-  return content
-    .replace(
-      /^(?:#{1,6}\s*)?(?:[^\w\u4e00-\u9fff]{0,8}\s*)?(?:Durable Context Summary|思考过程|(?:我的)?(?:实际)?推理过程(?:（[^）]+）)?|流程回放|过程回放|隐藏步骤|Thinking|Reasoning)\s*[:：]?\s*\n+/iu,
-      "",
-    )
-    .trim();
 }
 
 function ThinkingDots() {

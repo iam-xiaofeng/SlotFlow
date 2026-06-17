@@ -68,10 +68,12 @@ type ChatComposerProps = {
   isStreaming: boolean;
   isUploading: boolean;
   isLoadingModels: boolean;
+  isRunSettingsLocked: boolean;
   modelOptions: ModelOptionRecord[];
   queuedMessages: ComposerQueuedMessage[];
   selectedMode: ChatMode;
   selectedModelName: string;
+  selectedThinkingEnabled: boolean;
   showPromptChips: boolean;
   onAttachFiles: () => void;
   onCancel: () => void;
@@ -83,6 +85,7 @@ type ChatComposerProps = {
   onModeChange: (mode: ChatMode) => void;
   onModelChange: (modelName: string) => void;
   onSendMessage: (message: string) => Promise<boolean>;
+  onThinkingEnabledChange: (enabled: boolean) => void;
 };
 
 export type ComposerQueuedMessage = {
@@ -121,10 +124,12 @@ export function ChatComposer({
   isStreaming,
   isUploading,
   isLoadingModels,
+  isRunSettingsLocked,
   modelOptions,
   queuedMessages,
   selectedMode,
   selectedModelName,
+  selectedThinkingEnabled,
   showPromptChips,
   onAttachFiles,
   onCancel,
@@ -136,6 +141,7 @@ export function ChatComposer({
   onModeChange,
   onModelChange,
   onSendMessage,
+  onThinkingEnabledChange,
 }: ChatComposerProps) {
   const [input, setInput] = useState("");
   const isComposingRef = useRef(false);
@@ -250,13 +256,16 @@ export function ChatComposer({
               canSend={canSend}
               isStreaming={isStreaming}
               isLoadingModels={isLoadingModels}
+              isRunSettingsLocked={isRunSettingsLocked}
               modelOptions={modelOptions}
               selectedMode={selectedMode}
               selectedModelName={selectedModelName}
+              selectedThinkingEnabled={selectedThinkingEnabled}
               onCancel={onCancel}
               onModeChange={onModeChange}
               onModelChange={onModelChange}
               onSend={() => void submitCurrentInput()}
+              onThinkingEnabledChange={onThinkingEnabledChange}
             />
           </div>
         </div>
@@ -673,36 +682,44 @@ type ComposerActionsProps = {
   canSend: boolean;
   isStreaming: boolean;
   isLoadingModels: boolean;
+  isRunSettingsLocked: boolean;
   modelOptions: ModelOptionRecord[];
   selectedMode: ChatMode;
   selectedModelName: string;
+  selectedThinkingEnabled: boolean;
   onCancel: () => void;
   onModeChange: (mode: ChatMode) => void;
   onModelChange: (modelName: string) => void;
   onSend: () => void;
+  onThinkingEnabledChange: (enabled: boolean) => void;
 };
 
 function ComposerActions({
   canSend,
   isStreaming,
   isLoadingModels,
+  isRunSettingsLocked,
   modelOptions,
   selectedMode,
   selectedModelName,
+  selectedThinkingEnabled,
   onCancel,
   onModeChange,
   onModelChange,
   onSend,
+  onThinkingEnabledChange,
 }: ComposerActionsProps) {
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-1.5">
       <ComposerModelSelect
         value={selectedModelName}
         options={modelOptions}
-        disabled={isStreaming}
+        disabled={isStreaming || isRunSettingsLocked}
         isLoading={isLoadingModels}
         mode={selectedMode}
+        thinkingEnabled={selectedThinkingEnabled}
         onModeChange={onModeChange}
+        onThinkingEnabledChange={onThinkingEnabledChange}
         onChange={onModelChange}
       />
       <Button
@@ -766,16 +783,20 @@ function ComposerModelSelect({
   disabled,
   isLoading,
   mode,
+  thinkingEnabled,
   onChange,
   onModeChange,
+  onThinkingEnabledChange,
 }: {
   value: string;
   options: ModelOptionRecord[];
   disabled: boolean;
   isLoading: boolean;
   mode: ChatMode;
+  thinkingEnabled: boolean;
   onChange: (modelName: string) => void;
   onModeChange: (mode: ChatMode) => void;
+  onThinkingEnabledChange: (enabled: boolean) => void;
 }) {
   const hasOptions = options.length > 0;
   const activeModel = options.find((model) => model.id === value);
@@ -784,12 +805,16 @@ function ComposerModelSelect({
       <DropdownMenuTrigger
         type="button"
         disabled={disabled || !hasOptions}
-        className="inline-flex h-10 min-w-0 max-w-[13.5rem] items-center justify-center gap-1.5 rounded-xl bg-muted px-3 text-sm font-medium outline-none transition-colors hover:bg-muted/80 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 aria-expanded:bg-muted/80 sm:max-w-[16rem]"
+        title={disabled ? "当前对话已开始，模型和模式已锁定" : "选择模型、模式和思考开关"}
+        className="inline-flex h-10 min-w-0 max-w-[17rem] items-center justify-center gap-1.5 rounded-xl bg-muted px-3 text-sm font-medium outline-none transition-colors hover:bg-muted/80 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 aria-expanded:bg-muted/80 sm:max-w-[19rem]"
       >
         <span className="min-w-0 truncate">
           {shortModelName(activeModel?.id ?? value)}
         </span>
-        <span className="text-muted-foreground">Mode: {MODE_OPTIONS[mode].label}</span>
+        <span className="shrink-0 text-muted-foreground">{MODE_OPTIONS[mode].label}</span>
+        <span className="shrink-0 text-muted-foreground">
+          {thinkingEnabled ? "Thinking" : "No thinking"}
+        </span>
         <ChevronDownIcon />
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -830,7 +855,7 @@ function ComposerModelSelect({
             className="w-[25rem] rounded-2xl p-3 shadow-xl"
           >
             <p className="mb-3 px-1 text-sm leading-5 text-muted-foreground">
-              选择本轮任务的执行模式，会作为 mode 传给后端。
+              选择本轮任务的执行模式，控制规划和子 agent 能力。
             </p>
             {(["flash", "pro", "ultra"] as ChatMode[]).map((nextMode) => (
               <DropdownMenuItem
@@ -856,29 +881,36 @@ function ComposerModelSelect({
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
-            <div className="flex items-center justify-between gap-4 px-3 py-2">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-4 rounded-xl px-3 py-2 text-left transition-colors hover:bg-muted"
+              onClick={(event) => {
+                event.preventDefault();
+                onThinkingEnabledChange(!thinkingEnabled);
+              }}
+            >
               <span>
                 <span className="block text-sm font-medium">Thinking</span>
                 <span className="block text-sm text-muted-foreground">
-                  Can think for more complex tasks
+                  开启后请求模型原生思考；关闭后不传 thinking 参数。
                 </span>
               </span>
               <span
                 className={
-                  mode === "flash"
-                    ? "relative h-6 w-11 rounded-full bg-muted"
-                    : "relative h-6 w-11 rounded-full bg-blue-600"
+                  thinkingEnabled
+                    ? "relative h-6 w-11 shrink-0 rounded-full bg-blue-600"
+                    : "relative h-6 w-11 shrink-0 rounded-full bg-muted"
                 }
               >
                 <span
                   className={
-                    mode === "flash"
-                      ? "absolute left-1 top-1 size-4 rounded-full bg-background shadow-sm"
-                      : "absolute right-1 top-1 size-4 rounded-full bg-white shadow-sm"
+                    thinkingEnabled
+                      ? "absolute right-1 top-1 size-4 rounded-full bg-white shadow-sm"
+                      : "absolute left-1 top-1 size-4 rounded-full bg-background shadow-sm"
                   }
                 />
               </span>
-            </div>
+            </button>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
       </DropdownMenuContent>
