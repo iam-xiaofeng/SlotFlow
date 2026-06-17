@@ -36,7 +36,7 @@ from app.chat.models import (
 )
 from app.chat.model_catalog import discover_model_catalog
 from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotFoundError
-from app.chat.run_config import build_run_config
+from app.chat.run_config import build_run_config, request_thinking_enabled
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
 from app.chat.title_generation import maybe_generate_thread_title
 from app.uploads.models import UploadedFileRecord
@@ -178,6 +178,9 @@ async def stream_thread_run(
             content=body.message,
             metadata={
                 "files": list(body.files),
+                "model_name": body.model_name,
+                "mode": body.mode,
+                "thinking_enabled": request_thinking_enabled(body),
                 "uploaded_files": uploaded_file_metadata,
                 "request_metadata": dict(body.metadata),
             },
@@ -316,11 +319,22 @@ def select_assistant_reasoning_content(
     snapshot_reasoning_content: str | None,
     streamed_reasoning_content: str,
 ) -> str | None:
-    if isinstance(snapshot_reasoning_content, str) and snapshot_reasoning_content.strip():
-        return snapshot_reasoning_content
+    streamed = streamed_reasoning_content.strip()
+    snapshot = (
+        snapshot_reasoning_content.strip()
+        if isinstance(snapshot_reasoning_content, str)
+        else ""
+    )
+    if streamed and snapshot:
+        # LangGraph values snapshots can retain only the latest reasoning chunk,
+        # while message.delta carries the complete live stream.
+        return snapshot if len(snapshot) > len(streamed) else streamed
 
-    if streamed_reasoning_content.strip():
-        return streamed_reasoning_content
+    if streamed:
+        return streamed
+
+    if snapshot:
+        return snapshot
 
     return None
 

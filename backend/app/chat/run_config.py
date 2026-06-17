@@ -42,6 +42,14 @@ def mode_to_feature_flags(mode: ChatMode) -> dict[str, bool]:
     }
 
 
+def request_thinking_enabled(request: ChatStreamRequest) -> bool:
+    """Resolve explicit thinking override, preserving mode defaults for old clients."""
+
+    if request.thinking_enabled is not None:
+        return request.thinking_enabled
+    return mode_to_feature_flags(request.mode)["thinking_enabled"]
+
+
 def build_run_config(
     *,
     thread_id: str,
@@ -78,7 +86,7 @@ def build_run_config(
             agent_name=request.agent_name,
             files=list(request.files),
             uploaded_files=resolved_uploaded_files,
-            thinking_enabled=flags["thinking_enabled"],
+            thinking_enabled=request_thinking_enabled(request),
             is_plan_mode=flags["is_plan_mode"],
             subagent_enabled=flags["subagent_enabled"],
         ),

@@ -158,6 +158,108 @@ class ReasoningAgentAdapter:
         )
 
 
+class ShortSnapshotReasoningAgentAdapter:
+    """测试用 adapter：模拟 snapshot 只保留最后一段 reasoning。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        _ = request
+        message_id = f"{bundle.context.run_id}:assistant"
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": "第一段较长的分析。",
+                "channel": "reasoning",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": "第二段继续推理。",
+                "channel": "reasoning",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": "最终报告正文。",
+                "channel": "content",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="state.snapshot",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+                "messages": [
+                    {
+                        "id": message_id,
+                        "role": "assistant",
+                        "content": "最终报告正文。",
+                        "reasoning_content": "第二段继续推理。",
+                    }
+                ],
+            },
+        )
+        yield AgentEvent(
+            event="run.finished",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+
+
+class CompressingAgentAdapter:
+    """测试用 adapter：模拟上下文压缩状态，然后正常回答。"""
+
+    async def stream_events(
+        self,
+        *,
+        request: ChatStreamRequest,
+        bundle: RunConfigBundle,
+    ) -> AsyncIterator[AgentEvent]:
+        _ = request
+        message_id = f"{bundle.context.run_id}:assistant"
+        yield AgentEvent(
+            event="context.compressing",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+        yield AgentEvent(
+            event="message.delta",
+            data={
+                "message_id": message_id,
+                "role": "assistant",
+                "delta": "压缩后继续回答。",
+                "channel": "content",
+                "index": 0,
+            },
+        )
+        yield AgentEvent(
+            event="run.finished",
+            data={
+                "thread_id": bundle.context.thread_id,
+                "run_id": bundle.context.run_id,
+            },
+        )
+
+
 class ReplacedContentAgentAdapter:
     """测试用 adapter：模拟 state snapshot 替换之前流出的 content。"""
 
@@ -441,6 +543,47 @@ def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:
         "thinking_enabled": True,
         "reasoning_content": "先检索，再交叉验证。",
     }
+
+
+def test_stream_run_keeps_longer_streamed_reasoning_over_short_snapshot() -> None:
+    repo = InMemoryChatRepository()
+    client = _client(repo, adapter=ShortSnapshotReasoningAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "思考快照"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "需要深度分析"},
+    )
+    messages = repo.list_messages(thread["id"])
+
+    assert response.status_code == 200
+    assert messages[1].content == "最终报告正文。"
+    assert messages[1].metadata["reasoning_content"] == (
+        "第一段较长的分析。第二段继续推理。"
+    )
+
+
+def test_stream_run_exposes_context_compressing_without_persisting_it() -> None:
+    repo = InMemoryChatRepository()
+    client = _client(repo, adapter=CompressingAgentAdapter())
+    thread = client.post("/api/chat/threads", json={"title": "压缩链路"}).json()
+
+    response = client.post(
+        f"/api/chat/threads/{thread['id']}/runs/stream",
+        json={"message": "长上下文继续"},
+    )
+    events = _parse_sse(response.text)
+    messages = repo.list_messages(thread["id"])
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == [
+        "context.compressing",
+        "message.delta",
+        "run.finished",
+    ]
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[1].content == "压缩后继续回答。"
+    assert "compressing" not in messages[1].metadata
 
 
 def test_stream_run_does_not_guess_replaced_content_delta_as_reasoning_metadata() -> None:

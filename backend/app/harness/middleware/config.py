@@ -14,7 +14,7 @@ class SlotFlowMiddlewareConfig:
     tool_safety_enabled: bool = True
     artifact_discovery_enabled: bool = True
     summarization_enabled: bool = True
-    summarization_trigger_tokens: int = 24000
+    summarization_trigger_tokens: int = 600000
     summarization_keep_messages: int = 20
     summarization_trim_tokens: int = 8000
     long_term_memory_enabled: bool = True

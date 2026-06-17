@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 
 
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
-DEEPSEEK_REASONING_DELTA_KEYS = ("reasoning_content", "reasoning", "thinking")
 
 DEFAULT_DEEPSEEK_SYSTEM_PROMPT = (
     "你是 SlotFlow 助手，回答要简洁、具体。"
@@ -99,19 +98,31 @@ def preserve_deepseek_reasoning_delta(
 
     The OpenAI-compatible DeepSeek stream includes `choices[].delta.reasoning_content`,
     but langchain-openai currently only converts `content`, tool calls, and function
-    calls into AIMessageChunk fields. Without this hook, LangGraph receives hundreds
-    of empty chunks and SlotFlow never sees the thinking text.
+    calls into AIMessageChunk fields. This provider-only hook keeps that official
+    DeepSeek field as a standard LangChain reasoning content block, so LangGraph v3
+    can expose it through `message.reasoning` instead of an empty generic chunk.
     """
 
     additional_kwargs = getattr(message, "additional_kwargs", None)
     if not isinstance(additional_kwargs, dict):
         return
 
-    for key in DEEPSEEK_REASONING_DELTA_KEYS:
-        value = delta.get(key)
-        if isinstance(value, str) and value:
-            additional_kwargs["reasoning_content"] = value
-            return
+    reasoning = delta.get("reasoning_content")
+    if not isinstance(reasoning, str) or not reasoning:
+        return
+
+    additional_kwargs["reasoning_content"] = reasoning
+    if not message_has_content(message):
+        message.content = [{"type": "reasoning", "reasoning": reasoning}]
+
+
+def message_has_content(message: "BaseMessageChunk") -> bool:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return bool(content)
+    if isinstance(content, list):
+        return bool(content)
+    return content is not None
 
 
 def deepseek_delta_from_stream_chunk(chunk: dict[str, Any]) -> dict[str, Any]:

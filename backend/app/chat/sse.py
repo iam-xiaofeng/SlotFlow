@@ -23,6 +23,7 @@ from app.chat.agent_adapter import AgentEvent
 
 SseEventName = Literal[
     "run.prepared",
+    "context.compressing",
     "message.delta",
     "tool.delta",
     "clarification.requested",

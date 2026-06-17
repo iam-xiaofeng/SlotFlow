@@ -14,6 +14,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessageChunk
 
 from app.chat.agent_adapter import (
     AgentEvent,
@@ -147,6 +148,27 @@ def test_deepseek_reasoning_content_becomes_reasoning_delta_event() -> None:
     )
 
 
+def test_standard_reasoning_content_block_becomes_reasoning_delta_event() -> None:
+    chunk = AIMessageChunk(content=[{"type": "reasoning", "reasoning": "逐步分析"}])
+
+    event = projection_item_to_agent_event(
+        projection="messages",
+        item=chunk,
+        bundle=_bundle(),
+    )
+
+    assert event == AgentEvent(
+        event="message.delta",
+        data={
+            "message_id": "run_test:assistant",
+            "role": "assistant",
+            "delta": "逐步分析",
+            "channel": "reasoning",
+            "index": None,
+        },
+    )
+
+
 def test_extract_message_delta_parts_keeps_content_and_reasoning_separate() -> None:
     assert extract_message_delta_parts(
         {"content_blocks": [{"type": "reasoning", "reasoning": "推理"}]},
@@ -193,6 +215,19 @@ def test_summarization_projection_delta_is_not_public_message_delta() -> None:
         item=(
             {"delta": "Here is a concise summary of the conversation."},
             {"metadata": {"lc_source": "summarization"}},
+        ),
+        bundle=_bundle(),
+    )
+
+    assert event is None
+
+
+def test_summarization_projection_delta_is_filtered_by_langgraph_node() -> None:
+    event = projection_item_to_agent_event(
+        projection="messages",
+        item=SimpleNamespace(
+            _node="SlotFlowSummarizationMiddleware.before_model",
+            content="Summary for next model call",
         ),
         bundle=_bundle(),
     )
@@ -422,6 +457,165 @@ async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_it
     assert "".join(event.data["delta"] for event in events if event.event == "message.delta") == "AB"
     assert all(
         event.data["channel"] == "content"
+        for event in events
+        if event.event == "message.delta"
+    )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_event_adapter_uses_typed_message_reasoning_projection() -> None:
+    class ProjectionChannel:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def iterator():
+                for item in self._items:
+                    yield item
+
+            return iterator()
+
+    class TypedMessageStream:
+        _node = "model"
+
+        def __init__(self) -> None:
+            self.reasoning = ProjectionChannel(["先", "想"])
+            self.text = ProjectionChannel(["回答"])
+
+    class ProjectionOnlyStream:
+        def __init__(self) -> None:
+            self.messages = ProjectionChannel([TypedMessageStream()])
+            self.values = ProjectionChannel([])
+            self.tool_calls = ProjectionChannel([])
+
+    class StubGraph:
+        async def astream_events(self, *_args, **_kwargs):
+            return ProjectionOnlyStream()
+
+    adapter = LangGraphEventAgentAdapter(StubGraph())
+    events = await collect_agent_events(
+        adapter.stream_events(
+            request=ChatStreamRequest(message="ping"),
+            bundle=_bundle(),
+        )
+    )
+    message_events = [event for event in events if event.event == "message.delta"]
+
+    assert "".join(
+        event.data["delta"]
+        for event in message_events
+        if event.data["channel"] == "reasoning"
+    ) == "先想"
+    assert "".join(
+        event.data["delta"]
+        for event in message_events
+        if event.data["channel"] == "content"
+    ) == "回答"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_event_adapter_drains_summarization_substream_without_leaking_text() -> None:
+    class ProjectionChannel:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def iterator():
+                for item in self._items:
+                    yield item
+
+            return iterator()
+
+    class SummarizationSubstream:
+        _node = "SlotFlowSummarizationMiddleware.before_model"
+
+        def __aiter__(self):
+            async def iterator():
+                yield {"delta": "Summary for next model call"}
+
+            return iterator()
+
+    class ProjectionOnlyStream:
+        def __init__(self) -> None:
+            self.messages = ProjectionChannel(
+                [
+                    SummarizationSubstream(),
+                    [{"event": "content-block-delta", "delta": {"type": "text-delta", "text": "最终答复"}}],
+                ]
+            )
+            self.values = ProjectionChannel([])
+            self.tool_calls = ProjectionChannel([])
+
+    class StubGraph:
+        async def astream_events(self, *_args, **_kwargs):
+            return ProjectionOnlyStream()
+
+    adapter = LangGraphEventAgentAdapter(StubGraph())
+    events = await collect_agent_events(
+        adapter.stream_events(
+            request=ChatStreamRequest(message="ping"),
+            bundle=_bundle(),
+        )
+    )
+
+    assert [event.event for event in events] == [
+        "run.prepared",
+        "context.compressing",
+        "message.delta",
+        "run.finished",
+    ]
+    assert "Summary" not in "".join(
+        str(event.data.get("delta", ""))
+        for event in events
+        if event.event == "message.delta"
+    )
+    assert events[2].data["delta"] == "最终答复"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_event_adapter_filters_real_summarization_middleware_stream() -> None:
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.harness.middleware import SlotFlowSummarizationMiddleware
+
+    graph = create_agent(
+        model=FakeListChatModel(responses=["旧回答", "最终答复"]),
+        tools=[],
+        middleware=[
+            SlotFlowSummarizationMiddleware(
+                model=FakeListChatModel(responses=["Summary for next model call"]),
+                trigger_tokens=1,
+                keep_messages=1,
+                trim_tokens_to_summarize=100,
+            )
+        ],
+        checkpointer=InMemorySaver(),
+    )
+    adapter = LangGraphEventAgentAdapter(graph)
+
+    await collect_agent_events(
+        adapter.stream_events(
+            request=ChatStreamRequest(message="旧上下文"),
+            bundle=_bundle(ChatStreamRequest(message="旧上下文")),
+        )
+    )
+    events = await collect_agent_events(
+        adapter.stream_events(
+            request=ChatStreamRequest(message="继续"),
+            bundle=_bundle(ChatStreamRequest(message="继续")),
+        )
+    )
+
+    assert "context.compressing" in [event.event for event in events]
+    assert "Summary for next model call" not in "".join(
+        str(event.data.get("delta", ""))
+        for event in events
+        if event.event == "message.delta"
+    )
+    assert "最终答复" == "".join(
+        str(event.data.get("delta", ""))
         for event in events
         if event.event == "message.delta"
     )

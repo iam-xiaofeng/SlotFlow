@@ -31,6 +31,7 @@ from app.chat.models import ChatStreamRequest, RunConfigBundle
 
 AgentEventName = Literal[
     "run.prepared",
+    "context.compressing",
     "message.delta",
     "tool.delta",
     "clarification.requested",
@@ -132,9 +133,10 @@ async def iter_projection_agent_events(
     latest_snapshot: AgentEvent | None = None
     latest_clarification: AgentEvent | None = None
     latest_todos_signature: str | None = None
+    compression_announced = False
 
     async def pump_projection(projection: str, channel: Any) -> None:
-        nonlocal latest_clarification, latest_snapshot, latest_todos_signature
+        nonlocal compression_announced, latest_clarification, latest_snapshot, latest_todos_signature
         try:
             async for item in channel:
                 if projection == "values":
@@ -159,7 +161,18 @@ async def iter_projection_agent_events(
                         )
                     continue
                 if projection == "messages":
+                    if is_summarization_item(item):
+                        if not compression_announced:
+                            compression_announced = True
+                            await queue.put(make_context_compressing_event(bundle=bundle))
+                        await drain_message_projection_item(item)
+                        continue
                     async for message_item in flatten_message_projection_items(item):
+                        if is_summarization_item(message_item):
+                            if not compression_announced:
+                                compression_announced = True
+                                await queue.put(make_context_compressing_event(bundle=bundle))
+                            continue
                         await queue.put(ProjectionEnvelope(projection=projection, item=message_item))
                 else:
                     await queue.put(ProjectionEnvelope(projection=projection, item=item))
@@ -225,6 +238,14 @@ async def flatten_message_projection_items(item: Any) -> AsyncIterator[Any]:
     AgentEvent 适配层只面对“message item -> message.delta”的职责。
     """
 
+    # 根因：LangGraph v3 的 AsyncChatModelStream 不能直接 `async for message`
+    # 当普通子流消费；那样会丢失 `message.reasoning` / `message.text` 的通道归属，
+    # DeepSeek 的思考会被误当正文，或只能等 values snapshot 后一次性补回来。
+    if typed_channels := typed_message_delta_channels(item):
+        async for nested in iter_typed_message_delta_items(typed_channels):
+            yield nested
+        return
+
     if hasattr(item, "__aiter__"):
         async for nested in item:
             yield nested
@@ -242,6 +263,67 @@ async def flatten_message_projection_items(item: Any) -> AsyncIterator[Any]:
         return
 
     yield item
+
+
+def typed_message_delta_channels(item: Any) -> list[tuple[str, Any]]:
+    """Return LangGraph v3 typed message projections when available."""
+
+    channels: list[tuple[str, Any]] = []
+    for channel_name, attr_name in (
+        ("reasoning", "reasoning"),
+        ("content", "text"),
+    ):
+        channel = getattr(item, attr_name, None)
+        if channel is not None and hasattr(channel, "__aiter__"):
+            channels.append((channel_name, channel))
+    return channels
+
+
+async def iter_typed_message_delta_items(
+    channels: list[tuple[str, Any]],
+) -> AsyncIterator[dict[str, str]]:
+    """Interleave LangGraph `message.reasoning` and `message.text` deltas."""
+
+    queue: asyncio.Queue[tuple[str, str] | BaseException | object] = asyncio.Queue()
+    done_sentinel = object()
+
+    async def pump_channel(channel_name: str, channel: Any) -> None:
+        try:
+            async for delta in channel:
+                if isinstance(delta, str) and delta:
+                    await queue.put((channel_name, delta))
+        except Exception as exc:  # pragma: no cover - surfaced to caller
+            await queue.put(exc)
+        finally:
+            await queue.put(done_sentinel)
+
+    tasks = [
+        asyncio.create_task(pump_channel(channel_name, channel))
+        for channel_name, channel in channels
+    ]
+    remaining = len(tasks)
+    try:
+        while remaining:
+            item = await queue.get()
+            if item is done_sentinel:
+                remaining -= 1
+                continue
+            if isinstance(item, BaseException):
+                raise item
+            channel_name, delta = item
+            yield {"channel": channel_name, "delta": delta}
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def drain_message_projection_item(item: Any) -> None:
+    """Drain an internal message projection so LangGraph can keep running."""
+
+    async for _ in flatten_message_projection_items(item):
+        pass
 
 
 def build_agent_input(
@@ -309,6 +391,18 @@ def make_prepared_event(*, bundle: RunConfigBundle) -> AgentEvent:
             "model_name": bundle.context.model_name,
             "mode": bundle.context.mode,
             "agent_name": bundle.context.agent_name,
+        },
+    )
+
+
+def make_context_compressing_event(*, bundle: RunConfigBundle) -> AgentEvent:
+    """Notify the UI that LangChain is compressing history, without exposing text."""
+
+    return AgentEvent(
+        event="context.compressing",
+        data={
+            "thread_id": bundle.context.thread_id,
+            "run_id": bundle.context.run_id,
         },
     )
 
@@ -399,6 +493,14 @@ def extract_message_delta_parts(item: Any) -> dict[str, str]:
     if isinstance(item, tuple) and item:
         return extract_message_delta_parts(item[0])
 
+    if isinstance(item, dict):
+        explicit_channel = item.get("channel")
+        delta = item.get("delta")
+        if explicit_channel == "reasoning" and isinstance(delta, str):
+            return {"reasoning_content": delta}
+        if explicit_channel == "content" and isinstance(delta, str):
+            return {"content": delta}
+
     reasoning = extract_reasoning_text(item)
     if reasoning:
         return {"reasoning_content": reasoning}
@@ -430,7 +532,7 @@ def is_summarization_item(item: Any) -> bool:
     """LangChain summarization calls are internal context maintenance, not chat output."""
 
     if isinstance(item, tuple) and len(item) > 1:
-        return has_lc_source_summarization(item[1])
+        return has_lc_source_summarization(item[0]) or has_lc_source_summarization(item[1])
     return has_lc_source_summarization(item)
 
 
@@ -438,11 +540,21 @@ def has_lc_source_summarization(value: Any) -> bool:
     if isinstance(value, dict):
         if value.get("lc_source") == "summarization":
             return True
+        if is_summarization_node_name(value.get("_node") or value.get("node") or value.get("langgraph_node")):
+            return True
         for key in ("metadata", "config", "additional_kwargs", "response_metadata"):
             nested = value.get(key)
             if nested is not None and has_lc_source_summarization(nested):
                 return True
         return False
+
+    for attr in ("_node", "node", "langgraph_node", "name"):
+        try:
+            value_text = getattr(value, attr, None)
+        except Exception:
+            continue
+        if is_summarization_node_name(value_text):
+            return True
 
     for attr in ("metadata", "additional_kwargs", "response_metadata"):
         try:
@@ -452,6 +564,10 @@ def has_lc_source_summarization(value: Any) -> bool:
         if nested is not None and has_lc_source_summarization(nested):
             return True
     return False
+
+
+def is_summarization_node_name(value: Any) -> bool:
+    return isinstance(value, str) and "SummarizationMiddleware" in value
 
 
 def extract_content_block_delta(item: Any) -> dict[str, str]:
@@ -467,12 +583,12 @@ def extract_content_block_delta(item: Any) -> dict[str, str]:
 
 
 def extract_reasoning_text(item: Any) -> str:
-    """Return reasoning from LangChain standard blocks, then DeepSeek fallback."""
+    """Return reasoning from LangChain standard blocks, then provider fallbacks."""
 
     reasoning = extract_standard_reasoning_text(item)
     if reasoning:
         return reasoning
-    return extract_deepseek_reasoning_content(item)
+    return extract_provider_reasoning_content(item)
 
 
 def extract_standard_reasoning_text(item: Any) -> str:
@@ -491,8 +607,11 @@ def extract_reasoning_from_content_block(item: Any) -> str:
     if not isinstance(item, dict) or item.get("type") != "reasoning":
         return ""
 
-    reasoning = item.get("reasoning")
-    return reasoning if isinstance(reasoning, str) and reasoning else ""
+    for key in ("reasoning", "text", "content"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def iter_content_blocks(item: Any) -> Iterable[Any]:
@@ -521,7 +640,7 @@ def list_content_blocks(value: Any) -> Iterable[Any]:
         yield from value
 
 
-def extract_deepseek_reasoning_content(item: Any) -> str:
+def extract_provider_reasoning_content(item: Any) -> str:
     additional_kwargs = (
         item.get("additional_kwargs")
         if isinstance(item, dict)
@@ -709,6 +828,8 @@ def extract_text_block_text(item: Any) -> str:
         return item
 
     if isinstance(item, dict):
+        if item.get("type") == "reasoning":
+            return ""
         text = item.get("text")
         if isinstance(text, str):
             return text

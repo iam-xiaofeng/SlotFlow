@@ -96,6 +96,10 @@ class ChatStreamRequest(BaseModel):
     message: str = Field(min_length=1)
     model_name: str = "deepseek-v4-pro"
     mode: ChatMode = "pro"
+    thinking_enabled: bool | None = Field(
+        default=None,
+        description="可选：是否启用模型原生思考。为空时沿用 mode 的默认规则。",
+    )
     agent_name: str = "default"
     files: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

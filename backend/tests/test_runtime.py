@@ -154,6 +154,13 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
     pro_context = _bundle(
         request=ChatStreamRequest(message="复杂分析", mode="pro")
     ).context
+    no_thinking_context = _bundle(
+        request=ChatStreamRequest(
+            message="复杂分析但关闭原生思考",
+            mode="pro",
+            thinking_enabled=False,
+        )
+    ).context
     flash_context = _bundle(
         request=ChatStreamRequest(message="快速回答", mode="flash")
     ).context
@@ -165,6 +172,13 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
         provider="deepseek",
         run_context=pro_context,
     )
+    no_thinking_kwargs = build_openai_compatible_model_kwargs(
+        model_name="deepseek-v4-pro",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        provider="deepseek",
+        run_context=no_thinking_context,
+    )
     flash_kwargs = build_openai_compatible_model_kwargs(
         model_name="deepseek-v4-flash",
         api_key="key",
@@ -175,6 +189,8 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
 
     assert pro_kwargs["reasoning_effort"] == "high"
     assert pro_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert "reasoning_effort" not in no_thinking_kwargs
+    assert "extra_body" not in no_thinking_kwargs
     assert "reasoning_effort" not in flash_kwargs
     assert "extra_body" not in flash_kwargs
 
@@ -204,7 +220,8 @@ def test_deepseek_chat_openai_preserves_reasoning_stream_delta() -> None:
     )
 
     assert chunk is not None
-    assert chunk.message.content == ""
+    assert chunk.message.content == [{"type": "reasoning", "reasoning": "先理解问题"}]
+    assert chunk.message.content_blocks == [{"type": "reasoning", "reasoning": "先理解问题"}]
     assert chunk.message.additional_kwargs["reasoning_content"] == "先理解问题"
 
 

@@ -153,3 +153,23 @@ def test_build_run_config_uses_flash_as_lightweight_mode() -> None:
     assert bundle.context.thinking_enabled is False
     assert bundle.context.is_plan_mode is False
     assert bundle.context.subagent_enabled is False
+
+
+def test_build_run_config_respects_explicit_thinking_override() -> None:
+    """thinking 是模型原生能力开关，可以独立于 mode 显式关闭。"""
+
+    request = ChatStreamRequest(
+        message="复杂分析但不要打开模型原生思考",
+        mode="pro",
+        thinking_enabled=False,
+    )
+
+    bundle = build_run_config(
+        thread_id="thread_no_thinking",
+        run_id="run_no_thinking",
+        request=request,
+    )
+
+    assert bundle.context.thinking_enabled is False
+    assert bundle.context.is_plan_mode is True
+    assert bundle.context.subagent_enabled is False
