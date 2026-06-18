@@ -1,0 +1,35 @@
+name: Verify
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Add uv to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: 'frontend/pnpm-lock.yaml' # 明确指定锁文件路径
+
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: frontend # 关键：指定在 frontend 目录下运行
+
+      - name: Run Makefile verification
+        run: make verify
