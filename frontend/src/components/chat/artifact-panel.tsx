@@ -27,6 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 
 import { MarkdownContent } from "./markdown-content";
+import { formatFileSize } from "./chat-format";
 
 type ArtifactWorkspacePanelProps = {
   activePath: string | null;
@@ -405,7 +406,7 @@ function CodePreview({ preview }: { preview: WorkspaceReadRecord }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
         <span className="truncate">
-          {preview.kind} · {preview.media_type} · {formatBytes(preview.size_bytes)}
+          {preview.kind} · {preview.media_type} · {formatFileSize(preview.size_bytes)}
         </span>
       </div>
       <pre
@@ -460,16 +461,6 @@ function escapeHtmlAttribute(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function clamp(value: number, min: number, max: number): number {

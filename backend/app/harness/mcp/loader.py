@@ -18,13 +18,6 @@ class McpToolProvider(Protocol):
         """Return tools ready to bind to a LangGraph agent."""
 
 
-class AsyncMcpToolProvider(McpToolProvider, Protocol):
-    """Provider that needs async network/process work before tools are available."""
-
-    async def aload_tools(self, config: SlotFlowMcpConfig) -> list[BaseTool]:
-        """Load and cache tools asynchronously."""
-
-
 class EmptyMcpToolProvider:
     """Default provider: do not connect to any external MCP server."""
 

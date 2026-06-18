@@ -1,7 +1,7 @@
 """thread/message/run 仓库测试。
 
-同一组仓库契约覆盖内存实现和 SQLite 实现。这里不碰 agent，原因是仓库本身应该
-是一个清楚的小边界：上层告诉它要保存什么，它负责保存并按规则取回。
+这组仓库契约测试覆盖本地 SQLite 实现。这里不碰 agent，原因是仓库本身应该是一个
+清楚的小边界：上层告诉它要保存什么，它负责保存并按规则取回。
 """
 
 from __future__ import annotations
@@ -14,23 +14,16 @@ import pytest
 
 from app.chat.repository import (
     ChatRepository,
-    ChatRepositoryConfig,
-    InMemoryChatRepository,
     RunNotFoundError,
     SQLiteChatRepository,
     ThreadNotFoundError,
     build_chat_repository,
-    load_chat_repository_config_from_env,
 )
 
 
-@pytest.fixture(params=["memory", "sqlite"])
-def repo(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ChatRepository]:
-    """同一批仓库契约测试同时跑内存版和 SQLite 版。"""
-
-    if request.param == "memory":
-        yield InMemoryChatRepository()
-        return
+@pytest.fixture
+def repo(tmp_path: Path) -> Iterator[ChatRepository]:
+    """每个测试拿到一个独立的临时 SQLite 仓库。"""
 
     sqlite_repo = SQLiteChatRepository(tmp_path / "chat.sqlite3")
     try:
@@ -284,24 +277,28 @@ def test_sqlite_repository_persists_records_across_instances(tmp_path: Path) -> 
         second_repo.close()
 
 
-def test_chat_repository_config_defaults_to_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    """默认仍然使用内存仓库，避免本地测试意外写文件。"""
+def test_build_chat_repository_reads_sqlite_path_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """启动入口默认创建 SQLite 仓库，路径来自环境变量。"""
 
-    monkeypatch.delenv("SLOTFLOW_CHAT_REPOSITORY_BACKEND", raising=False)
-    monkeypatch.delenv("SLOTFLOW_CHAT_SQLITE_PATH", raising=False)
+    db_path = tmp_path / "chat.sqlite3"
+    monkeypatch.setenv("SLOTFLOW_CHAT_SQLITE_PATH", str(db_path))
 
-    assert load_chat_repository_config_from_env() == ChatRepositoryConfig()
+    repo = build_chat_repository()
+    try:
+        assert isinstance(repo, SQLiteChatRepository)
+        assert repo.database_path == db_path
+    finally:
+        repo.close()
 
 
-def test_build_chat_repository_can_create_sqlite(tmp_path: Path) -> None:
-    """启动阶段可以按配置创建 SQLite 仓库。"""
+def test_build_chat_repository_accepts_explicit_path(tmp_path: Path) -> None:
+    """显式传入路径时直接使用该路径。"""
 
-    repo = build_chat_repository(
-        ChatRepositoryConfig(
-            backend="sqlite",
-            sqlite_path=tmp_path / "chat.sqlite3",
-        )
-    )
-
-    assert isinstance(repo, SQLiteChatRepository)
-    repo.close()
+    repo = build_chat_repository(tmp_path / "chat.sqlite3")
+    try:
+        assert isinstance(repo, SQLiteChatRepository)
+    finally:
+        repo.close()

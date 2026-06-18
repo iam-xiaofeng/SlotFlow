@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from app.chat.runtime import SlotFlowRuntimeConfig, refresh_runtime_mcp_config
+from app.chat.runtime import refresh_runtime_mcp_config
+from app.dependencies import get_runtime_config
 from app.harness.mcp import (
     McpServerNotFoundError,
     ProtectedMcpServerError,
@@ -130,13 +131,6 @@ async def delete_mcp_server(server_name: str, request: Request) -> Response:
 
     refresh_runtime_mcp_config(get_runtime_config(request))
     return Response(status_code=204)
-
-
-def get_runtime_config(request: Request) -> SlotFlowRuntimeConfig:
-    runtime_config = getattr(request.app.state, "runtime_config", None)
-    if runtime_config is None:
-        raise HTTPException(status_code=503, detail="runtime config is not configured")
-    return runtime_config
 
 
 def get_mcp_config_store(request: Request) -> SlotFlowMcpConfigStore | None:

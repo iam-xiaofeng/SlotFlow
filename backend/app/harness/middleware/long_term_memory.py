@@ -10,12 +10,13 @@ import re
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from app.chat.models import RunContext
 from app.harness.memory import MemoryKind, MemoryRecord, SlotFlowMemoryStore
 from app.harness.state import SlotFlowAgentState
+from app.harness.utils import message_role
 
 
 class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunContext]):
@@ -297,20 +298,6 @@ def latest_message_index(messages: list[Any], *, roles: set[str]) -> int | None:
         if message_role(messages[index]) in roles:
             return index
     return None
-
-
-def message_role(message: Any) -> str | None:
-    if isinstance(message, HumanMessage):
-        return "human"
-    if isinstance(message, AIMessage):
-        return "ai"
-    if isinstance(message, BaseMessage):
-        return str(message.type)
-    if isinstance(message, dict):
-        role = message.get("role") or message.get("type")
-        return str(role) if role is not None else None
-    role = getattr(message, "role", None) or getattr(message, "type", None)
-    return str(role) if role is not None else None
 
 
 def memory_save_tool_used_for_run(messages: list[Any], *, run_id: str | None) -> bool:

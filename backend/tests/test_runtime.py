@@ -354,7 +354,7 @@ async def test_create_async_checkpointer_delegates_to_postgres_factory(
         return sentinel
 
     monkeypatch.setattr(
-        runtime_module,
+        runtime_module.checkpointer,
         "create_postgres_checkpointer",
         fake_create_postgres_checkpointer,
     )

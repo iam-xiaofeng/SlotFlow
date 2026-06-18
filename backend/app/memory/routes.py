@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
-from app.harness.memory import MemoryKind, MemoryNotFoundError, MemoryRecord, SlotFlowMemoryStore
+from app.dependencies import get_memory_store
+from app.harness.memory import MemoryKind, MemoryNotFoundError, MemoryRecord
 from app.memory.models import MemoryCreateRequest, MemoryUpdateRequest
 
 
@@ -78,10 +79,3 @@ async def delete_memory(memory_id: str, request: Request) -> Response:
     except MemoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail="memory not found") from exc
     return Response(status_code=204)
-
-
-def get_memory_store(request: Request) -> SlotFlowMemoryStore:
-    store = getattr(request.app.state, "memory_store", None)
-    if store is None:
-        raise HTTPException(status_code=503, detail="memory store is not configured")
-    return store

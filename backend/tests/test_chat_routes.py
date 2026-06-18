@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from app.chat.agent_adapter import AgentEvent
 from app.chat.models import ChatStreamRequest, RunConfigBundle
-from app.chat.repository import ChatRepository, InMemoryChatRepository, SQLiteChatRepository
+from app.chat.repository import ChatRepository, SQLiteChatRepository
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
@@ -363,7 +363,6 @@ def test_create_app_can_use_sqlite_repository_from_env(
     """应用启动入口可以通过环境变量切到 SQLite 仓库。"""
 
     db_path = tmp_path / "chat.sqlite3"
-    monkeypatch.setenv("SLOTFLOW_CHAT_REPOSITORY_BACKEND", "sqlite")
     monkeypatch.setenv("SLOTFLOW_CHAT_SQLITE_PATH", str(db_path))
 
     app = create_app(agent_adapter=CompletedAgentAdapter())
@@ -404,7 +403,7 @@ def _parse_sse(text: str) -> list[dict]:
 def test_thread_routes_create_list_get_and_list_messages() -> None:
     """thread 的基础 HTTP 接口应该能创建、读取、列出消息。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo)
 
     create_response = client.post("/api/chat/threads", json={"title": "  测试会话  "})
@@ -431,7 +430,7 @@ def test_thread_routes_create_list_get_and_list_messages() -> None:
 
 
 def test_search_threads_matches_stored_messages() -> None:
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo)
     thread = client.post("/api/chat/threads", json={"title": "普通标题"}).json()
     repo.add_message(thread["id"], role="user", content="LangChain middleware 怎么配置")
@@ -450,7 +449,7 @@ def test_search_threads_matches_stored_messages() -> None:
 def test_missing_thread_routes_return_404() -> None:
     """不存在的 thread 要返回 404，而不是在仓库里悄悄创建。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo)
 
     assert client.get("/api/chat/threads/thread_missing").status_code == 404
@@ -469,7 +468,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
 ) -> None:
     """前端发送 stream 请求后，后端应该返回 SSE，并保存用户和 assistant 消息。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     upload_store = SlotFlowUploadStore(
         SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
     )
@@ -522,7 +521,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
 
 
 def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo, adapter=ReasoningAgentAdapter())
     thread = client.post("/api/chat/threads", json={"title": "思考链路"}).json()
 
@@ -546,7 +545,7 @@ def test_stream_run_persists_reasoning_content_in_assistant_metadata() -> None:
 
 
 def test_stream_run_keeps_longer_streamed_reasoning_over_short_snapshot() -> None:
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo, adapter=ShortSnapshotReasoningAgentAdapter())
     thread = client.post("/api/chat/threads", json={"title": "思考快照"}).json()
 
@@ -564,7 +563,7 @@ def test_stream_run_keeps_longer_streamed_reasoning_over_short_snapshot() -> Non
 
 
 def test_stream_run_exposes_context_compressing_without_persisting_it() -> None:
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo, adapter=CompressingAgentAdapter())
     thread = client.post("/api/chat/threads", json={"title": "压缩链路"}).json()
 
@@ -587,7 +586,7 @@ def test_stream_run_exposes_context_compressing_without_persisting_it() -> None:
 
 
 def test_stream_run_does_not_guess_replaced_content_delta_as_reasoning_metadata() -> None:
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo, adapter=ReplacedContentAgentAdapter())
     thread = client.post("/api/chat/threads", json={"title": "替换正文"}).json()
 
@@ -609,7 +608,7 @@ def test_stream_run_does_not_guess_replaced_content_delta_as_reasoning_metadata(
 def test_stream_run_can_reuse_user_message_for_edit_or_retry() -> None:
     """编辑/重试最后一轮时，应覆盖 user message 并替换它后面的 assistant。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo)
     thread = client.post("/api/chat/threads", json={"title": "编辑测试"}).json()
 
@@ -642,7 +641,7 @@ def test_stream_run_rejects_unknown_uploaded_file_without_persisting(
 ) -> None:
     """stream 请求带不存在的 file_id 时，要 404，且不能创建消息或 run。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     upload_store = SlotFlowUploadStore(
         SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
     )
@@ -666,7 +665,7 @@ def test_stream_run_rejects_unknown_uploaded_file_without_persisting(
 def test_stream_run_error_event_marks_run_failed() -> None:
     """agent adapter 崩溃时，SSE 要返回 run.error，仓库里的 run 要变成 failed。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo, adapter=BrokenAgentAdapter())
     thread = client.post("/api/chat/threads", json={"title": "失败链路"}).json()
 
@@ -692,7 +691,7 @@ def test_stream_run_error_event_marks_run_failed() -> None:
 def test_stream_run_persists_clarification_request() -> None:
     """clarification.requested 要保存成可重载的 assistant 消息。"""
 
-    repo = InMemoryChatRepository()
+    repo = SQLiteChatRepository(":memory:")
     client = _client(repo, adapter=ClarificationAgentAdapter())
     thread = client.post("/api/chat/threads", json={"title": "澄清链路"}).json()
 

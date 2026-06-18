@@ -15,6 +15,7 @@ from langchain_core.tools import BaseTool, tool
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.subagents.config import SlotFlowSubagentConfig, SlotFlowSubagentProfile
+from app.harness.utils import message_role, model_supports_tools
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,11 +311,7 @@ def usable_tools_for_model(
 
     if not tools:
         return []
-    if isinstance(model, str):
-        return list(tools)
-    if type(model).bind_tools is BaseChatModel.bind_tools:
-        return []
-    return list(tools)
+    return list(tools) if model_supports_tools(model) else []
 
 
 def latest_assistant_text(result: Any) -> str | None:
@@ -335,16 +332,6 @@ def latest_assistant_text(result: Any) -> str | None:
         if content:
             return content
     return None
-
-
-def message_role(message: Any) -> str | None:
-    if isinstance(message, BaseMessage):
-        return message.type
-    if isinstance(message, dict):
-        raw_role = message.get("role") or message.get("type")
-        return str(raw_role) if raw_role is not None else None
-    raw_type = getattr(message, "type", None)
-    return str(raw_type) if raw_type is not None else None
 
 
 def message_content(message: Any) -> str:

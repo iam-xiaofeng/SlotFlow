@@ -18,6 +18,7 @@ from app.harness.tools.builtins import ask_clarification_tool, slotflow_context_
 from app.harness.tools.customization import build_customization_tools
 from app.harness.tools.network import build_network_tools
 from app.harness.tools.workspace import build_workspace_tools
+from app.harness.utils import dedupe_by_name
 
 if TYPE_CHECKING:
     from app.harness.mcp import SlotFlowMcpConfigStore
@@ -39,11 +40,9 @@ def build_harness_tools(
 ) -> list[BaseTool]:
     """组装本次 graph 要绑定的工具列表。
 
-    `features` 参数暂时没有分支逻辑，但保留在函数签名里，是为了后续把
-    `subagent_enabled`、MCP 开关等能力都收敛到同一入口。
+    `features` 会透传给 `build_subagent_tools`，用于决定是否启用子 agent 工具等能力。
     """
 
-    _ = features
     mcp_tools = load_mcp_tools(
         config=mcp_config or SlotFlowMcpConfig(),
         provider=mcp_tool_provider,
@@ -69,7 +68,7 @@ def build_harness_tools(
             *mcp_tools,
         ],
     )
-    return dedupe_tools_by_name(
+    return dedupe_by_name(
         [
             *(extra_tools or []),
             ask_clarification_tool,
@@ -81,16 +80,3 @@ def build_harness_tools(
             *mcp_tools,
         ]
     )
-
-
-def dedupe_tools_by_name(tools: list[BaseTool]) -> list[BaseTool]:
-    """按 tool.name 去重，保留更早出现的工具。"""
-
-    seen_names: set[str] = set()
-    unique_tools: list[BaseTool] = []
-    for tool in tools:
-        if tool.name in seen_names:
-            continue
-        unique_tools.append(tool)
-        seen_names.add(tool.name)
-    return unique_tools

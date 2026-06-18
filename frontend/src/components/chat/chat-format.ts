@@ -1,4 +1,5 @@
 import { type ChatUiMessage } from "@/hooks/use-chat-stream";
+import { type WorkspaceEntryRecord } from "@/lib/chat-stream";
 
 export type MessageFile = {
   id: string;
@@ -104,4 +105,22 @@ export function displayFileName(file: {
   original_filename?: string | null;
 }) {
   return file.original_filename || file.filename;
+}
+
+export function filterThreadArtifacts(
+  threadId: string,
+  artifacts: WorkspaceEntryRecord[],
+  threadArtifactPaths: Record<string, string[]>,
+  messages: Pick<ChatUiMessage, "content">[] = [],
+): WorkspaceEntryRecord[] {
+  const explicitPaths = new Set(threadArtifactPaths[threadId] ?? []);
+  const threadPrefix = `artifacts/${threadId}/`;
+  const messageText = messages.map((message) => message.content).join("\n");
+  return artifacts.filter(
+    (artifact) =>
+      explicitPaths.has(artifact.path) ||
+      artifact.path.startsWith(threadPrefix) ||
+      messageText.includes(artifact.path) ||
+      messageText.includes(artifact.path.replace(/^artifacts\//, "")),
+  );
 }

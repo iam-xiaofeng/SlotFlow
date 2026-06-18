@@ -11,9 +11,9 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 
 from app.chat.runtime import (
     DEFAULT_SKILLS_ROOT,
-    SlotFlowRuntimeConfig,
     refresh_runtime_skills_config,
 )
+from app.dependencies import get_runtime_config
 from app.harness.skills import load_enabled_skills
 from app.harness.skills.store import ProtectedSkillError, SlotFlowSkillsConfigStore
 from app.skills.models import (
@@ -215,13 +215,6 @@ async def delete_skill(skill_name: str, request: Request) -> Response:
         runtime_config.enabled_skills.discard(skill.name)
     refresh_runtime_skills_config(runtime_config)
     return Response(status_code=204)
-
-
-def get_runtime_config(request: Request) -> SlotFlowRuntimeConfig:
-    runtime_config = getattr(request.app.state, "runtime_config", None)
-    if runtime_config is None:
-        raise HTTPException(status_code=503, detail="runtime config is not configured")
-    return runtime_config
 
 
 def get_skills_root(request: Request) -> Path:
