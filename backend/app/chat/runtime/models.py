@@ -77,7 +77,7 @@ def create_chat_model(
 
     provider = infer_model_provider(model_name)
     if provider == "anthropic":
-        return create_anthropic_chat_model(model_name=model_name)
+        return create_anthropic_chat_model(model_name=model_name, run_context=run_context)
     return create_openai_compatible_chat_model(
         model_name=model_name,
         provider=provider,
@@ -185,14 +185,30 @@ def build_openai_compatible_model_kwargs(
         "timeout": 30,
         "max_retries": 0,
     }
-    if provider == "deepseek" and run_context and run_context.thinking_enabled:
-        kwargs["reasoning_effort"] = "high"
-        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+    if run_context and run_context.thinking_enabled:
+        if provider == "deepseek":
+            # DeepSeek v4 uses an OpenAI-compatible body-level thinking switch.
+            kwargs["reasoning_effort"] = "high"
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        elif provider == "openai" and is_openai_reasoning_model(model_name):
+            # Only OpenAI reasoning models (o-series / gpt-5) accept reasoning_effort.
+            kwargs["reasoning_effort"] = "high"
     return kwargs
 
 
-def create_anthropic_chat_model(*, model_name: str) -> "BaseChatModel":
-    """Create an Anthropic chat model for Claude ids."""
+def is_openai_reasoning_model(model_name: str) -> bool:
+    """Whether an OpenAI model id supports reasoning_effort (o-series / gpt-5)."""
+
+    normalized = model_name.strip().lower()
+    return normalized.startswith("o") or normalized.startswith("gpt-5")
+
+
+def create_anthropic_chat_model(
+    *,
+    model_name: str,
+    run_context: RunContext | None = None,
+) -> "BaseChatModel":
+    """Create an Anthropic chat model for Claude ids (with extended thinking)."""
 
     try:
         from langchain_anthropic import ChatAnthropic
@@ -212,6 +228,12 @@ def create_anthropic_chat_model(*, model_name: str) -> "BaseChatModel":
         "timeout": 30,
         "max_retries": 0,
     }
+    if run_context and run_context.thinking_enabled:
+        # Extended thinking emits "thinking" content blocks; max_tokens must exceed the
+        # thinking budget. langchain-anthropic surfaces thinking text via content blocks
+        # that our projection layer maps to the reasoning channel.
+        kwargs["max_tokens"] = 8192
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 4096}
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
     if base_url and base_url.strip():
         kwargs["base_url"] = base_url.strip()

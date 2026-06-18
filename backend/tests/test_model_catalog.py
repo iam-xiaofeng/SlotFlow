@@ -54,7 +54,7 @@ async def test_model_catalog_uses_provider_api_models(
 
 
 @pytest.mark.asyncio
-async def test_model_catalog_falls_back_when_provider_discovery_fails(
+async def test_model_catalog_reports_error_when_provider_discovery_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
@@ -70,6 +70,5 @@ async def test_model_catalog_falls_back_when_provider_discovery_fails(
     catalog = await discover_model_catalog()
     deepseek = catalog.providers[0]
 
-    assert catalog.default_model == "deepseek-v4-pro"
-    assert deepseek.status == "fallback"
-    assert "deepseek-v4-pro" in [model.id for model in deepseek.models]
+    assert deepseek.status == "error"
+    assert deepseek.models == []
