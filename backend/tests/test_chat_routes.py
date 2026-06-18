@@ -3,7 +3,7 @@
 这组测试把 HTTP 入口、仓库、run 配置、agent adapter 和 SSE 输出串起来：
 
 HTTP 请求
--> 内存仓库
+-> SQLite 仓库（测试用 :memory: 临时库）
 -> run 配置
 -> agent adapter
 -> SSE frame

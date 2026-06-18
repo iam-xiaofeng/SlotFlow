@@ -60,16 +60,15 @@ from app.chat.runtime.env import (
     load_positive_int_from_env,
 )
 from app.chat.runtime.models import (
-    DeepSeekChatOpenAI,
+    DeepSeekChatModel,
+    bridge_reasoning_content_block,
     build_openai_compatible_model_kwargs,
     create_anthropic_chat_model,
     create_chat_model,
     create_model_for_context,
     create_openai_compatible_chat_model,
-    deepseek_delta_from_stream_chunk,
     infer_model_provider,
     message_has_content,
-    preserve_deepseek_reasoning_delta,
 )
 
 __all__ = [
@@ -113,14 +112,13 @@ __all__ = [
     "load_optional_text_from_env",
     "load_path_from_env",
     "load_positive_int_from_env",
-    "DeepSeekChatOpenAI",
+    "DeepSeekChatModel",
+    "bridge_reasoning_content_block",
     "build_openai_compatible_model_kwargs",
     "create_anthropic_chat_model",
     "create_chat_model",
     "create_model_for_context",
     "create_openai_compatible_chat_model",
-    "deepseek_delta_from_stream_chunk",
     "infer_model_provider",
     "message_has_content",
-    "preserve_deepseek_reasoning_delta",
 ]

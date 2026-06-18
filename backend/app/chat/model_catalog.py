@@ -13,30 +13,12 @@ from app.chat.models import ModelCatalogRecord, ModelOptionRecord, ModelProvider
 
 DEFAULT_CHAT_MODEL = "deepseek-v4-pro"
 
+# Official endpoints used only when the matching *_BASE_URL env var is unset; users
+# pointing at a third-party / self-hosted OpenAI-compatible gateway just set the env var.
 PROVIDER_DEFAULT_BASE_URLS: dict[ModelProvider, str] = {
     "deepseek": "https://api.deepseek.com",
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com/v1",
-}
-
-PROVIDER_FALLBACK_MODELS: dict[ModelProvider, tuple[str, ...]] = {
-    "deepseek": (
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "deepseek-chat",
-        "deepseek-reasoner",
-    ),
-    "openai": (
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4o",
-        "gpt-4o-mini",
-    ),
-    "anthropic": (
-        "claude-sonnet-4-5",
-        "claude-opus-4-1",
-        "claude-3-5-haiku-latest",
-    ),
 }
 
 
@@ -84,9 +66,9 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             provider=provider_env.provider,
             configured=True,
             base_url=provider_env.base_url,
-            status="fallback",
-            message=f"Model discovery failed, using built-in candidates: {exc.__class__.__name__}",
-            models=fallback_model_options(provider_env.provider),
+            status="error",
+            message=f"Model discovery failed: {exc.__class__.__name__}",
+            models=[],
         )
 
     if not model_ids:
@@ -94,9 +76,9 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             provider=provider_env.provider,
             configured=True,
             base_url=provider_env.base_url,
-            status="fallback",
-            message="Provider returned no chat models, using built-in candidates.",
-            models=fallback_model_options(provider_env.provider),
+            status="error",
+            message="Provider returned no chat models for this endpoint.",
+            models=[],
         )
 
     return ModelProviderRecord(
@@ -172,18 +154,6 @@ def is_chat_model_id(provider: ModelProvider, model_id: str) -> bool:
         return lowered.startswith("deepseek-")
     blocked_terms = ("embedding", "whisper", "tts", "dall-e", "moderation")
     return not any(term in lowered for term in blocked_terms)
-
-
-def fallback_model_options(provider: ModelProvider) -> list[ModelOptionRecord]:
-    return [
-        ModelOptionRecord(
-            id=model_id,
-            provider=provider,
-            label=model_label(provider, model_id),
-            source="fallback",
-        )
-        for model_id in PROVIDER_FALLBACK_MODELS[provider]
-    ]
 
 
 def choose_default_model(models: list[ModelOptionRecord]) -> str:

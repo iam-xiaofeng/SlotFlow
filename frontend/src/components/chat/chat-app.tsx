@@ -24,7 +24,6 @@ import {
   type McpServerRecord,
   type MemoryKind,
   type MemoryRecord,
-  type ModelCatalogRecord,
   type SkillRecord,
   type ThreadRecord,
   type UploadedFileRecord,
@@ -38,11 +37,6 @@ import {
   deleteSkill,
   deleteThread,
   installSkill,
-  listChatModels,
-  listArtifacts,
-  listMcpServers,
-  listMemories,
-  listSkills,
   listThreads,
   readArtifact,
   reorderMcpServers,
@@ -58,23 +52,21 @@ import {
 
 import { ArtifactWorkspacePanel } from "./artifact-panel";
 import {
-  type ThreadArtifactIndex,
   defaultModelName,
   extractFileIdsFromMessage,
   extractUploadedFilesFromMetadata,
-  flattenModelOptions,
   formatUploadToast,
   makeQueueId,
-  modelExists,
-  readThreadArtifactIndex,
   removeArtifactPathFromThreadIndex,
   sortRecordsByNames,
-  writeThreadArtifactIndex,
 } from "./chat-app-helpers";
 import { ChatComposer } from "./chat-composer";
 import { filterThreadArtifacts, makeThreadTitle } from "./chat-format";
 import { ThreadSidebar } from "./chat-sidebar";
 import { EmptyState, MessageList } from "./message-list";
+import { useModelCatalog } from "./use-model-catalog";
+import { useThreadArtifactIndex } from "./use-thread-artifact-index";
+import { useWorkspaceData } from "./use-workspace-data";
 
 const defaultMode: ChatMode = "pro";
 
@@ -95,18 +87,10 @@ export function ChatApp() {
   const [threadListError, setThreadListError] = useState<string | null>(null);
   const [isLoadingThreads, setIsLoadingThreads] = useState(true);
   const [attachments, setAttachments] = useState<UploadedFileRecord[]>([]);
-  const [artifacts, setArtifacts] = useState<WorkspaceEntryRecord[]>([]);
-  const [threadArtifactPaths, setThreadArtifactPaths] = useState<ThreadArtifactIndex>({});
-  const [skills, setSkills] = useState<SkillRecord[]>([]);
-  const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
-  const [memories, setMemories] = useState<MemoryRecord[]>([]);
-  const [modelCatalog, setModelCatalog] = useState<ModelCatalogRecord | null>(null);
-  const [selectedModelName, setSelectedModelName] = useState(defaultModelName);
   const [selectedMode, setSelectedMode] = useState<ChatMode>(defaultMode);
   const [selectedThinkingEnabled, setSelectedThinkingEnabled] = useState(
     defaultMode !== "flash",
   );
-  const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
   const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
   const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
@@ -120,7 +104,6 @@ export function ChatApp() {
   const skillFolderInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const isDrainingQueueRef = useRef(false);
-  const hasLoadedThreadArtifactIndexRef = useRef(false);
 
   const {
     thread,
@@ -146,6 +129,27 @@ export function ChatApp() {
     maxEventLogItems: 10,
   });
 
+  const { isLoadingModels, selectedModelName, setSelectedModelName, modelOptions } =
+    useModelCatalog();
+
+  const {
+    artifacts,
+    setArtifacts,
+    skills,
+    setSkills,
+    mcpServers,
+    setMcpServers,
+    memories,
+    setMemories,
+    refreshArtifacts,
+    refreshSkills,
+    refreshMcpServers,
+    refreshMemories,
+  } = useWorkspaceData();
+
+  const { threadArtifactPaths, setThreadArtifactPaths, rememberThreadArtifacts } =
+    useThreadArtifactIndex();
+
   const refreshThreads = useCallback(async () => {
     setThreadListError(null);
     try {
@@ -156,41 +160,6 @@ export function ChatApp() {
       const message = caught instanceof Error ? caught.message : "load threads failed";
       setThreadListError(message);
       return [];
-    }
-  }, []);
-
-  const refreshArtifacts = useCallback(async () => {
-    try {
-      const nextArtifacts = await listArtifacts();
-      setArtifacts(nextArtifacts);
-      return nextArtifacts;
-    } catch {
-      setArtifacts([]);
-      return [];
-    }
-  }, []);
-
-  const refreshSkills = useCallback(async () => {
-    try {
-      setSkills(await listSkills());
-    } catch {
-      setSkills([]);
-    }
-  }, []);
-
-  const refreshMcpServers = useCallback(async () => {
-    try {
-      setMcpServers(await listMcpServers());
-    } catch {
-      setMcpServers([]);
-    }
-  }, []);
-
-  const refreshMemories = useCallback(async () => {
-    try {
-      setMemories(await listMemories());
-    } catch {
-      setMemories([]);
     }
   }, []);
 
@@ -221,18 +190,6 @@ export function ChatApp() {
     };
   }, [refreshArtifacts, refreshMcpServers, refreshMemories, refreshSkills, refreshThreads]);
 
-  useEffect(() => {
-    setThreadArtifactPaths(readThreadArtifactIndex());
-    hasLoadedThreadArtifactIndexRef.current = true;
-  }, []);
-
-  useEffect(() => {
-    if (!hasLoadedThreadArtifactIndexRef.current) {
-      return;
-    }
-    writeThreadArtifactIndex(threadArtifactPaths);
-  }, [threadArtifactPaths]);
-
   const artifactFiles = useMemo(
     () => artifacts.filter((artifact) => artifact.kind === "file"),
     [artifacts],
@@ -245,26 +202,6 @@ export function ChatApp() {
   }, [artifactFiles, messages, thread?.id, threadArtifactPaths]);
   const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
   const isRunSettingsLocked = messages.length > 0;
-  const modelOptions = useMemo(() => flattenModelOptions(modelCatalog), [modelCatalog]);
-
-  const rememberThreadArtifacts = useCallback((threadId: string, paths: string[]) => {
-    if (paths.length === 0) {
-      return;
-    }
-    setThreadArtifactPaths((current) => {
-      const existing = current[threadId] ?? [];
-      const merged = [...existing];
-      for (const path of paths) {
-        if (!merged.includes(path)) {
-          merged.push(path);
-        }
-      }
-      return {
-        ...current,
-        [threadId]: merged,
-      };
-    });
-  }, []);
 
   const sendPreparedMessage = useCallback(
     async (
@@ -340,40 +277,6 @@ export function ChatApp() {
       sendMessage,
     ],
   );
-
-  useEffect(() => {
-    let active = true;
-
-    async function refreshModelCatalog() {
-      setIsLoadingModels(true);
-      try {
-        const catalog = await listChatModels();
-        if (!active) {
-          return;
-        }
-        setModelCatalog(catalog);
-        setSelectedModelName((current) =>
-          modelExists(catalog, current) ? current : catalog.default_model,
-        );
-      } catch (caught) {
-        const message = caught instanceof Error ? caught.message : "load models failed";
-        toast.error(message);
-        if (active) {
-          setModelCatalog(null);
-        }
-      } finally {
-        if (active) {
-          setIsLoadingModels(false);
-        }
-      }
-    }
-
-    void refreshModelCatalog();
-
-    return () => {
-      active = false;
-    };
-  }, []);
 
   useEffect(() => {
     if (

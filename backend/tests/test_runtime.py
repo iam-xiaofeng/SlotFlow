@@ -24,7 +24,7 @@ import app.chat.runtime as runtime_module
 from app.chat.run_config import build_run_config
 from app.chat.runtime import (
     DEFAULT_CHECKPOINTER_SQLITE_PATH,
-    DeepSeekChatOpenAI,
+    DeepSeekChatModel,
     RuntimeBackedAgentAdapter,
     SlotFlowRuntimeConfig,
     aclose_checkpointer,
@@ -195,8 +195,58 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
     assert "extra_body" not in flash_kwargs
 
 
-def test_deepseek_chat_openai_preserves_reasoning_stream_delta() -> None:
-    model = DeepSeekChatOpenAI(
+def test_openai_reasoning_effort_only_for_reasoning_models() -> None:
+    """OpenAI 推理档：仅 o 系列 / gpt-5 才注入 reasoning_effort，gpt-4* 不注入。"""
+
+    from app.chat.runtime.models import is_openai_reasoning_model
+
+    pro_context = _bundle(
+        request=ChatStreamRequest(message="复杂分析", model_name="o3", mode="pro")
+    ).context
+    reasoning_kwargs = build_openai_compatible_model_kwargs(
+        model_name="o3",
+        api_key="key",
+        base_url=None,
+        provider="openai",
+        run_context=pro_context,
+    )
+    plain_kwargs = build_openai_compatible_model_kwargs(
+        model_name="gpt-4.1",
+        api_key="key",
+        base_url=None,
+        provider="openai",
+        run_context=pro_context,
+    )
+
+    assert reasoning_kwargs["reasoning_effort"] == "high"
+    assert "extra_body" not in reasoning_kwargs
+    assert "reasoning_effort" not in plain_kwargs
+    assert is_openai_reasoning_model("o3")
+    assert not is_openai_reasoning_model("gpt-4.1")
+
+
+def test_anthropic_extended_thinking_enabled_in_thinking_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic 思考档应开启 extended thinking，并把 max_tokens 抬到预算之上。"""
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    from app.chat.runtime.models import create_anthropic_chat_model
+
+    thinking_context = _bundle(
+        request=ChatStreamRequest(message="想一想", model_name="claude-sonnet-4-5", mode="pro")
+    ).context
+    model = create_anthropic_chat_model(
+        model_name="claude-sonnet-4-5",
+        run_context=thinking_context,
+    )
+
+    assert model.thinking == {"type": "enabled", "budget_tokens": 4096}
+    assert model.max_tokens == 8192
+
+
+def test_deepseek_chat_model_preserves_reasoning_stream_delta() -> None:
+    model = DeepSeekChatModel(
         model="deepseek-v4-pro",
         api_key="key",
         base_url="https://api.deepseek.com",

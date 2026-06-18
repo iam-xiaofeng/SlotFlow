@@ -103,6 +103,21 @@ def test_extract_message_delta_accepts_common_projection_shapes(item, expected) 
     assert extract_message_delta(item) == expected
 
 
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"type": "reasoning", "reasoning": "deepseek/openai 风格"}, "deepseek/openai 风格"),
+        ({"type": "thinking", "thinking": "anthropic 扩展思考"}, "anthropic 扩展思考"),
+        ({"additional_kwargs": {"reasoning_content": "kw 风格"}}, "kw 风格"),
+        ({"additional_kwargs": {"reasoning": "openrouter 风格"}}, "openrouter 风格"),
+    ],
+)
+def test_extract_message_delta_parts_reads_multi_provider_reasoning(item, expected) -> None:
+    """reasoning 通道要兼容 deepseek/openai 的 reasoning 与 anthropic 的 thinking。"""
+
+    assert extract_message_delta_parts(item) == {"reasoning_content": expected}
+
+
 def test_projection_message_item_becomes_message_delta_event() -> None:
     """messages 投影应该变成前端逐字显示用的 message.delta。"""
 

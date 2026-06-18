@@ -1,7 +1,8 @@
 """Chat model construction for the SlotFlow runtime.
 
-按前端选择的 model id 推断 provider，并创建对应的 LangChain chat model。DeepSeek 走
-OpenAI 兼容协议，但官方流里多了 `reasoning_content`，需要一个保留它的 ChatOpenAI 变体。
+按前端选择的 model id 推断 provider，并创建对应的 LangChain chat model。DeepSeek 用
+官方 `langchain_deepseek.ChatDeepSeek`（基于 OpenAI 兼容协议且原生解析 reasoning_content），
+SlotFlow 只补一个很薄的桥，把 reasoning 也映射成标准 reasoning content block 供 v3 流消费。
 """
 
 from __future__ import annotations
@@ -20,28 +21,24 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessageChunk
 
 
-def preserve_deepseek_reasoning_delta(
-    message: "BaseMessageChunk",
-    delta: dict[str, Any],
-) -> None:
-    """Restore DeepSeek reasoning fields dropped by langchain-openai.
+def bridge_reasoning_content_block(message: "BaseMessageChunk") -> None:
+    """Mirror DeepSeek reasoning into a standard reasoning content block.
 
-    The OpenAI-compatible DeepSeek stream includes `choices[].delta.reasoning_content`,
-    but langchain-openai currently only converts `content`, tool calls, and function
-    calls into AIMessageChunk fields. This provider-only hook keeps that official
-    DeepSeek field as a standard LangChain reasoning content block, so LangGraph v3
-    can expose it through `message.reasoning` instead of an empty generic chunk.
+    ChatDeepSeek already extracts `choices[].delta.reasoning_content` into
+    `additional_kwargs["reasoning_content"]`. SlotFlow 的 LangGraph v3 流式从 typed
+    `message.reasoning` 通道读取思考，而该通道由标准 reasoning content block 喂入；
+    因此当某个 chunk 只带 reasoning（还没有正文）时，把它桥接成一个
+    `{"type": "reasoning"}` content block。
     """
 
     additional_kwargs = getattr(message, "additional_kwargs", None)
     if not isinstance(additional_kwargs, dict):
         return
 
-    reasoning = delta.get("reasoning_content")
+    reasoning = additional_kwargs.get("reasoning_content")
     if not isinstance(reasoning, str) or not reasoning:
         return
 
-    additional_kwargs["reasoning_content"] = reasoning
     if not message_has_content(message):
         message.content = [{"type": "reasoning", "reasoning": reasoning}]
 
@@ -53,17 +50,6 @@ def message_has_content(message: "BaseMessageChunk") -> bool:
     if isinstance(content, list):
         return bool(content)
     return content is not None
-
-
-def deepseek_delta_from_stream_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
-    choices = (
-        chunk.get("choices", [])
-        or chunk.get("chunk", {}).get("choices", [])
-    )
-    if not choices:
-        return {}
-    delta = choices[0].get("delta")
-    return delta if isinstance(delta, dict) else {}
 
 
 def create_model_for_context(
@@ -91,7 +77,7 @@ def create_chat_model(
 
     provider = infer_model_provider(model_name)
     if provider == "anthropic":
-        return create_anthropic_chat_model(model_name=model_name)
+        return create_anthropic_chat_model(model_name=model_name, run_context=run_context)
     return create_openai_compatible_chat_model(
         model_name=model_name,
         provider=provider,
@@ -131,7 +117,7 @@ def create_openai_compatible_chat_model(
     if not api_key:
         raise RuntimeError(f"{api_key_name} is required for {provider} runtime")
 
-    chat_model_class = DeepSeekChatOpenAI if provider == "deepseek" else ChatOpenAI
+    chat_model_class = _deepseek_chat_model_class() if provider == "deepseek" else ChatOpenAI
 
     return chat_model_class(
         **build_openai_compatible_model_kwargs(
@@ -145,16 +131,18 @@ def create_openai_compatible_chat_model(
 
 
 @lru_cache(maxsize=1)
-def _deepseek_chat_openai_class() -> type:
-    """Build the DeepSeek-aware ChatOpenAI subclass once, lazily.
+def _deepseek_chat_model_class() -> type:
+    """Build the SlotFlow ChatDeepSeek subclass once, lazily.
 
-    langchain-openai 只在导入后才可用，因此把子类定义延迟到首次构造模型时，并缓存
-    复用，避免每次实例化都重新 define 一个类。
+    ChatDeepSeek（langchain-deepseek）已原生把 DeepSeek 的 reasoning_content 解析进
+    additional_kwargs；这里只补一层桥，让 reasoning 同时进入 LangGraph v3 的 typed
+    `message.reasoning` 通道（标准 reasoning content block）。延迟导入并缓存子类，
+    避免每次实例化都重新 define。
     """
 
-    from langchain_openai import ChatOpenAI
+    from langchain_deepseek import ChatDeepSeek
 
-    class _DeepSeekChatOpenAI(ChatOpenAI):
+    class _SlotFlowChatDeepSeek(ChatDeepSeek):
         def _convert_chunk_to_generation_chunk(
             self,
             chunk: dict[str, Any],
@@ -167,19 +155,16 @@ def _deepseek_chat_openai_class() -> type:
                 base_generation_info,
             )
             if generation_chunk is not None:
-                preserve_deepseek_reasoning_delta(
-                    generation_chunk.message,
-                    deepseek_delta_from_stream_chunk(chunk),
-                )
+                bridge_reasoning_content_block(generation_chunk.message)
             return generation_chunk
 
-    return _DeepSeekChatOpenAI
+    return _SlotFlowChatDeepSeek
 
 
-def DeepSeekChatOpenAI(*args: Any, **kwargs: Any) -> Any:  # noqa: N802 - factory keeps a class-like public name
-    """ChatOpenAI variant that preserves DeepSeek reasoning deltas."""
+def DeepSeekChatModel(*args: Any, **kwargs: Any) -> Any:  # noqa: N802 - factory keeps a class-like public name
+    """ChatDeepSeek variant that also surfaces reasoning via the v3 reasoning channel."""
 
-    return _deepseek_chat_openai_class()(*args, **kwargs)
+    return _deepseek_chat_model_class()(*args, **kwargs)
 
 
 def build_openai_compatible_model_kwargs(
@@ -200,14 +185,30 @@ def build_openai_compatible_model_kwargs(
         "timeout": 30,
         "max_retries": 0,
     }
-    if provider == "deepseek" and run_context and run_context.thinking_enabled:
-        kwargs["reasoning_effort"] = "high"
-        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+    if run_context and run_context.thinking_enabled:
+        if provider == "deepseek":
+            # DeepSeek v4 uses an OpenAI-compatible body-level thinking switch.
+            kwargs["reasoning_effort"] = "high"
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        elif provider == "openai" and is_openai_reasoning_model(model_name):
+            # Only OpenAI reasoning models (o-series / gpt-5) accept reasoning_effort.
+            kwargs["reasoning_effort"] = "high"
     return kwargs
 
 
-def create_anthropic_chat_model(*, model_name: str) -> "BaseChatModel":
-    """Create an Anthropic chat model for Claude ids."""
+def is_openai_reasoning_model(model_name: str) -> bool:
+    """Whether an OpenAI model id supports reasoning_effort (o-series / gpt-5)."""
+
+    normalized = model_name.strip().lower()
+    return normalized.startswith("o") or normalized.startswith("gpt-5")
+
+
+def create_anthropic_chat_model(
+    *,
+    model_name: str,
+    run_context: RunContext | None = None,
+) -> "BaseChatModel":
+    """Create an Anthropic chat model for Claude ids (with extended thinking)."""
 
     try:
         from langchain_anthropic import ChatAnthropic
@@ -227,6 +228,12 @@ def create_anthropic_chat_model(*, model_name: str) -> "BaseChatModel":
         "timeout": 30,
         "max_retries": 0,
     }
+    if run_context and run_context.thinking_enabled:
+        # Extended thinking emits "thinking" content blocks; max_tokens must exceed the
+        # thinking budget. langchain-anthropic surfaces thinking text via content blocks
+        # that our projection layer maps to the reasoning channel.
+        kwargs["max_tokens"] = 8192
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 4096}
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
     if base_url and base_url.strip():
         kwargs["base_url"] = base_url.strip()

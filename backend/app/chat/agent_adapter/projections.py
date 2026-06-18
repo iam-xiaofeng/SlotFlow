@@ -195,10 +195,12 @@ def extract_standard_reasoning_text(item: Any) -> str:
 
 
 def extract_reasoning_from_content_block(item: Any) -> str:
-    if not isinstance(item, dict) or item.get("type") != "reasoning":
+    # Reasoning content blocks differ by provider: DeepSeek/OpenAI use "reasoning",
+    # Anthropic extended thinking uses "thinking".
+    if not isinstance(item, dict) or item.get("type") not in ("reasoning", "thinking"):
         return ""
 
-    for key in ("reasoning", "text", "content"):
+    for key in ("reasoning", "thinking", "text", "content"):
         value = item.get(key)
         if isinstance(value, str) and value:
             return value
@@ -240,8 +242,12 @@ def extract_provider_reasoning_content(item: Any) -> str:
     if not isinstance(additional_kwargs, dict):
         return ""
 
-    reasoning = additional_kwargs.get("reasoning_content")
-    return reasoning if isinstance(reasoning, str) and reasoning else ""
+    # DeepSeek/OpenAI-compatible providers expose reasoning here under either key.
+    for key in ("reasoning_content", "reasoning"):
+        value = additional_kwargs.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def normalize_values_snapshot(*, item: Any, bundle: RunConfigBundle) -> dict[str, Any]:
@@ -419,7 +425,7 @@ def extract_text_block_text(item: Any) -> str:
         return item
 
     if isinstance(item, dict):
-        if item.get("type") == "reasoning":
+        if item.get("type") in ("reasoning", "thinking"):
             return ""
         text = item.get("text")
         if isinstance(text, str):
