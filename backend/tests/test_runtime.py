@@ -24,7 +24,7 @@ import app.chat.runtime as runtime_module
 from app.chat.run_config import build_run_config
 from app.chat.runtime import (
     DEFAULT_CHECKPOINTER_SQLITE_PATH,
-    DeepSeekChatOpenAI,
+    DeepSeekChatModel,
     RuntimeBackedAgentAdapter,
     SlotFlowRuntimeConfig,
     aclose_checkpointer,
@@ -195,8 +195,8 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
     assert "extra_body" not in flash_kwargs
 
 
-def test_deepseek_chat_openai_preserves_reasoning_stream_delta() -> None:
-    model = DeepSeekChatOpenAI(
+def test_deepseek_chat_model_preserves_reasoning_stream_delta() -> None:
+    model = DeepSeekChatModel(
         model="deepseek-v4-pro",
         api_key="key",
         base_url="https://api.deepseek.com",
