@@ -72,3 +72,48 @@ async def test_model_catalog_reports_error_when_provider_discovery_fails(
 
     assert deepseek.status == "error"
     assert deepseek.models == []
+
+
+def test_load_provider_env_prefers_third_party_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """base_url 读自环境变量，支持第三方 / 自建网关；未设时回落官方地址。"""
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gateway.internal/v1")
+    custom = model_catalog.load_provider_env("deepseek")
+    assert custom.base_url == "https://gateway.internal/v1"
+
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    default = model_catalog.load_provider_env("deepseek")
+    assert default.base_url == model_catalog.PROVIDER_DEFAULT_BASE_URLS["deepseek"]
+
+
+def test_fetch_url_and_headers_match_provider() -> None:
+    """探测 URL = {base_url}/models；anthropic 用 x-api-key，其余用 Bearer。"""
+
+    anthropic_env = model_catalog.ProviderEnv(
+        provider="anthropic", api_key="ak", base_url="https://api.anthropic.com/v1"
+    )
+    openai_env = model_catalog.ProviderEnv(
+        provider="openai", api_key="ok", base_url="https://api.openai.com/v1"
+    )
+    assert model_catalog.provider_headers(anthropic_env)["x-api-key"] == "ak"
+    assert "Authorization" not in model_catalog.provider_headers(anthropic_env)
+    assert model_catalog.provider_headers(openai_env)["Authorization"] == "Bearer ok"
+
+
+def test_parse_model_ids_filters_non_chat_models() -> None:
+    """从 /models 响应里过滤掉非对话模型（embedding/whisper 等）并按产家收敛。"""
+
+    openai_payload = {
+        "data": [
+            {"id": "gpt-4.1"},
+            {"id": "text-embedding-3-small"},
+            {"id": "whisper-1"},
+        ]
+    }
+    assert model_catalog.parse_model_ids("openai", openai_payload) == ["gpt-4.1"]
+
+    anthropic_payload = {"data": [{"id": "claude-sonnet-4-5"}, {"id": "not-a-claude"}]}
+    assert model_catalog.parse_model_ids("anthropic", anthropic_payload) == ["claude-sonnet-4-5"]
