@@ -185,14 +185,22 @@ def build_openai_compatible_model_kwargs(
         "timeout": 30,
         "max_retries": 0,
     }
-    if run_context and run_context.thinking_enabled:
-        if provider == "deepseek":
-            # DeepSeek v4 uses an OpenAI-compatible body-level thinking switch.
+    if provider == "deepseek":
+        # DeepSeek v4 keeps thinking ON by default, so the off state must be sent
+        # explicitly — omitting the flag is NOT "no thinking".
+        if run_context and run_context.thinking_enabled:
             kwargs["reasoning_effort"] = "high"
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        elif provider == "openai" and is_openai_reasoning_model(model_name):
-            # Only OpenAI reasoning models (o-series / gpt-5) accept reasoning_effort.
-            kwargs["reasoning_effort"] = "high"
+        else:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    elif (
+        provider == "openai"
+        and run_context
+        and run_context.thinking_enabled
+        and is_openai_reasoning_model(model_name)
+    ):
+        # Only OpenAI reasoning models (o-series / gpt-5) accept reasoning_effort.
+        kwargs["reasoning_effort"] = "high"
     return kwargs
 
 
