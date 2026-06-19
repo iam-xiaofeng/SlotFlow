@@ -51,6 +51,7 @@ import {
 import { filterThreadArtifacts } from "./chat-format";
 import { ContextPickerMenu } from "./chat-sidebar-context";
 import { SearchMenu } from "./chat-sidebar-search";
+import { SlotFlowLogo } from "./slotflow-logo";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
@@ -139,8 +140,11 @@ export function ThreadSidebar({
     <>
       <SidebarHeader className="px-2 py-0">
         <div className="group/slotflow-sidebar-header flex h-12 items-center justify-between gap-2">
-          <div className="min-w-0 pl-2 font-serif text-[1.05rem] font-semibold leading-none text-foreground group-data-[collapsible=icon]:hidden">
-            SlotFlow
+          <div className="flex min-w-0 items-center gap-2 pl-2 group-data-[collapsible=icon]:pl-0">
+            <SlotFlowLogo className="size-6 shrink-0 rounded-md" />
+            <span className="min-w-0 truncate font-serif text-[1.05rem] font-semibold leading-none text-foreground group-data-[collapsible=icon]:hidden">
+              SlotFlow
+            </span>
           </div>
           <div className="flex items-center gap-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:justify-center">
             <SearchMenu
