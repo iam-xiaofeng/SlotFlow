@@ -282,11 +282,19 @@ export async function uploadFile(
 }
 
 export async function listArtifacts(
-  options: ChatRequestOptions = {},
+  options: ChatRequestOptions & { path?: string } = {},
 ): Promise<WorkspaceEntryRecord[]> {
-  const response = await fetch("/api/workspace/artifacts", {
-    signal: options.signal,
-  });
+  const params = new URLSearchParams();
+  if (options.path) {
+    params.set("path", options.path);
+  }
+  const query = params.toString();
+  const response = await fetch(
+    `/api/workspace/artifacts${query ? `?${query}` : ""}`,
+    {
+      signal: options.signal,
+    },
+  );
 
   if (!response.ok) {
     throw new Error(`list artifacts failed: ${response.status}`);
