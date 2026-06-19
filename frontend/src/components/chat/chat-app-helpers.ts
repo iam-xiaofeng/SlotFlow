@@ -44,15 +44,9 @@ export function makeQueueId() {
 
 export function flattenModelOptions(catalog: ModelCatalogRecord | null): ModelOptionRecord[] {
   if (!catalog) {
-    return [
-      {
-        id: defaultModelName,
-        provider: "deepseek",
-        label: `DeepSeek · ${defaultModelName}`,
-        available: true,
-        source: "fallback",
-      },
-    ];
+    // No fake default while the catalog is still loading — the composer shows a
+    // loading state instead of a hardcoded model that may not actually exist.
+    return [];
   }
 
   return catalog.providers.flatMap((provider) =>
