@@ -21,11 +21,16 @@ def ask_clarification_tool(
     context: str | None = None,
     options: list[str] | None = None,
 ) -> str:
-    """Ask the user to choose or provide missing information before continuing.
+    """Ask the user to clarify before continuing, instead of guessing.
 
-    Use this when a request has several plausible meanings, required details are
-    missing, the next action is risky, or multiple good approaches need user
-    preference. Provide concise model-generated options when choices are clear.
+    Prefer asking over assuming whenever a request is ambiguous, underspecified, risky,
+    or needs a user preference. Examples:
+    - ambiguous: "做个表格" — CSV / Excel / HTML / Markdown?
+    - missing info: "分析我的数据" but no file was uploaded
+    - risky: "删除这些文件" — confirm before acting
+    - preference: "给我做个页面" — style / 配色 / 单页还是多页?
+    Provide 2-4 concise, actionable options when the choices are clear. Use it only when
+    the answer genuinely changes what you do — do not ask when a reasonable default exists.
     """
 
     return json.dumps(
