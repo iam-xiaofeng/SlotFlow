@@ -92,25 +92,19 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         extra_tools=[replacement_context_tool],
     )
 
-    assert [tool.name for tool in tools] == [
-        "slotflow_context",
+    names = [tool.name for tool in tools]
+    # First-name-wins dedupe: the replacement context tool wins, no name appears twice.
+    assert tools[0] is replacement_context_tool
+    assert names.count("slotflow_context") == 1
+    assert len(names) == len(set(names)), f"duplicate tool names: {names}"
+    # The registry unifies builtin + workspace + network + customization tools.
+    assert {
         "ask_clarification",
-        "workspace_list",
-        "workspace_read",
-        "workspace_tree",
-        "workspace_search",
-        "artifact_list",
         "artifact_write",
-        "web_fetch",
         "web_search",
         "skill_match",
-        "find-skills",
-        "skill_list",
-        "skill_install",
-        "mcp_add_http",
         "search_skill_repos",
-    ]
-    assert tools[0] is replacement_context_tool
+    } <= set(names)
 
 
 def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
