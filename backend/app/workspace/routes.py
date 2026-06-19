@@ -7,12 +7,29 @@ import mimetypes
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
-from app.dependencies import get_upload_store
+from app.dependencies import get_chat_repo, get_upload_store
 from app.harness.sandbox import WorkspacePathError
-from app.workspace.models import WorkspaceEntryRecord, WorkspaceReadRecord
+from app.workspace.models import (
+    ThreadWorkspaceRecord,
+    WorkspaceEntryRecord,
+    WorkspaceReadRecord,
+)
 
 
 router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
+
+
+def _is_viewable_path(path: str) -> bool:
+    """Read/preview is allowed only for generated artifacts and user uploads; other
+    workspace areas (e.g. skills) stay private. The sandbox is still enforced by
+    `resolve_path`."""
+
+    return (
+        path == "artifacts"
+        or path.startswith("artifacts/")
+        or path == "uploads"
+        or path.startswith("uploads/")
+    )
 
 
 @router.get("/artifacts", response_model=list[WorkspaceEntryRecord])
@@ -50,10 +67,10 @@ async def read_artifact(
     request: Request,
     path: str = Query(min_length=1),
 ) -> WorkspaceReadRecord:
-    """Read one generated artifact under `workspace/artifacts`."""
+    """Read one generated artifact or user upload for preview."""
 
-    if path == "artifacts" or not path.startswith("artifacts/"):
-        raise HTTPException(status_code=400, detail="artifact path must be under artifacts/")
+    if path in ("artifacts", "uploads") or not _is_viewable_path(path):
+        raise HTTPException(status_code=400, detail="path must be a file under artifacts/ or uploads/")
 
     workspace = get_upload_store(request).workspace
     try:
@@ -70,10 +87,10 @@ async def raw_artifact(
     path: str = Query(min_length=1),
     download: bool = False,
 ) -> FileResponse:
-    """Serve one generated artifact for browser preview."""
+    """Serve one generated artifact or user upload for browser preview."""
 
-    if path == "artifacts" or not path.startswith("artifacts/"):
-        raise HTTPException(status_code=400, detail="artifact path must be under artifacts/")
+    if path in ("artifacts", "uploads") or not _is_viewable_path(path):
+        raise HTTPException(status_code=400, detail="path must be a file under artifacts/ or uploads/")
 
     workspace = get_upload_store(request).workspace
     try:
@@ -119,3 +136,63 @@ async def delete_artifact(
 
     target.unlink()
     return Response(status_code=204)
+
+
+@router.get("/threads", response_model=list[ThreadWorkspaceRecord])
+async def list_thread_workspaces(request: Request) -> list[ThreadWorkspaceRecord]:
+    """Per-thread view for the unified workspace panel: model-generated artifacts plus
+    user uploads, labeled by thread title. Uploads are virtually grouped from each
+    thread's chat messages (no storage migration)."""
+
+    repo = get_chat_repo(request)
+    workspace = get_upload_store(request).workspace
+
+    records: list[ThreadWorkspaceRecord] = []
+    for thread in repo.list_threads():
+        try:
+            generated = [
+                WorkspaceEntryRecord(path=entry.path, kind=entry.kind, size_bytes=entry.size_bytes)
+                for entry in workspace.list_entries(f"artifacts/{thread.id}")
+            ]
+        except WorkspacePathError:
+            generated = []
+        records.append(
+            ThreadWorkspaceRecord(
+                thread_id=thread.id,
+                title=thread.title,
+                generated=generated,
+                uploads=_collect_thread_uploads(repo, workspace, thread.id),
+            )
+        )
+    return records
+
+
+def _collect_thread_uploads(repo, workspace, thread_id: str) -> list[WorkspaceEntryRecord]:
+    """Gather a thread's user uploads from its message metadata (deduped, existing only)."""
+
+    seen: set[str] = set()
+    uploads: list[WorkspaceEntryRecord] = []
+    for message in repo.list_messages(thread_id):
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        for item in metadata.get("uploaded_files", []) or []:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("workspace_path")
+            if not isinstance(path, str) or path in seen:
+                continue
+            try:
+                exists = workspace.resolve_path(path).is_file()
+            except WorkspacePathError:
+                exists = False
+            if not exists:
+                continue
+            seen.add(path)
+            size = item.get("size_bytes")
+            uploads.append(
+                WorkspaceEntryRecord(
+                    path=path,
+                    kind="file",
+                    size_bytes=size if isinstance(size, int) else None,
+                )
+            )
+    return uploads
