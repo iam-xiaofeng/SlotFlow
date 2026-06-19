@@ -85,6 +85,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "skill_list",
         "skill_install",
         "mcp_add_http",
+        "search_skill_repos",
     ]
     assert [item.name for item in captured["middleware"]] == [
         "SlotFlowDanglingToolCallMiddleware",
@@ -104,7 +105,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert "subagent_enabled=False" in captured["system_prompt"]
     assert "call skill_match before doing the work" in captured["system_prompt"]
     assert "Backend preflight" not in captured["system_prompt"]
-    assert "Prefer ask_clarification" in captured["system_prompt"]
+    assert "you MUST call ask_clarification" in captured["system_prompt"]
     assert "Every user-visible file MUST be produced with artifact_write" in captured[
         "system_prompt"
     ]
@@ -240,6 +241,7 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
         "skill_list",
         "skill_install",
         "mcp_add_http",
+        "search_skill_repos",
         "mcp_fake",
     ]
 

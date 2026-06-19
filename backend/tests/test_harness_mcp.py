@@ -126,6 +126,7 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
         "skill_list",
         "skill_install",
         "mcp_add_http",
+        "search_skill_repos",
         "mcp_echo",
     ]
     assert provider.calls[0].servers[0].name == "filesystem"

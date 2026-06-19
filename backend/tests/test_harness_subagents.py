@@ -173,6 +173,7 @@ def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary()
         "skill_list",
         "skill_install",
         "mcp_add_http",
+        "search_skill_repos",
         "subagent_list",
         "task_tool",
     ]
