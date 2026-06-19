@@ -177,3 +177,27 @@ async def test_custom_provider_lists_relay_models_with_provenance(
     assert custom.status == "available"
     assert [model.id for model in custom.models] == ["claude-3-5-sonnet", "qwen-plus"]
     assert all(model.provider == "custom" for model in custom.models)
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_uses_manual_models_without_hitting_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUSTOM_MODELS 让 /models 坏掉的中转站也能填充选择器；设置后不得再调 /models。"""
+
+    for key in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CUSTOM_API_KEY", "ck")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+    monkeypatch.setenv("CUSTOM_MODELS", "claude-3-5-sonnet, gpt-4o ,")
+
+    async def fail_fetch(provider_env: model_catalog.ProviderEnv) -> list[str]:
+        raise AssertionError("must not hit /models when CUSTOM_MODELS is set")
+
+    monkeypatch.setattr(model_catalog, "fetch_provider_model_ids", fail_fetch)
+
+    catalog = await discover_model_catalog()
+    custom = next(provider for provider in catalog.providers if provider.provider == "custom")
+
+    assert custom.status == "available"
+    assert [model.id for model in custom.models] == ["claude-3-5-sonnet", "gpt-4o"]

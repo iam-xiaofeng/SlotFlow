@@ -44,7 +44,10 @@ frontend/src/
   the OpenAI schema. The frontend picks the model per run AND sends the option's catalog
   `provider`; the runtime routes by that **provenance** (`RunContext.model_provider` →
   `create_chat_model`), only falling back to id-prefix inference (`infer_model_provider`)
-  when it is absent (old clients). `.env` never decides the conversation model.
+  when it is absent (old clients). `.env` never decides the conversation model. Discovery
+  runs all providers **concurrently** (a slow/dead relay can't stall the catalog); if a
+  relay's `/models` is broken/unsupported, set `CUSTOM_MODELS` (comma-separated) to list
+  its models explicitly and skip discovery.
 - **Reasoning streaming (fragile — guard it)**: providers disagree on how reasoning is
   emitted (DeepSeek `reasoning_content` → bridged to a `{"type":"reasoning"}` block;
   OpenAI `reasoning`; Anthropic `thinking`). DeepSeek **and** the `custom` relay use the

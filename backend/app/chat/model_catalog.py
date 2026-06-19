@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -34,9 +35,16 @@ class ProviderEnv:
 async def discover_model_catalog() -> ModelCatalogRecord:
     """Discover selectable models from configured provider credentials."""
 
-    providers: list[ModelProviderRecord] = []
-    for provider in ("deepseek", "openai", "anthropic", "custom"):
-        providers.append(await discover_provider_models(load_provider_env(provider)))
+    # Discover providers concurrently so one slow/dead endpoint (e.g. a relay whose
+    # /models hangs or 502s) doesn't stall the whole catalog behind it.
+    providers = list(
+        await asyncio.gather(
+            *(
+                discover_provider_models(load_provider_env(provider))
+                for provider in ("deepseek", "openai", "anthropic", "custom")
+            )
+        )
+    )
 
     selectable_models = [
         model
@@ -72,17 +80,21 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             models=[],
         )
 
-    try:
-        model_ids = await fetch_provider_model_ids(provider_env)
-    except Exception as exc:  # noqa: BLE001 - expose only sanitized status to UI
-        return ModelProviderRecord(
-            provider=provider_env.provider,
-            configured=True,
-            base_url=provider_env.base_url,
-            status="error",
-            message=f"Model discovery failed: {exc.__class__.__name__}",
-            models=[],
-        )
+    manual_ids = manual_model_ids(provider_env.provider)
+    if manual_ids is not None:
+        model_ids = manual_ids
+    else:
+        try:
+            model_ids = await fetch_provider_model_ids(provider_env)
+        except Exception as exc:  # noqa: BLE001 - expose only sanitized status to UI
+            return ModelProviderRecord(
+                provider=provider_env.provider,
+                configured=True,
+                base_url=provider_env.base_url,
+                status="error",
+                message=f"Model discovery failed: {exc.__class__.__name__}",
+                models=[],
+            )
 
     if not model_ids:
         return ModelProviderRecord(
@@ -109,6 +121,20 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             for model_id in sorted(set(model_ids))
         ],
     )
+
+
+def manual_model_ids(provider: ModelProvider) -> list[str] | None:
+    """Explicit, comma-separated model ids for a provider whose `/models` endpoint is
+    broken or unsupported. Only `custom` supports this (CUSTOM_MODELS); when set we skip
+    discovery entirely — which also avoids a slow/timing-out /models call.
+    """
+
+    if provider != "custom":
+        return None
+    raw = os.environ.get("CUSTOM_MODELS")
+    if not raw or not raw.strip():
+        return None
+    return [model_id.strip() for model_id in raw.split(",") if model_id.strip()]
 
 
 async def fetch_provider_model_ids(provider_env: ProviderEnv) -> list[str]:
