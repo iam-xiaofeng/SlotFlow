@@ -13,10 +13,18 @@ from app.harness.sandbox.readers import plain_text_excerpt
 
 def build_workspace_tools(
     config: SlotFlowSandboxConfig | None = None,
+    *,
+    thread_id: str | None = None,
 ) -> list[BaseTool]:
-    """Build file tools bound to the current SlotFlow workspace config."""
+    """Build file tools bound to the current SlotFlow workspace config.
+
+    `thread_id` namespaces generated artifacts under `artifacts/<thread_id>/`, so each
+    conversation gets one folder holding everything the user can open (uploads staged
+    by the run plus files the agent generates).
+    """
 
     workspace = build_slotflow_workspace(config)
+    artifact_root = artifact_dir_for_thread(thread_id)
 
     @tool("workspace_list")
     def workspace_list(path: str = ".") -> str:
@@ -86,15 +94,15 @@ def build_workspace_tools(
 
     @tool("artifact_list")
     def artifact_list() -> str:
-        """List generated artifacts under workspace/artifacts."""
+        """List this conversation's artifacts (uploads + generated files)."""
 
         try:
-            entries = workspace.list_entries("artifacts")
+            entries = workspace.list_entries(artifact_root)
         except Exception:
             entries = []
         return json.dumps(
             {
-                "path": "artifacts",
+                "path": artifact_root,
                 "entries": [
                     {
                         "path": entry.path,
@@ -118,32 +126,19 @@ def build_workspace_tools(
 
     if workspace.config.writes_enabled:
 
-        @tool("workspace_write")
-        def workspace_write(path: str, content: str) -> str:
-            """Write UTF-8 draft or intermediate content into the SlotFlow workspace.
-
-            Do not use this for user-visible deliverables. Use artifact_write for
-            generated reports, charts, visualizations, demos, previews, or files the
-            user should see in the artifact panel.
-            """
-
-            target = workspace.write_text(path, content)
-            return json.dumps(
-                {
-                    "path": target.relative_to(workspace.root).as_posix(),
-                    "bytes_written": len(content.encode("utf-8")),
-                    "source": "slotflow_workspace",
-                },
-                ensure_ascii=False,
-            )
-
-        tools.append(workspace_write)
-
         @tool("artifact_write")
         def artifact_write(path: str, content: str) -> str:
-            """Write a user-visible UTF-8 artifact under workspace/artifacts."""
+            """Write a user-visible file into this conversation's artifact folder.
 
-            artifact_path = normalize_artifact_path(path)
+            This is the ONLY way to produce files the user can see and open in the
+            artifact panel. Use it for every user-facing deliverable: reports, charts,
+            HTML/Markdown pages, visualizations, comparison tables, interactive demos,
+            and code previews. `path` is just a name like "report.md" or
+            "charts/sales.html" — it is automatically placed under this conversation's
+            artifact folder, alongside the user's uploaded files.
+            """
+
+            artifact_path = normalize_artifact_path(path, thread_id=thread_id)
             target = workspace.write_text(artifact_path, content)
             return json.dumps(
                 {
@@ -255,12 +250,29 @@ def search_workspace_text(
     return matches
 
 
-def normalize_artifact_path(path: str) -> str:
-    """Keep generated artifacts under the artifacts directory."""
+def artifact_dir_for_thread(thread_id: str | None) -> str:
+    """Return the artifact folder for a conversation (per-thread when known)."""
 
-    stripped = path.strip().lstrip("/")
-    if not stripped:
-        stripped = "artifact.md"
-    if stripped == "artifacts" or stripped.startswith("artifacts/"):
-        return stripped
-    return f"artifacts/{stripped}"
+    cleaned = (thread_id or "").strip().strip("/")
+    return f"artifacts/{cleaned}" if cleaned else "artifacts"
+
+
+def normalize_artifact_path(path: str, thread_id: str | None = None) -> str:
+    """Keep generated artifacts under this conversation's artifact directory.
+
+    Accepts a bare name ("report.md"), or a path the model prefixed with
+    "artifacts/" or the thread id; always returns "<artifact_root>/<name>".
+    """
+
+    base = artifact_dir_for_thread(thread_id)
+    stripped = path.strip().lstrip("/").strip()
+    if not stripped or stripped == "artifacts":
+        return f"{base}/artifact.md"
+    if stripped.startswith("artifacts/"):
+        stripped = stripped[len("artifacts/") :].lstrip("/")
+    cleaned_thread = (thread_id or "").strip().strip("/")
+    if cleaned_thread and (
+        stripped == cleaned_thread or stripped.startswith(f"{cleaned_thread}/")
+    ):
+        stripped = stripped[len(cleaned_thread) :].lstrip("/")
+    return f"{base}/{stripped}" if stripped else f"{base}/artifact.md"

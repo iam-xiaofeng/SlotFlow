@@ -273,7 +273,7 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
         workspace_root=load_optional_path_from_env("SLOTFLOW_WORKSPACE_ROOT"),
         writes_enabled=load_bool_from_env(
             "SLOTFLOW_WORKSPACE_WRITES_ENABLED",
-            default=False,
+            default=True,
         ),
         max_read_bytes=load_positive_int_from_env(
             "SLOTFLOW_WORKSPACE_MAX_READ_BYTES",
