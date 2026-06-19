@@ -111,6 +111,13 @@ export type WorkspaceReadRecord = {
   warning?: string | null;
 };
 
+export type ThreadWorkspaceRecord = {
+  thread_id: string;
+  title: string;
+  generated: WorkspaceEntryRecord[];
+  uploads: WorkspaceEntryRecord[];
+};
+
 export type SkillRecord = {
   name: string;
   description: string;
@@ -302,6 +309,20 @@ export async function listArtifacts(
   }
 
   return response.json() as Promise<WorkspaceEntryRecord[]>;
+}
+
+export async function listThreadWorkspaces(
+  options: ChatRequestOptions = {},
+): Promise<ThreadWorkspaceRecord[]> {
+  const response = await fetch("/api/workspace/threads", {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`list thread workspaces failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<ThreadWorkspaceRecord[]>;
 }
 
 export async function readArtifact(

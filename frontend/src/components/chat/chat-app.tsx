@@ -51,7 +51,7 @@ import {
   uploadSkillFolder,
 } from "@/lib/chat-stream";
 
-import { ArtifactWorkspacePanel } from "./artifact-panel";
+import { WorkspacePanel } from "./workspace-panel";
 import {
   defaultModelName,
   extractFileIdsFromMessage,
@@ -964,16 +964,12 @@ export function ChatApp() {
             )}
           </section>
 
-          {isArtifactPanelOpen && activeThreadArtifactFiles.length > 0 ? (
-            <ArtifactWorkspacePanel
-              activePath={selectedArtifactPath ?? artifactPreview?.path ?? null}
-              artifacts={activeThreadArtifactFiles}
-              preview={artifactPreview}
-              previewError={artifactPreviewError}
-              isLoadingPreview={isLoadingArtifactPreview}
+          {isArtifactPanelOpen ? (
+            <WorkspacePanel
+              open={isArtifactPanelOpen}
+              activeThreadId={thread?.id ?? null}
               width={artifactPanelWidth}
               onClose={() => setIsArtifactPanelOpen(false)}
-              onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
               onWidthChange={setArtifactPanelWidth}
             />
           ) : null}

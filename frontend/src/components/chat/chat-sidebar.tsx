@@ -52,7 +52,6 @@ import { filterThreadArtifacts } from "./chat-format";
 import { ContextPickerMenu } from "./chat-sidebar-context";
 import { SearchMenu } from "./chat-sidebar-search";
 import { SlotFlowLogo } from "./slotflow-logo";
-import { WorkspaceDirectoryModal } from "./workspace-directory-modal";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
@@ -208,16 +207,16 @@ export function ThreadSidebar({
                 />
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu
-                  kind="artifacts"
-                  artifacts={artifacts}
-                  onDeleteArtifact={onDeleteArtifact}
-                  onOpenArtifacts={onOpenArtifacts}
-                  onPreviewArtifact={onPreviewArtifact}
-                />
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <WorkspaceDirectoryModal disabled={disabled} />
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="工作区"
+                  onClick={onOpenArtifacts}
+                  disabled={disabled}
+                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
+                >
+                  <Folder className="size-4" />
+                  <span>工作区</span>
+                </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <MoreToolsMenu />

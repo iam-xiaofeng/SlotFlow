@@ -51,7 +51,7 @@ type ArtifactWorkspaceToolbarProps = {
   onViewModeChange: (mode: ArtifactViewMode) => void;
 };
 
-type ArtifactViewMode = "code" | "preview";
+export type ArtifactViewMode = "code" | "preview";
 type ArtifactPreviewType = {
   isHtml: boolean;
   isImage: boolean;
@@ -292,7 +292,7 @@ function downloadArtifact(url: string, path: string) {
   link.remove();
 }
 
-function ArtifactStage({
+export function ArtifactStage({
   preview,
   previewError,
   isLoadingPreview,
@@ -423,7 +423,7 @@ function CodePreview({ preview }: { preview: WorkspaceReadRecord }) {
   );
 }
 
-function getArtifactPreviewType(preview: WorkspaceReadRecord): ArtifactPreviewType {
+export function getArtifactPreviewType(preview: WorkspaceReadRecord): ArtifactPreviewType {
   const path = preview.path;
   const mediaType = preview.media_type;
   const isHtml = mediaType.includes("html") || /\.html?$/i.test(path);
