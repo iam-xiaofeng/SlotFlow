@@ -228,7 +228,7 @@ export function ContextPickerMenu({
   );
 }
 
-function SkillContextList({
+export function SkillContextList({
   skills,
   onDeleteSkill,
   onPinSkill,
@@ -354,7 +354,7 @@ function SkillContextList({
   );
 }
 
-function McpContextList({
+export function McpContextList({
   servers,
   onDeleteMcpServer,
   onPinMcpServer,
@@ -685,7 +685,7 @@ const memoryKindSectionTitles: Record<MemoryKind, string> = {
   fact: "事实",
 };
 
-function MemoryTable({
+export function MemoryTable({
   memories,
   onAddMemory,
   onDeleteMemory,

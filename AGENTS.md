@@ -53,7 +53,8 @@ backend/app/
   dependencies.py       shared app.state getters; clock.py: utc_now
 backend/tests/          offline test suite (no network); test_live_deepseek.py is opt-in
 frontend/src/
-  components/chat/      chat UI: chat-app + extracted hooks, sidebar(+context/search/logo),
+  components/chat/      chat UI: chat-app + extracted hooks, sidebar(+search/logo;
+                        skills/mcp/memory managed in directory-modal tabs),
                         message-list(+parts), composer(+parts), workspace-panel
                         (two-pane; reuses artifact-panel's preview stage)
   hooks/                use-chat-stream (+ helpers), use-model-catalog, use-workspace-data,
