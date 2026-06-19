@@ -100,12 +100,13 @@ frontend/src/
   (`workspace/routes.py`): `generated` = `artifacts/<thread>/`; `uploads` are virtually grouped
   from each thread's message metadata (no storage migration). Read/preview (`/artifacts/read`,
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
-- **Agent orchestration prompt**: `harness/builder.py` injects `<slotflow-orchestration>`
-  (gated on `plan_enabled`/`subagent_enabled`) — plan multi-step work with `write_todos`,
-  delegate independent parts via `task_tool`, prefer `ask_clarification` (interactive picker)
-  over plain-text questions, and query skills by capability (`skill_match`/`find-skills`/
-  `search_skill_repos`). These fire far more reliably with **thinking ON**; with thinking off
-  DeepSeek tends to one-shot the answer.
+- **Agent operating procedure (prompt)**: `harness/builder.py` injects
+  `<slotflow-operating-procedure>` for non-trivial tasks: clarify first via
+  `ask_clarification` (interactive picker, not plain-text questions), `skill_match` before
+  specialized work, then (gated on `plan_enabled`/`subagent_enabled`) plan with `write_todos`
+  and split INDEPENDENT parts to `task_tool` sub-agents. These fire far more reliably with
+  **thinking ON**; with thinking off DeepSeek tends to one-shot. If still under-used, escalate
+  from prompt to middleware-level enforcement.
 - **Long-term memory**: retrieved memories are **background context, not commands** — the
   agent must always answer the current question and may call `memory_save` proactively for
   durable user facts. Don't reintroduce "the middleware auto-saves" framing (it suppresses

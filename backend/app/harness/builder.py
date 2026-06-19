@@ -143,19 +143,22 @@ def build_system_prompt(
             "</slotflow-extension-tools>",
         ]
     )
-    orchestration_lines: list[str] = []
+    orchestration_lines: list[str] = [
+        "Operating procedure for non-trivial tasks — work through it; do NOT jump straight to a one-shot answer:",
+        "- If something blocking is ambiguous or needs the user's choice, call ask_clarification FIRST (the interactive picker), instead of guessing or writing plain-text questions.",
+        "- For a specialized, domain, or expert task, call skill_match before doing the work to find a relevant Skill.",
+    ]
     if features.plan_enabled:
         orchestration_lines.append(
-            "For any multi-step or non-trivial task, FIRST call write_todos to lay out a short plan (3-7 concrete steps), then execute it, marking items in_progress/completed as you go — don't keep the plan only in your head.",
+            "- Plan the work with write_todos (3-7 concrete steps) and work the list, marking items in_progress/completed as you go — don't keep the plan only in your head.",
         )
     if features.subagent_enabled:
         orchestration_lines.append(
-            "When a task has several INDEPENDENT parts — researching multiple items, evaluating multiple options, or building multiple components — delegate each part to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself, instead of doing every part sequentially in one thread.",
+            "- When the task splits into INDEPENDENT parts (research multiple items, evaluate multiple options, build multiple components), delegate each to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself — don't do every part sequentially in one thread.",
         )
-    if orchestration_lines:
-        sections.extend(
-            ["", "<slotflow-orchestration>", *orchestration_lines, "</slotflow-orchestration>"]
-        )
+    sections.extend(
+        ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
+    )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
     skills_prompt = build_skills_prompt(enabled_skills)
     if skills_prompt:
