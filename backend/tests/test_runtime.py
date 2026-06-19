@@ -29,6 +29,7 @@ from app.chat.runtime import (
     SlotFlowRuntimeConfig,
     aclose_checkpointer,
     create_async_checkpointer,
+    create_chat_model,
     create_checkpointer,
     load_runtime_config_from_env,
     build_openai_compatible_model_kwargs,
@@ -223,6 +224,80 @@ def test_openai_reasoning_effort_only_for_reasoning_models() -> None:
     assert "reasoning_effort" not in plain_kwargs
     assert is_openai_reasoning_model("o3")
     assert not is_openai_reasoning_model("gpt-4.1")
+
+
+def test_custom_provider_kwargs_send_no_deepseek_thinking_flags() -> None:
+    """custom 中转站协议未知：不发 deepseek 的 extra_body.thinking，避免被未知网关 400。"""
+
+    pro_context = _bundle(
+        request=ChatStreamRequest(
+            message="x", model_name="qwen-plus", mode="pro", provider="custom"
+        )
+    ).context
+    kwargs = build_openai_compatible_model_kwargs(
+        model_name="qwen-plus",
+        api_key="key",
+        base_url="http://relay.local/v1",
+        provider="custom",
+        run_context=pro_context,
+    )
+
+    assert "extra_body" not in kwargs
+    assert "reasoning_effort" not in kwargs
+    assert kwargs["base_url"] == "http://relay.local/v1"
+
+
+def test_resolve_model_provider_prefers_carried_provenance() -> None:
+    """携带的来源 provider 覆盖 id 前缀推断；缺失时才回退到推断。"""
+
+    from app.chat.runtime.models import infer_model_provider, resolve_model_provider
+
+    carried = _bundle(
+        request=ChatStreamRequest(
+            message="x", model_name="claude-3-5-sonnet", provider="custom"
+        )
+    ).context
+    inferred = _bundle(
+        request=ChatStreamRequest(message="x", model_name="claude-3-5-sonnet")
+    ).context
+
+    assert resolve_model_provider("claude-3-5-sonnet", carried) == "custom"
+    assert resolve_model_provider("claude-3-5-sonnet", inferred) == "anthropic"
+    assert infer_model_provider("claude-3-5-sonnet") == "anthropic"
+
+
+def test_create_chat_model_routes_custom_relay_over_openai_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """中转站用 OpenAI 协议提供 claude-*：必须走兼容 client 指向 CUSTOM_BASE_URL，
+    而不是原生 Anthropic SDK。这正是按 id 前缀路由会出错的场景。"""
+
+    monkeypatch.setenv("CUSTOM_API_KEY", "ck")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+
+    context = _bundle(
+        request=ChatStreamRequest(
+            message="用中转站的 claude",
+            model_name="claude-3-5-sonnet",
+            provider="custom",
+        )
+    ).context
+    model = create_chat_model("claude-3-5-sonnet", run_context=context)
+
+    assert model.__class__.__name__ != "ChatAnthropic"
+    assert model.openai_api_base == "http://relay.local/v1"
+
+
+def test_create_chat_model_custom_requires_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """custom 没有官方回落地址：缺 CUSTOM_BASE_URL 时显式报错而不是悄悄走错端点。"""
+
+    monkeypatch.setenv("CUSTOM_API_KEY", "ck")
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="CUSTOM_BASE_URL"):
+        create_chat_model("qwen-plus", provider="custom")
 
 
 def test_anthropic_extended_thinking_enabled_in_thinking_mode(

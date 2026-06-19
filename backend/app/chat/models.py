@@ -20,7 +20,7 @@ from app.clock import utc_now
 ChatMode = Literal["flash", "pro", "ultra"]
 MessageRole = Literal["user", "assistant", "system", "tool"]
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
-ModelProvider = Literal["deepseek", "openai", "anthropic"]
+ModelProvider = Literal["deepseek", "openai", "anthropic", "custom"]
 
 
 class ThreadCreateRequest(BaseModel):
@@ -87,6 +87,10 @@ class ChatStreamRequest(BaseModel):
 
     message: str = Field(min_length=1)
     model_name: str = "deepseek-v4-pro"
+    provider: ModelProvider | None = Field(
+        default=None,
+        description="可选：前端所选模型在 catalog 中的来源 provider。为空时后端按 model id 前缀推断。",
+    )
     mode: ChatMode = "pro"
     thinking_enabled: bool | None = Field(
         default=None,
@@ -185,6 +189,7 @@ class RunContext(BaseModel):
     thread_id: str
     run_id: str
     model_name: str
+    model_provider: ModelProvider | None = None
     mode: ChatMode
     agent_name: str
     files: list[str] = Field(default_factory=list)

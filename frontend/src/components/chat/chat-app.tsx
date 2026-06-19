@@ -19,6 +19,7 @@ import { useChatStream } from "@/hooks/use-chat-stream";
 import { mergeWorkspaceEntries } from "@/hooks/use-chat-stream-helpers";
 import {
   type ChatMode,
+  type ModelProvider,
   type ClarificationOptionRecord,
   type ClarificationRequestRecord,
   type McpServerRecord,
@@ -57,6 +58,7 @@ import {
   extractUploadedFilesFromMetadata,
   formatUploadToast,
   makeQueueId,
+  providerForModel,
   removeArtifactPathFromThreadIndex,
   sortRecordsByNames,
 } from "./chat-app-helpers";
@@ -77,6 +79,7 @@ type QueuedChatMessage = {
   metadata: Record<string, unknown>;
   attachmentCount: number;
   modelName: string;
+  provider?: ModelProvider;
   mode: ChatMode;
   thinkingEnabled: boolean;
 };
@@ -211,6 +214,7 @@ export function ChatApp() {
         metadata: Record<string, unknown>;
         threadTitle: string;
         modelName: string;
+        provider?: ModelProvider;
         mode: ChatMode;
         thinkingEnabled: boolean;
         reuseUserMessageId?: string;
@@ -223,6 +227,7 @@ export function ChatApp() {
       const result = await sendMessage(prepared.text, {
         mode: prepared.mode,
         model_name: prepared.modelName,
+        provider: prepared.provider,
         thinking_enabled: prepared.thinkingEnabled,
         agent_name: "default",
         files: prepared.files,
@@ -301,6 +306,7 @@ export function ChatApp() {
       metadata: nextMessage.metadata,
       threadTitle: makeThreadTitle(nextMessage.text),
       modelName: nextMessage.modelName,
+      provider: nextMessage.provider,
       mode: nextMessage.mode,
       thinkingEnabled: nextMessage.thinkingEnabled,
     }).finally(() => {
@@ -417,6 +423,7 @@ export function ChatApp() {
           metadata,
           attachmentCount: files.length,
           modelName: selectedModelName,
+          provider: providerForModel(modelOptions, selectedModelName),
           mode: selectedMode,
           thinkingEnabled: selectedThinkingEnabled,
         },
@@ -430,6 +437,7 @@ export function ChatApp() {
         files,
         metadata,
         modelName: selectedModelName,
+        provider: providerForModel(modelOptions, selectedModelName),
         mode: selectedMode,
         thinkingEnabled: selectedThinkingEnabled,
         reuseUserMessageId: options.reuseUserMessageId,

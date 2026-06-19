@@ -741,5 +741,8 @@ function modelDescription(model: ModelOptionRecord) {
   if (model.provider === "anthropic") {
     return "For careful writing and reasoning";
   }
+  if (model.provider === "custom") {
+    return "Served via your custom endpoint";
+  }
   return "General-purpose reasoning model";
 }

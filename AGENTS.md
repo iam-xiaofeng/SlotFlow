@@ -10,7 +10,8 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 
 A local-first, extensible AI agent workspace: a FastAPI + LangGraph backend driving a
 Next.js chat UI, with skills, MCP tools, artifacts, long-term memory, sub-agents, and
-multi-provider (DeepSeek / OpenAI / Anthropic) reasoning streaming.
+multi-provider (DeepSeek / OpenAI / Anthropic + any OpenAI-compatible relay) reasoning
+streaming.
 
 ## Layout
 
@@ -37,11 +38,19 @@ frontend/src/
 
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
-  lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. The frontend
-  picks the model per run; `.env` never decides the conversation model.
+  lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
+  `custom` provider (`CUSTOM_BASE_URL` + `CUSTOM_API_KEY`, no official fallback URL) exposes
+  any OpenAI-compatible relay — including ones serving `claude-*` / `gpt-*` / `qwen-*` over
+  the OpenAI schema. The frontend picks the model per run AND sends the option's catalog
+  `provider`; the runtime routes by that **provenance** (`RunContext.model_provider` →
+  `create_chat_model`), only falling back to id-prefix inference (`infer_model_provider`)
+  when it is absent (old clients). `.env` never decides the conversation model.
 - **Reasoning streaming (fragile — guard it)**: providers disagree on how reasoning is
   emitted (DeepSeek `reasoning_content` → bridged to a `{"type":"reasoning"}` block;
-  OpenAI `reasoning`; Anthropic `thinking`). The single normalization entry is
+  OpenAI `reasoning`; Anthropic `thinking`). DeepSeek **and** the `custom` relay use the
+  reasoning-bridging `ChatDeepSeek` subclass (`runtime/models.py`) so `delta.reasoning_content`
+  reaches the v3 channel; `custom` sends NO provider-specific thinking flags (unknown relay
+  protocol — toggle control is best-effort). The single normalization entry is
   `agent_adapter/projections.py::projection_item_to_agent_event` /
   `extract_message_delta_parts`. **Before changing this layer, keep
   `tests/test_provider_reasoning_contract.py` green** — it pins that every provider's chunk

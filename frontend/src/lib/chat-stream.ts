@@ -48,7 +48,7 @@ export type ClarificationRequestRecord = {
 
 export type ChatMode = "flash" | "pro" | "ultra";
 
-export type ModelProvider = "deepseek" | "openai" | "anthropic";
+export type ModelProvider = "deepseek" | "openai" | "anthropic" | "custom";
 
 export type ModelOptionRecord = {
   id: string;
@@ -75,6 +75,7 @@ export type ModelCatalogRecord = {
 export type ChatStreamRequest = {
   message: string;
   model_name?: string;
+  provider?: ModelProvider;
   mode?: ChatMode;
   thinking_enabled?: boolean;
   agent_name?: string;

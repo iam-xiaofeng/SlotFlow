@@ -15,6 +15,8 @@ DEFAULT_CHAT_MODEL = "deepseek-v4-pro"
 
 # Official endpoints used only when the matching *_BASE_URL env var is unset; users
 # pointing at a third-party / self-hosted OpenAI-compatible gateway just set the env var.
+# The `custom` provider is intentionally absent here: it has no official fallback and
+# requires CUSTOM_BASE_URL (+ CUSTOM_API_KEY) to be set explicitly.
 PROVIDER_DEFAULT_BASE_URLS: dict[ModelProvider, str] = {
     "deepseek": "https://api.deepseek.com",
     "openai": "https://api.openai.com/v1",
@@ -33,7 +35,7 @@ async def discover_model_catalog() -> ModelCatalogRecord:
     """Discover selectable models from configured provider credentials."""
 
     providers: list[ModelProviderRecord] = []
-    for provider in ("deepseek", "openai", "anthropic"):
+    for provider in ("deepseek", "openai", "anthropic", "custom"):
         providers.append(await discover_provider_models(load_provider_env(provider)))
 
     selectable_models = [
@@ -56,6 +58,17 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             base_url=provider_env.base_url,
             status="missing",
             message="API key is not configured.",
+            models=[],
+        )
+
+    if not provider_env.base_url:
+        # Only the `custom` relay has no official fallback URL; surface the gap clearly.
+        return ModelProviderRecord(
+            provider=provider_env.provider,
+            configured=False,
+            base_url=None,
+            status="missing",
+            message="Base URL is not configured.",
             models=[],
         )
 
@@ -174,6 +187,7 @@ def provider_title(provider: ModelProvider) -> str:
         "deepseek": "DeepSeek",
         "openai": "OpenAI",
         "anthropic": "Anthropic",
+        "custom": "Custom",
     }[provider]
 
 
@@ -184,12 +198,20 @@ def load_provider_env(provider: ModelProvider) -> ProviderEnv:
     elif provider == "openai":
         api_key = os.environ.get("OPENAI_API_KEY")
         base_url = os.environ.get("OPENAI_BASE_URL")
-    else:
+    elif provider == "anthropic":
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    else:
+        # custom：用户自建 / 第三方 OpenAI 兼容中转站，URL 必须显式配置，没有官方回落。
+        api_key = os.environ.get("CUSTOM_API_KEY")
+        base_url = os.environ.get("CUSTOM_BASE_URL")
 
     return ProviderEnv(
         provider=provider,
         api_key=api_key.strip() if api_key and api_key.strip() else None,
-        base_url=(base_url.strip() if base_url and base_url.strip() else PROVIDER_DEFAULT_BASE_URLS[provider]),
+        base_url=(
+            base_url.strip()
+            if base_url and base_url.strip()
+            else PROVIDER_DEFAULT_BASE_URLS.get(provider, "")
+        ),
     )

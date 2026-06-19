@@ -72,17 +72,35 @@ def create_chat_model(
     model_name: str,
     *,
     run_context: RunContext | None = None,
+    provider: ModelProvider | None = None,
 ) -> "BaseChatModel":
-    """Create a chat model from the provider implied by the selected model id."""
+    """Create a chat model for the run.
 
-    provider = infer_model_provider(model_name)
-    if provider == "anthropic":
+    Provider 优先取显式传入的 `provider`，其次取前端选择时携带的来源
+    （`run_context.model_provider`），因为第三方中转站可能用 OpenAI 协议提供
+    `claude-*` / `gpt-*` / `qwen-*` 等任意模型，按 id 前缀猜测会路由到错误的
+    client/key/endpoint。只有都缺失时（老客户端等）才回退到按 model id 前缀推断。
+    """
+
+    resolved = provider or resolve_model_provider(model_name, run_context)
+    if resolved == "anthropic":
         return create_anthropic_chat_model(model_name=model_name, run_context=run_context)
     return create_openai_compatible_chat_model(
         model_name=model_name,
-        provider=provider,
+        provider=resolved,
         run_context=run_context,
     )
+
+
+def resolve_model_provider(
+    model_name: str,
+    run_context: RunContext | None,
+) -> ModelProvider:
+    """Prefer the catalog-carried provider; fall back to model-id inference."""
+
+    if run_context is not None and run_context.model_provider:
+        return run_context.model_provider
+    return infer_model_provider(model_name)
 
 
 def infer_model_provider(model_name: str) -> ModelProvider:
@@ -102,13 +120,19 @@ def create_openai_compatible_chat_model(
     provider: ModelProvider,
     run_context: RunContext | None = None,
 ) -> "BaseChatModel":
-    """Create DeepSeek/OpenAI-compatible chat models."""
+    """Create DeepSeek / OpenAI / custom-relay chat models over the OpenAI protocol."""
 
     from langchain_openai import ChatOpenAI
 
     if provider == "openai":
         api_key_name = "OPENAI_API_KEY"
         base_url = os.environ.get("OPENAI_BASE_URL")
+    elif provider == "custom":
+        # 用户自建 / 第三方 OpenAI 兼容中转站：URL 必须显式配置，没有官方回落地址。
+        api_key_name = "CUSTOM_API_KEY"
+        base_url = (os.environ.get("CUSTOM_BASE_URL") or "").strip() or None
+        if not base_url:
+            raise RuntimeError("CUSTOM_BASE_URL is required for custom runtime")
     else:
         api_key_name = "DEEPSEEK_API_KEY"
         base_url = os.environ.get("DEEPSEEK_BASE_URL") or PROVIDER_DEFAULT_BASE_URLS["deepseek"]
@@ -117,7 +141,10 @@ def create_openai_compatible_chat_model(
     if not api_key:
         raise RuntimeError(f"{api_key_name} is required for {provider} runtime")
 
-    chat_model_class = _deepseek_chat_model_class() if provider == "deepseek" else ChatOpenAI
+    # DeepSeek 与 custom 中转站都可能用 `delta.reasoning_content` 发思考，需要带桥接的
+    # 子类把它解析进 v3 reasoning 通道；官方 openai 用标准 ChatOpenAI。
+    use_reasoning_bridge = provider in ("deepseek", "custom")
+    chat_model_class = _deepseek_chat_model_class() if use_reasoning_bridge else ChatOpenAI
 
     return chat_model_class(
         **build_openai_compatible_model_kwargs(

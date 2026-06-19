@@ -15,6 +15,8 @@ async def test_model_catalog_marks_unconfigured_providers_missing(
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CUSTOM_API_KEY", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
 
     catalog = await discover_model_catalog()
 
@@ -23,6 +25,7 @@ async def test_model_catalog_marks_unconfigured_providers_missing(
         "deepseek",
         "openai",
         "anthropic",
+        "custom",
     ]
     assert all(provider.status == "missing" for provider in catalog.providers)
     assert all(provider.models == [] for provider in catalog.providers)
@@ -117,3 +120,60 @@ def test_parse_model_ids_filters_non_chat_models() -> None:
 
     anthropic_payload = {"data": [{"id": "claude-sonnet-4-5"}, {"id": "not-a-claude"}]}
     assert model_catalog.parse_model_ids("anthropic", anthropic_payload) == ["claude-sonnet-4-5"]
+
+    # custom relays serve mixed families over the OpenAI schema: keep claude/qwen, drop embeddings.
+    custom_payload = {
+        "data": [
+            {"id": "claude-3-5-sonnet"},
+            {"id": "qwen-plus"},
+            {"id": "text-embedding-3-small"},
+        ]
+    }
+    assert model_catalog.parse_model_ids("custom", custom_payload) == [
+        "claude-3-5-sonnet",
+        "qwen-plus",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_missing_base_url_is_marked_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """custom 中转站没有官方回落地址：只配 key 不配 URL 时应明确标为 missing。"""
+
+    for key in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CUSTOM_API_KEY", "ck")
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+
+    catalog = await discover_model_catalog()
+    custom = next(provider for provider in catalog.providers if provider.provider == "custom")
+
+    assert custom.status == "missing"
+    assert custom.models == []
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_lists_relay_models_with_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配好 CUSTOM_BASE_URL+KEY 后，中转站的模型应列出并标注 provider=custom。"""
+
+    for key in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CUSTOM_API_KEY", "ck")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+
+    async def fake_fetch(provider_env: model_catalog.ProviderEnv) -> list[str]:
+        assert provider_env.provider == "custom"
+        assert provider_env.base_url == "http://relay.local/v1"
+        return ["claude-3-5-sonnet", "qwen-plus"]
+
+    monkeypatch.setattr(model_catalog, "fetch_provider_model_ids", fake_fetch)
+
+    catalog = await discover_model_catalog()
+    custom = next(provider for provider in catalog.providers if provider.provider == "custom")
+
+    assert custom.status == "available"
+    assert [model.id for model in custom.models] == ["claude-3-5-sonnet", "qwen-plus"]
+    assert all(model.provider == "custom" for model in custom.models)
