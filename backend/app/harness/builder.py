@@ -138,11 +138,24 @@ def build_system_prompt(
             "When uploaded files are present, their workspace paths are injected into the latest user message; call workspace_read(path) before answering file-content questions.",
             "When you need input from the user before you can proceed — an ambiguous or underspecified request, a required preference, or a risky/irreversible action — you MUST call ask_clarification with 2-4 concise options. It renders an interactive picker (with a free-text 'other' option) that the user clicks; do NOT instead write your questions as plain message text and wait for a reply. If several things are unknown, ask the single most blocking question via ask_clarification first rather than a long plain-text questionnaire. Still skip it when a reasonable default is obvious — don't over-ask.",
             "Every user-visible file MUST be produced with artifact_write — reports, charts, HTML/Markdown pages, visualizations, comparison tables, interactive demos, code previews. It is the only way a file appears in the artifact panel; files live in this conversation's artifact folder next to the user's uploads. Do NOT create user-facing deliverables with the filesystem MCP server or any other write path — files written that way will NOT appear in the artifact panel. Never claim you saved a file unless you actually called artifact_write for it.",
-            "When the answer includes a chart, report, visualization, flowchart, comparison table, interactive demo, or code preview, create an artifact by default unless the user explicitly asks for text only.",
+            "Decide when a result deserves an artifact. Create one for SUBSTANTIAL, STANDALONE deliverables the user will keep, open, share, or iterate on — full reports/documents, complete HTML pages or apps, rendered charts/diagrams/visualizations, slide decks, large or structured datasets, and long or multi-file code. Do NOT create an artifact for ordinary conversational answers — a short explanation, a brief comparison or small table, a few bullet points, or a short snippet meant to be read in context; answer those inline in the message. Rule of thumb: use artifact_write when the output is longer than roughly a screenful, is a complete document/page/app, or the user asked to generate/export a file; otherwise reply inline.",
             "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",
             "</slotflow-extension-tools>",
         ]
     )
+    orchestration_lines: list[str] = []
+    if features.plan_enabled:
+        orchestration_lines.append(
+            "For any multi-step or non-trivial task, FIRST call write_todos to lay out a short plan (3-7 concrete steps), then execute it, marking items in_progress/completed as you go — don't keep the plan only in your head.",
+        )
+    if features.subagent_enabled:
+        orchestration_lines.append(
+            "When a task has several INDEPENDENT parts — researching multiple items, evaluating multiple options, or building multiple components — delegate each part to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself, instead of doing every part sequentially in one thread.",
+        )
+    if orchestration_lines:
+        sections.extend(
+            ["", "<slotflow-orchestration>", *orchestration_lines, "</slotflow-orchestration>"]
+        )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
     skills_prompt = build_skills_prompt(enabled_skills)
     if skills_prompt:
