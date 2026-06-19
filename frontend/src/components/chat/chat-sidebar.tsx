@@ -52,6 +52,7 @@ import { filterThreadArtifacts } from "./chat-format";
 import { ContextPickerMenu } from "./chat-sidebar-context";
 import { SearchMenu } from "./chat-sidebar-search";
 import { SlotFlowLogo } from "./slotflow-logo";
+import { WorkspaceDirectoryModal } from "./workspace-directory-modal";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
@@ -214,6 +215,9 @@ export function ThreadSidebar({
                   onOpenArtifacts={onOpenArtifacts}
                   onPreviewArtifact={onPreviewArtifact}
                 />
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <WorkspaceDirectoryModal disabled={disabled} />
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <MoreToolsMenu />

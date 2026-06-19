@@ -16,12 +16,22 @@ router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
 
 
 @router.get("/artifacts", response_model=list[WorkspaceEntryRecord])
-async def list_artifacts(request: Request) -> list[WorkspaceEntryRecord]:
-    """List generated artifacts under `workspace/artifacts`."""
+async def list_artifacts(
+    request: Request,
+    path: str = Query("artifacts"),
+) -> list[WorkspaceEntryRecord]:
+    """List immediate children under `workspace/artifacts` or one of its subdirectories.
+
+    `path` lets the directory browser drill down; it must stay under `artifacts/`
+    (the workspace sandbox is additionally enforced by `list_entries`/`resolve_path`).
+    """
+
+    if path != "artifacts" and not path.startswith("artifacts/"):
+        raise HTTPException(status_code=400, detail="path must be under artifacts/")
 
     workspace = get_upload_store(request).workspace
     try:
-        entries = workspace.list_entries("artifacts")
+        entries = workspace.list_entries(path)
     except WorkspacePathError:
         return []
 
