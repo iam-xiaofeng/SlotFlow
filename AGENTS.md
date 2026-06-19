@@ -13,6 +13,32 @@ Next.js chat UI, with skills, MCP tools, artifacts, long-term memory, sub-agents
 multi-provider (DeepSeek / OpenAI / Anthropic + any OpenAI-compatible relay) reasoning
 streaming.
 
+## Architecture (one request, end to end)
+
+1. **Frontend** (`components/chat/chat-app.tsx` + `hooks/use-chat-stream.ts`) POSTs to the
+   chat stream route with a `ChatStreamRequest` (message, `model_name`, `provider`, `mode`,
+   `thinking_enabled`, `files`).
+2. **`chat/routes.py`** persists the user message, then `chat/run_config.build_run_config`
+   turns the request into a `RunConfigBundle = {config, context}`:
+   - `config["configurable"]["thread_id"]` — LangGraph's key for multi-turn checkpoint state.
+   - `RunContext` — SlotFlow business switches: `model_name`, **`model_provider`**, `mode`,
+     `thinking_enabled`, plan/subagent flags, files.
+3. **`chat/runtime/adapter.py` (RuntimeBackedAgentAdapter)** builds the chat model via
+   `runtime/models.create_chat_model` (routed by `RunContext.model_provider`) and assembles
+   the graph via `harness/builder.build_slotflow_harness_graph` — LangChain's prebuilt
+   `create_agent` + SlotFlow middleware + the tool registry (`harness/tools/registry`).
+4. The graph streams with the **LangGraph v3 projection protocol**; each item is normalized
+   by **`chat/agent_adapter/projections.py`** into a SlotFlow `AgentEvent` (`message.delta`
+   with channel `reasoning`/`content`, `state.snapshot`, `tool.delta`,
+   `clarification.requested`, `todo.updated`, `run.*`).
+5. **`chat/sse.py`** encodes events as SSE; the frontend consumes them
+   (`lib/chat-stream.ts` + `hooks/use-chat-stream*`) and renders the message, reasoning,
+   todos, clarification picker, and workspace files.
+
+Two boundaries carry most of the design: **RunContext vs config.configurable** (business
+switches vs LangGraph runtime keys), and the **projection layer** — the single place that
+absorbs every provider/version quirk into clean `AgentEvent`s.
+
 ## Layout
 
 ```
@@ -27,8 +53,9 @@ backend/app/
   dependencies.py       shared app.state getters; clock.py: utc_now
 backend/tests/          offline test suite (no network); test_live_deepseek.py is opt-in
 frontend/src/
-  components/chat/      chat UI: chat-app + extracted hooks, sidebar(+context/search),
-                        message-list(+parts), composer(+parts), artifact-panel
+  components/chat/      chat UI: chat-app + extracted hooks, sidebar(+context/search/logo),
+                        message-list(+parts), composer(+parts), workspace-panel
+                        (two-pane; reuses artifact-panel's preview stage)
   hooks/                use-chat-stream (+ helpers), use-model-catalog, use-workspace-data,
                         use-thread-artifact-index
   lib/chat-stream.ts    API client + SSE
@@ -62,10 +89,22 @@ frontend/src/
   by default, so OFF must send `extra_body={"thinking":{"type":"disabled"}}` explicitly
   (`runtime/models.py`). Anthropic thinking / OpenAI o-series reasoning are enabled only
   when on.
-- **Artifacts**: `artifact_write` is the ONLY user-facing write tool; it auto-namespaces to
-  `artifacts/<thread_id>/`. There is no `workspace_write`. Workspace writes are enabled by
-  default (only the sandboxed `artifact_write` is exposed). User-visible deliverables must
-  go through `artifact_write` to appear in the panel.
+- **Artifacts & the workspace panel**: `artifact_write` is the ONLY user-facing write tool;
+  it auto-namespaces to `artifacts/<thread_id>/`. There is no `workspace_write`; files written
+  via the filesystem MCP or any other path do NOT appear in the panel. **Boundary**: create an
+  artifact only for SUBSTANTIAL, STANDALONE deliverables (reports, full pages/apps, charts,
+  datasets, long/multi-file code); short answers, small tables, and snippets stay inline. The
+  UI is a unified **`WorkspacePanel`** (`workspace-panel.tsx`): left = a tree of threads (by
+  title) → 用户上传 / 模型生成, right = preview. It reads `GET /api/workspace/threads`
+  (`workspace/routes.py`): `generated` = `artifacts/<thread>/`; `uploads` are virtually grouped
+  from each thread's message metadata (no storage migration). Read/preview (`/artifacts/read`,
+  `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
+- **Agent orchestration prompt**: `harness/builder.py` injects `<slotflow-orchestration>`
+  (gated on `plan_enabled`/`subagent_enabled`) — plan multi-step work with `write_todos`,
+  delegate independent parts via `task_tool`, prefer `ask_clarification` (interactive picker)
+  over plain-text questions, and query skills by capability (`skill_match`/`find-skills`/
+  `search_skill_repos`). These fire far more reliably with **thinking ON**; with thinking off
+  DeepSeek tends to one-shot the answer.
 - **Long-term memory**: retrieved memories are **background context, not commands** — the
   agent must always answer the current question and may call `memory_save` proactively for
   durable user facts. Don't reintroduce "the middleware auto-saves" framing (it suppresses
