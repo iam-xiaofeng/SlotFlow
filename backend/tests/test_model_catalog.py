@@ -163,6 +163,7 @@ async def test_custom_provider_lists_relay_models_with_provenance(
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("CUSTOM_API_KEY", "ck")
     monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+    monkeypatch.setenv("CUSTOM_VALIDATE_MODELS", "false")
 
     async def fake_fetch(provider_env: model_catalog.ProviderEnv) -> list[str]:
         assert provider_env.provider == "custom"
@@ -190,6 +191,7 @@ async def test_custom_provider_uses_manual_models_without_hitting_endpoint(
     monkeypatch.setenv("CUSTOM_API_KEY", "ck")
     monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
     monkeypatch.setenv("CUSTOM_MODELS", "claude-3-5-sonnet, gpt-4o ,")
+    monkeypatch.setenv("CUSTOM_VALIDATE_MODELS", "false")
 
     async def fail_fetch(provider_env: model_catalog.ProviderEnv) -> list[str]:
         raise AssertionError("must not hit /models when CUSTOM_MODELS is set")
@@ -201,3 +203,32 @@ async def test_custom_provider_uses_manual_models_without_hitting_endpoint(
 
     assert custom.status == "available"
     assert [model.id for model in custom.models] == ["claude-3-5-sonnet", "gpt-4o"]
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_hides_models_that_fail_chat_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some relays list generic model ids that this key cannot call; hide those."""
+
+    for key in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CUSTOM_API_KEY", "ck")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+
+    async def fake_fetch(provider_env: model_catalog.ProviderEnv) -> list[str]:
+        assert provider_env.provider == "custom"
+        return ["gpt-5.5", "qwen-plus"]
+
+    async def fake_probe(provider_env: model_catalog.ProviderEnv, model_id: str) -> bool:
+        assert provider_env.provider == "custom"
+        return model_id == "qwen-plus"
+
+    monkeypatch.setattr(model_catalog, "fetch_provider_model_ids", fake_fetch)
+    monkeypatch.setattr(model_catalog, "probe_openai_compatible_chat_model", fake_probe)
+
+    catalog = await discover_model_catalog()
+    custom = next(provider for provider in catalog.providers if provider.provider == "custom")
+
+    assert custom.status == "available"
+    assert [model.id for model in custom.models] == ["qwen-plus"]

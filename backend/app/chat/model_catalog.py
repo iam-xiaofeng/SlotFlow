@@ -30,6 +30,7 @@ class ProviderEnv:
     provider: ModelProvider
     api_key: str | None
     base_url: str
+    validate_models: bool = False
 
 
 async def discover_model_catalog() -> ModelCatalogRecord:
@@ -106,6 +107,18 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             models=[],
         )
 
+    if provider_env.validate_models:
+        model_ids = await filter_usable_openai_compatible_models(provider_env, model_ids)
+        if not model_ids:
+            return ModelProviderRecord(
+                provider=provider_env.provider,
+                configured=True,
+                base_url=provider_env.base_url,
+                status="error",
+                message="No discovered models passed the chat-completions availability check.",
+                models=[],
+            )
+
     return ModelProviderRecord(
         provider=provider_env.provider,
         configured=True,
@@ -121,6 +134,48 @@ async def discover_provider_models(provider_env: ProviderEnv) -> ModelProviderRe
             for model_id in sorted(set(model_ids))
         ],
     )
+
+
+async def filter_usable_openai_compatible_models(
+    provider_env: ProviderEnv,
+    model_ids: list[str],
+) -> list[str]:
+    """Keep only custom relay models that accept a minimal chat completion request."""
+
+    unique_ids = sorted(set(model_ids))
+    semaphore = asyncio.Semaphore(4)
+
+    async def is_usable(model_id: str) -> bool:
+        async with semaphore:
+            return await probe_openai_compatible_chat_model(provider_env, model_id)
+
+    results = await asyncio.gather(*(is_usable(model_id) for model_id in unique_ids))
+    return [model_id for model_id, usable in zip(unique_ids, results, strict=True) if usable]
+
+
+async def probe_openai_compatible_chat_model(
+    provider_env: ProviderEnv,
+    model_id: str,
+) -> bool:
+    """Return whether one OpenAI-compatible chat model is callable with this key."""
+
+    url = f"{provider_env.base_url.rstrip('/')}/chat/completions"
+    headers = {
+        **provider_headers(provider_env),
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError:
+        return False
+    return response.status_code < 400
 
 
 def manual_model_ids(provider: ModelProvider) -> list[str] | None:
@@ -218,6 +273,7 @@ def provider_title(provider: ModelProvider) -> str:
 
 
 def load_provider_env(provider: ModelProvider) -> ProviderEnv:
+    validate_models = False
     if provider == "deepseek":
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         base_url = os.environ.get("DEEPSEEK_BASE_URL")
@@ -231,6 +287,9 @@ def load_provider_env(provider: ModelProvider) -> ProviderEnv:
         # custom：用户自建 / 第三方 OpenAI 兼容中转站，URL 必须显式配置，没有官方回落。
         api_key = os.environ.get("CUSTOM_API_KEY")
         base_url = os.environ.get("CUSTOM_BASE_URL")
+        # 中转站常列出本 key 无法调用的通用模型；默认用 /chat/completions 探针过滤。
+        flag = os.environ.get("CUSTOM_VALIDATE_MODELS", "true").strip().lower()
+        validate_models = flag not in {"0", "false", "no"}
 
     return ProviderEnv(
         provider=provider,
@@ -240,4 +299,5 @@ def load_provider_env(provider: ModelProvider) -> ProviderEnv:
             if base_url and base_url.strip()
             else PROVIDER_DEFAULT_BASE_URLS.get(provider, "")
         ),
+        validate_models=validate_models,
     )
