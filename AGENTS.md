@@ -55,8 +55,9 @@ backend/tests/          offline test suite (no network); test_live_deepseek.py i
 frontend/src/
   components/chat/      chat UI: chat-app + extracted hooks, sidebar(+search/logo;
                         skills/mcp/memory managed in directory-modal tabs),
-                        message-list(+parts), composer(+parts), workspace-panel
-                        (two-pane; reuses artifact-panel's preview stage)
+                        message-list(+parts), composer(+parts),
+                        workspace-directory-modal, workspace-panel
+                        (two-pane preview; reuses artifact-panel's preview stage)
   hooks/                use-chat-stream (+ helpers), use-model-catalog, use-workspace-data,
                         use-thread-artifact-index
   lib/chat-stream.ts    API client + SSE
@@ -75,7 +76,10 @@ frontend/src/
   when it is absent (old clients). `.env` never decides the conversation model. Discovery
   runs all providers **concurrently** (a slow/dead relay can't stall the catalog); if a
   relay's `/models` is broken/unsupported, set `CUSTOM_MODELS` (comma-separated) to list
-  its models explicitly and skip discovery.
+  its models explicitly and skip discovery. `custom` also validates discovered/manual models
+  with a tiny `/chat/completions` probe by default so generic but unusable relay ids (for
+  example GPT names that return 502/unsupported) do not appear in the selector; set
+  `CUSTOM_VALIDATE_MODELS=false` only when that probe is too expensive or incompatible.
 - **Reasoning streaming (fragile — guard it)**: providers disagree on how reasoning is
   emitted (DeepSeek `reasoning_content` → bridged to a `{"type":"reasoning"}` block;
   OpenAI `reasoning`; Anthropic `thinking`). DeepSeek **and** the `custom` relay use the
@@ -94,11 +98,21 @@ frontend/src/
   it auto-namespaces to `artifacts/<thread_id>/`. There is no `workspace_write`; files written
   via the filesystem MCP or any other path do NOT appear in the panel. **Boundary**: create an
   artifact only for SUBSTANTIAL, STANDALONE deliverables (reports, full pages/apps, charts,
-  datasets, long/multi-file code); short answers, small tables, and snippets stay inline. The
-  UI is a unified **`WorkspacePanel`** (`workspace-panel.tsx`): left = a tree of threads (by
-  title) → 用户上传 / 模型生成, right = preview. It reads `GET /api/workspace/threads`
-  (`workspace/routes.py`): `generated` = `artifacts/<thread>/`; `uploads` are virtually grouped
-  from each thread's message metadata (no storage migration). Read/preview (`/artifacts/read`,
+  datasets, long/multi-file code); short answers, small tables, and snippets stay inline.
+  Complex planning workflows with human approval steps should write the final approved plan
+  as an artifact after approval. The sidebar **工作区** button opens
+  `workspace-directory-modal.tsx`, a centered
+  global directory over the same `/api/workspace/threads` data; thread folders are collapsed
+  by default (search expands matches), and clicking a file switches to its owning conversation
+  (except `未归类产物`) and opens the right preview panel on that file. The right
+  `WorkspacePanel` does not keep a permanent left file tree; its title is a dropdown file
+  selector grouped by thread → 用户上传 / Agent 产物 so preview width stays available. It reads
+  `GET /api/workspace/threads` (`workspace/routes.py`): `generated` = recursive
+  files under `artifacts/<thread>/`; `uploads` are virtually grouped from each thread's
+  message metadata (no storage migration). The workspace route returns only threads that
+  actually have uploads or generated files, keeping empty chats out of the file tree.
+  Legacy files under `artifacts/` that are not namespaced to a known thread are surfaced as
+  `未归类产物`, so older outputs remain findable. Read/preview (`/artifacts/read`,
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
 - **Agent operating procedure (prompt)**: `harness/builder.py` injects
   `<slotflow-operating-procedure>` for non-trivial tasks: clarify first via
