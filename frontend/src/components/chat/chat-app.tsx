@@ -52,6 +52,7 @@ import {
 } from "@/lib/chat-stream";
 
 import { WorkspacePanel } from "./workspace-panel";
+import { WorkspaceDirectoryModal } from "./workspace-directory-modal";
 import {
   defaultModelName,
   extractFileIdsFromMessage,
@@ -98,8 +99,10 @@ export function ChatApp() {
   const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
   const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
   const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
+  const [isWorkspaceDirectoryOpen, setIsWorkspaceDirectoryOpen] = useState(false);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(680);
+  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [isQueueDraining, setIsQueueDraining] = useState(false);
   const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
@@ -242,6 +245,7 @@ export function ChatApp() {
         );
         if (discoveredArtifacts.length > 0) {
           setArtifacts((current) => mergeWorkspaceEntries(current, discoveredArtifacts));
+          setWorkspaceRefreshKey((current) => current + 1);
         }
         const [, nextArtifacts] = await Promise.all([
           refreshThreads(),
@@ -265,6 +269,7 @@ export function ChatApp() {
         const newArtifact = newArtifacts[0];
         if (newArtifact) {
           void handlePreviewArtifact(newArtifact);
+          setWorkspaceRefreshKey((current) => current + 1);
         }
       } else if (options.restoreAttachments) {
         setAttachments(options.restoreAttachments);
@@ -707,17 +712,44 @@ export function ChatApp() {
     }
   }
 
-  function handleOpenArtifactPanel() {
-    const firstFile = activeThreadArtifactFiles[0];
-    if (!firstFile) {
-      toast.info("暂无产物");
+  async function handleOpenWorkspaceFile(threadId: string, file: WorkspaceEntryRecord) {
+    if (file.kind !== "file") {
       return;
     }
 
-    setIsArtifactPanelOpen(true);
-    if (!artifactPreview) {
-      void handlePreviewArtifact(firstFile);
+    if (threadId !== "__legacy_artifacts__" && threadId !== thread?.id) {
+      let targetThread = threads.find((item) => item.id === threadId);
+      if (!targetThread) {
+        const nextThreads = await refreshThreads();
+        targetThread = nextThreads.find((item) => item.id === threadId);
+      }
+
+      if (!targetThread) {
+        toast.error("找不到对应对话");
+        return;
+      }
+
+      const loaded = await loadThread(targetThread);
+      if (!loaded) {
+        toast.error("打开对应对话失败");
+        return;
+      }
+      setAttachments([]);
+      setQueuedMessages([]);
+      clearError();
     }
+
+    setSelectedArtifactPath(file.path);
+    setArtifactPreview(null);
+    setArtifactPreviewError(null);
+    setIsLoadingArtifactPreview(false);
+    setIsArtifactPanelOpen(true);
+    setWorkspaceRefreshKey((current) => current + 1);
+  }
+
+  function handleOpenArtifactPanel() {
+    setIsWorkspaceDirectoryOpen(true);
+    setWorkspaceRefreshKey((current) => current + 1);
   }
 
   async function handleDeleteArtifact(artifact: WorkspaceEntryRecord) {
@@ -728,6 +760,7 @@ export function ChatApp() {
     try {
       await deleteArtifact(artifact.path);
       const nextArtifacts = await refreshArtifacts();
+      setWorkspaceRefreshKey((current) => current + 1);
       setThreadArtifactPaths((current) => removeArtifactPathFromThreadIndex(current, artifact.path));
       if (selectedArtifactPath === artifact.path || artifactPreview?.path === artifact.path) {
         setSelectedArtifactPath(null);
@@ -759,21 +792,14 @@ export function ChatApp() {
       return;
     }
 
-    if (activeThreadArtifactFiles.length === 0) {
-      setSelectedArtifactPath(null);
-      setArtifactPreview(null);
-      setArtifactPreviewError(null);
-      setIsArtifactPanelOpen(false);
+    if (selectedArtifactPath || artifactPreview?.path) {
       return;
     }
 
-    const activePaths = new Set(activeThreadArtifactFiles.map((artifact) => artifact.path));
-    const currentPath = selectedArtifactPath ?? artifactPreview?.path ?? null;
-    if (currentPath && activePaths.has(currentPath)) {
-      return;
+    const firstFile = activeThreadArtifactFiles[0];
+    if (firstFile) {
+      void handlePreviewArtifact(firstFile);
     }
-
-    void handlePreviewArtifact(activeThreadArtifactFiles[0]);
   }, [
     activeThreadArtifactFiles,
     artifactPreview?.path,
@@ -895,6 +921,11 @@ export function ChatApp() {
         className="hidden"
         onChange={(event) => void handleSkillFolderChange(event)}
       />
+      <WorkspaceDirectoryModal
+        open={isWorkspaceDirectoryOpen}
+        onOpenChange={setIsWorkspaceDirectoryOpen}
+        onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
+      />
       <Sidebar collapsible="icon" resizable className="border-r-0">
         <ThreadSidebar
           activeThreadId={thread?.id ?? null}
@@ -967,9 +998,11 @@ export function ChatApp() {
           {isArtifactPanelOpen ? (
             <WorkspacePanel
               open={isArtifactPanelOpen}
-              activeThreadId={thread?.id ?? null}
+              selectedPath={selectedArtifactPath}
               width={artifactPanelWidth}
+              refreshKey={workspaceRefreshKey}
               onClose={() => setIsArtifactPanelOpen(false)}
+              onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
               onWidthChange={setArtifactPanelWidth}
             />
           ) : null}
@@ -978,4 +1011,3 @@ export function ChatApp() {
     </SidebarProvider>
   );
 }
-

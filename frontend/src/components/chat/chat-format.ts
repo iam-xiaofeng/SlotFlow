@@ -107,6 +107,12 @@ export function displayFileName(file: {
   return file.original_filename || file.filename;
 }
 
+/** Last path segment of a workspace path (its file name). */
+export function entryName(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
 export function filterThreadArtifacts(
   threadId: string,
   artifacts: WorkspaceEntryRecord[],

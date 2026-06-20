@@ -1,8 +1,15 @@
 "use client";
 
-import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
-  ChevronRight,
+  type PointerEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  ChevronDown,
   Code2,
   Download,
   ExternalLink,
@@ -12,9 +19,17 @@ import {
   LoaderCircle,
   PanelRightClose,
   RefreshCw,
+  Upload,
+  WandSparkles,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   type ThreadWorkspaceRecord,
@@ -31,41 +46,37 @@ import {
   getArtifactPreviewType,
   type ArtifactViewMode,
 } from "./artifact-panel";
-import { formatFileSize } from "./chat-format";
+import { entryName, formatFileSize } from "./chat-format";
 
-const minPanelWidth = 720;
+const minPanelWidth = 560;
 const maxPanelWidth = 1100;
 const panelWidthVariable = "--slotflow-artifact-panel-width";
 
-function entryName(path: string): string {
-  const segments = path.split("/").filter(Boolean);
-  return segments[segments.length - 1] ?? path;
-}
-
 type WorkspacePanelProps = {
   open: boolean;
-  activeThreadId: string | null;
+  selectedPath?: string | null;
   width: number;
   refreshKey?: number;
   onClose: () => void;
+  onOpenFile?: (threadId: string, file: WorkspaceEntryRecord) => void;
   onWidthChange: (width: number) => void;
 };
 
-/** Unified workspace panel: a left tree of threads (by title) → 用户上传 / 模型生成,
- *  with a right preview pane. Replaces the old artifact panel + directory modal. */
+/** Unified workspace preview panel. The file directory lives in the title dropdown so
+ *  preview width is not permanently consumed by a side tree. */
 export function WorkspacePanel({
   open,
-  activeThreadId,
+  selectedPath: externalSelectedPath,
   width,
   refreshKey,
   onClose,
+  onOpenFile,
   onWidthChange,
 }: WorkspacePanelProps) {
   const animationFrameRef = useRef<number | null>(null);
   const [threads, setThreads] = useState<ThreadWorkspaceRecord[] | null>(null);
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [preview, setPreview] = useState<WorkspaceReadRecord | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -92,34 +103,9 @@ export function WorkspacePanel({
     }
   }, [open, refreshKey, refresh]);
 
-  // Auto-expand the active thread + its two groups when the panel opens.
-  useEffect(() => {
-    if (open && activeThreadId) {
-      setExpanded((current) => {
-        const next = new Set(current);
-        next.add(activeThreadId);
-        next.add(`${activeThreadId}:uploads`);
-        next.add(`${activeThreadId}:generated`);
-        return next;
-      });
-    }
-  }, [open, activeThreadId, threads]);
-
   useEffect(() => {
     setViewMode("preview");
   }, [preview?.path]);
-
-  const toggle = useCallback((key: string) => {
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
-  }, []);
 
   const selectFile = useCallback(async (path: string) => {
     setSelectedPath(path);
@@ -134,6 +120,23 @@ export function WorkspacePanel({
       setIsLoadingPreview(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (!open || !externalSelectedPath || externalSelectedPath === selectedPath) {
+      return;
+    }
+    void selectFile(externalSelectedPath);
+  }, [externalSelectedPath, open, selectFile, selectedPath]);
+
+  useEffect(() => {
+    if (!open || selectedPath || externalSelectedPath || !threads) {
+      return;
+    }
+    const firstFile = threads.flatMap((item) => [...item.generated, ...item.uploads])[0];
+    if (firstFile?.kind === "file") {
+      void selectFile(firstFile.path);
+    }
+  }, [externalSelectedPath, open, selectFile, selectedPath, threads]);
 
   function beginResize(event: PointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -201,51 +204,23 @@ export function WorkspacePanel({
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-background shadow-lg">
-        <div className="flex w-64 shrink-0 flex-col border-r bg-muted/20">
-          <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b px-3">
-            <span className="text-sm font-medium">工作区</span>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              title="刷新"
-              onClick={() => void refresh()}
-            >
-              <RefreshCw className="size-4" />
-              <span className="sr-only">刷新</span>
-            </Button>
-          </div>
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="p-2">
-              {isLoadingThreads && !threads ? (
-                <p className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
-                  <LoaderCircle className="size-3.5 animate-spin" /> 加载中…
-                </p>
-              ) : error ? (
-                <p className="px-2 py-3 text-xs text-destructive">{error}</p>
-              ) : !threads || threads.length === 0 ? (
-                <p className="px-2 py-3 text-xs text-muted-foreground">工作区暂无内容。</p>
-              ) : (
-                threads.map((thread) => (
-                  <ThreadNode
-                    key={thread.thread_id}
-                    thread={thread}
-                    expanded={expanded}
-                    selectedPath={selectedPath}
-                    onToggle={toggle}
-                    onSelectFile={(path) => void selectFile(path)}
-                  />
-                ))
-              )}
-            </div>
-          </ScrollArea>
-        </div>
-
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-12 shrink-0 items-center gap-1 border-b bg-muted/40 px-2">
-            <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-              {preview ? entryName(preview.path) : "选择左侧文件预览"}
-            </span>
+          <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-muted/40 px-2">
+            <WorkspaceFileSelector
+              threads={threads}
+              isLoading={isLoadingThreads}
+              error={error}
+              selectedPath={selectedPath}
+              previewPath={preview?.path ?? null}
+              onRefresh={() => void refresh()}
+              onSelectFile={(threadId, file) => {
+                if (onOpenFile) {
+                  onOpenFile(threadId, file);
+                  return;
+                }
+                void selectFile(file.path);
+              }}
+            />
             {canSwitchView ? (
               <div className="flex shrink-0 items-center rounded-lg border bg-background p-0.5">
                 <Button
@@ -322,118 +297,192 @@ export function WorkspacePanel({
   );
 }
 
-function ThreadNode({
-  thread,
-  expanded,
+function WorkspaceFileSelector({
+  threads,
+  isLoading,
+  error,
   selectedPath,
-  onToggle,
+  previewPath,
+  onRefresh,
   onSelectFile,
 }: {
-  thread: ThreadWorkspaceRecord;
-  expanded: Set<string>;
+  threads: ThreadWorkspaceRecord[] | null;
+  isLoading: boolean;
+  error: string | null;
   selectedPath: string | null;
-  onToggle: (key: string) => void;
-  onSelectFile: (path: string) => void;
+  previewPath: string | null;
+  onRefresh: () => void;
+  onSelectFile: (threadId: string, file: WorkspaceEntryRecord) => void;
 }) {
-  const open = expanded.has(thread.thread_id);
+  const currentPath = selectedPath ?? previewPath;
+  const currentName = currentPath ? entryName(currentPath) : "选择工作区文件";
+
   return (
-    <div>
-      <button
-        type="button"
-        onClick={() => onToggle(thread.thread_id)}
-        className="flex min-h-8 w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm hover:bg-muted"
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            className="min-w-0 flex-1 justify-start gap-2 px-2 text-left"
+          />
+        }
       >
-        <ChevronRight
-          className={cn(
-            "size-3.5 shrink-0 text-muted-foreground transition-transform",
-            open && "rotate-90",
-          )}
-        />
-        <Folder className="size-4 shrink-0 text-amber-500" />
-        <span className="truncate" title={thread.title}>
-          {thread.title || "未命名会话"}
+        <FileText className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-sm" title={currentPath ?? undefined}>
+          {currentName}
         </span>
-      </button>
-      {open ? (
-        <div className="pl-3">
-          <GroupNode
-            label="用户上传"
-            groupKey={`${thread.thread_id}:uploads`}
-            files={thread.uploads}
-            expanded={expanded}
-            selectedPath={selectedPath}
-            onToggle={onToggle}
-            onSelectFile={onSelectFile}
-          />
-          <GroupNode
-            label="模型生成"
-            groupKey={`${thread.thread_id}:generated`}
-            files={thread.generated}
-            expanded={expanded}
-            selectedPath={selectedPath}
-            onToggle={onToggle}
-            onSelectFile={onSelectFile}
-          />
+        <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        sideOffset={8}
+        className="w-[min(28rem,calc(100vw-2rem))] rounded-xl p-0"
+      >
+        <div className="flex h-10 items-center justify-between gap-2 border-b px-3">
+          <span className="text-sm font-medium">工作区</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            title="刷新"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onRefresh();
+            }}
+          >
+            <RefreshCw className="size-4" />
+            <span className="sr-only">刷新</span>
+          </Button>
         </div>
-      ) : null}
-    </div>
+        <WorkspaceFileMenu
+          threads={threads}
+          isLoading={isLoading}
+          error={error}
+          selectedPath={currentPath}
+          onSelectFile={onSelectFile}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
-function GroupNode({
-  label,
-  groupKey,
-  files,
-  expanded,
+function WorkspaceFileMenu({
+  threads,
+  isLoading,
+  error,
   selectedPath,
-  onToggle,
   onSelectFile,
 }: {
-  label: string;
-  groupKey: string;
-  files: WorkspaceEntryRecord[];
-  expanded: Set<string>;
+  threads: ThreadWorkspaceRecord[] | null;
+  isLoading: boolean;
+  error: string | null;
   selectedPath: string | null;
-  onToggle: (key: string) => void;
-  onSelectFile: (path: string) => void;
+  onSelectFile: (threadId: string, file: WorkspaceEntryRecord) => void;
 }) {
-  const open = expanded.has(groupKey);
+  if (isLoading && !threads) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-6 text-sm text-muted-foreground">
+        <LoaderCircle className="size-4 animate-spin" />
+        加载中…
+      </div>
+    );
+  }
+
+  if (error) {
+    return <div className="px-3 py-3 text-sm text-destructive">{error}</div>;
+  }
+
+  if (!threads || threads.length === 0) {
+    return <div className="px-3 py-6 text-sm text-muted-foreground">工作区暂无内容。</div>;
+  }
+
   return (
-    <div>
-      <button
-        type="button"
-        onClick={() => onToggle(groupKey)}
-        className="flex min-h-7 w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted"
-      >
-        <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} />
+    <ScrollArea className="max-h-[min(70vh,34rem)]">
+      <div className="space-y-2 p-2">
+        {threads.map((thread) => (
+          <div key={thread.thread_id} className="rounded-lg border bg-background p-2">
+            <div className="mb-1 flex items-center gap-2 px-1 py-1 text-sm font-medium">
+              <Folder className="size-4 shrink-0 text-amber-500" />
+              <span className="min-w-0 flex-1 truncate" title={thread.title}>
+                {thread.title || "未命名会话"}
+              </span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {thread.uploads.length + thread.generated.length}
+              </span>
+            </div>
+            <WorkspaceMenuBucket
+              icon={<Upload className="size-3.5" />}
+              label="用户上传"
+              threadId={thread.thread_id}
+              files={thread.uploads}
+              selectedPath={selectedPath}
+              onSelectFile={onSelectFile}
+            />
+            <WorkspaceMenuBucket
+              icon={<WandSparkles className="size-3.5" />}
+              label="Agent 产物"
+              threadId={thread.thread_id}
+              files={thread.generated}
+              selectedPath={selectedPath}
+              onSelectFile={onSelectFile}
+            />
+          </div>
+        ))}
+      </div>
+    </ScrollArea>
+  );
+}
+
+function WorkspaceMenuBucket({
+  icon,
+  label,
+  threadId,
+  files,
+  selectedPath,
+  onSelectFile,
+}: {
+  icon: ReactNode;
+  label: string;
+  threadId: string;
+  files: WorkspaceEntryRecord[];
+  selectedPath: string | null;
+  onSelectFile: (threadId: string, file: WorkspaceEntryRecord) => void;
+}) {
+  return (
+    <div className="pt-1">
+      <div className="flex items-center gap-1.5 px-1 py-1 text-xs font-medium text-muted-foreground">
+        {icon}
         <span>{label}</span>
         <span className="ml-auto tabular-nums">{files.length}</span>
-      </button>
-      {open
-        ? files.length === 0
-          ? <p className="py-1 pl-7 text-xs text-muted-foreground/70">（空）</p>
-          : files.map((file) => (
-              <button
-                key={file.path}
-                type="button"
-                onClick={() => onSelectFile(file.path)}
-                className={cn(
-                  "flex min-h-7 w-full items-center gap-1.5 rounded-md py-1 pl-7 pr-2 text-left text-sm hover:bg-muted",
-                  selectedPath === file.path && "bg-muted text-foreground",
-                )}
-              >
-                <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate" title={file.path}>
-                  {entryName(file.path)}
-                </span>
-                {typeof file.size_bytes === "number" ? (
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    {formatFileSize(file.size_bytes)}
-                  </span>
-                ) : null}
-              </button>
-            ))
-        : null}
+      </div>
+      {files.length === 0 ? (
+        <div className="rounded-md bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
+          空
+        </div>
+      ) : (
+        files.map((file) => (
+          <DropdownMenuItem
+            key={file.path}
+            className={cn(
+              "min-w-0 gap-2 rounded-md py-2",
+              selectedPath === file.path && "bg-muted text-foreground",
+            )}
+            onClick={() => onSelectFile(threadId, file)}
+          >
+            <FileText className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate" title={file.path}>
+              {entryName(file.path)}
+            </span>
+            {typeof file.size_bytes === "number" ? (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {formatFileSize(file.size_bytes)}
+              </span>
+            ) : null}
+          </DropdownMenuItem>
+        ))
+      )}
     </div>
   );
 }
