@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, Response
 
 from app.dependencies import get_chat_repo, get_upload_store
 from app.harness.sandbox import WorkspacePathError
+from app.harness.sandbox.workspace import SlotFlowWorkspace
 from app.workspace.models import (
     ThreadWorkspaceRecord,
     WorkspaceEntryRecord,
@@ -148,23 +149,79 @@ async def list_thread_workspaces(request: Request) -> list[ThreadWorkspaceRecord
     workspace = get_upload_store(request).workspace
 
     records: list[ThreadWorkspaceRecord] = []
-    for thread in repo.list_threads():
-        try:
-            generated = [
-                WorkspaceEntryRecord(path=entry.path, kind=entry.kind, size_bytes=entry.size_bytes)
-                for entry in workspace.list_entries(f"artifacts/{thread.id}")
-            ]
-        except WorkspacePathError:
-            generated = []
+    threads = repo.list_threads()
+    thread_artifact_prefixes = {f"artifacts/{thread.id}/" for thread in threads}
+    for thread in threads:
+        generated = _list_workspace_files(workspace, f"artifacts/{thread.id}")
+        uploads = _collect_thread_uploads(repo, workspace, thread.id)
+        if not generated and not uploads:
+            continue
         records.append(
             ThreadWorkspaceRecord(
                 thread_id=thread.id,
                 title=thread.title,
                 generated=generated,
-                uploads=_collect_thread_uploads(repo, workspace, thread.id),
+                uploads=uploads,
             )
         )
+
+    # Legacy/flat artifacts written directly under artifacts/ (not namespaced to a thread)
+    # must still be findable — surface them as an "未归类产物" group.
+    flat = [
+        entry
+        for entry in _list_workspace_files(workspace, "artifacts")
+        if not any(entry.path.startswith(prefix) for prefix in thread_artifact_prefixes)
+    ]
+    if flat:
+        records.append(
+            ThreadWorkspaceRecord(
+                thread_id="__legacy_artifacts__",
+                title="未归类产物",
+                generated=flat,
+                uploads=[],
+            )
+        )
+
     return records
+
+
+def _list_workspace_files(
+    workspace: SlotFlowWorkspace,
+    path: str,
+) -> list[WorkspaceEntryRecord]:
+    """Return all files under a workspace path, recursively and sandboxed."""
+
+    try:
+        root = workspace.resolve_path(path)
+    except WorkspacePathError:
+        return []
+    if not root.exists():
+        return []
+    if root.is_file():
+        return [
+            WorkspaceEntryRecord(
+                path=root.relative_to(workspace.root).as_posix(),
+                kind="file",
+                size_bytes=root.stat().st_size,
+            )
+        ]
+
+    entries: list[WorkspaceEntryRecord] = []
+    for candidate in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        if not candidate.is_file():
+            continue
+        try:
+            resolved = workspace.resolve_path(candidate.relative_to(workspace.root).as_posix())
+        except WorkspacePathError:
+            continue
+        entries.append(
+            WorkspaceEntryRecord(
+                path=resolved.relative_to(workspace.root).as_posix(),
+                kind="file",
+                size_bytes=resolved.stat().st_size,
+            )
+        )
+    return entries
 
 
 def _collect_thread_uploads(repo, workspace, thread_id: str) -> list[WorkspaceEntryRecord]:

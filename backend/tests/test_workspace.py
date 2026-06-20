@@ -7,17 +7,31 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.chat.models import MessageRecord
+from app.chat.repository import SQLiteChatRepository
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
 from app.workspace.routes import _collect_thread_uploads
 
 
+class NoopAgentAdapter:
+    """Workspace route tests never stream a run, but create_app needs an adapter."""
+
+
 def _client(tmp_path: Path) -> tuple[TestClient, SlotFlowUploadStore]:
     store = SlotFlowUploadStore(
         SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
     )
-    return TestClient(create_app(upload_store=store)), store
+    return (
+        TestClient(
+            create_app(
+                chat_repo=SQLiteChatRepository(":memory:"),
+                agent_adapter=NoopAgentAdapter(),
+                upload_store=store,
+            )
+        ),
+        store,
+    )
 
 
 def _write(store: SlotFlowUploadStore, relative_path: str, text: str = "x") -> None:
@@ -115,3 +129,42 @@ def test_list_thread_workspaces_returns_list(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+def test_list_thread_workspaces_recursively_groups_thread_artifacts(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    thread = client.post("/api/chat/threads", json={"title": "旅行计划"}).json()
+    _write(store, f"artifacts/{thread['id']}/plans/final.md", "plan")
+
+    response = client.get("/api/workspace/threads")
+
+    assert response.status_code == 200
+    record = next(item for item in response.json() if item["thread_id"] == thread["id"])
+    assert record["title"] == "旅行计划"
+    assert record["generated"] == [
+        {
+            "path": f"artifacts/{thread['id']}/plans/final.md",
+            "kind": "file",
+            "size_bytes": 4,
+        }
+    ]
+
+
+def test_list_thread_workspaces_keeps_legacy_artifacts_visible(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    thread = client.post("/api/chat/threads", json={"title": "新会话"}).json()
+    _write(store, f"artifacts/{thread['id']}/report.md", "new")
+    _write(store, "artifacts/old/report.md", "old")
+
+    response = client.get("/api/workspace/threads")
+
+    assert response.status_code == 200
+    legacy = next(item for item in response.json() if item["thread_id"] == "__legacy_artifacts__")
+    assert legacy["title"] == "未归类产物"
+    assert legacy["generated"] == [
+        {
+            "path": "artifacts/old/report.md",
+            "kind": "file",
+            "size_bytes": 3,
+        }
+    ]
