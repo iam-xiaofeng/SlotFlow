@@ -1,16 +1,19 @@
-"""Tests for the clarify-gate middleware (pro/ultra first-step enforcement)."""
+"""Tests for the clarify-gate middleware (pro/ultra first-step clarify enforcement)."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
-from langchain.agents.middleware import ModelRequest, ModelResponse
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from app.chat.models import RunContext
 from app.harness.middleware.clarify_gate_middleware import SlotFlowClarifyGateMiddleware
+
+
+class _ToolAwareFake(FakeMessagesListChatModel):
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
 
 
 def _ctx(mode: str) -> RunContext:
@@ -30,27 +33,6 @@ def _gate(triage_value) -> SlotFlowClarifyGateMiddleware:
     return SlotFlowClarifyGateMiddleware(triage=lambda _text: triage_value)
 
 
-def _request(messages, ctx, *, tools=None, state=None) -> ModelRequest:
-    return ModelRequest(
-        model=object(),
-        messages=messages,
-        tools=tools or [],
-        state=state or {"messages": messages},
-        runtime=Runtime(context=ctx),
-    )
-
-
-class _Handler:
-    def __init__(self) -> None:
-        self.calls = 0
-        self.request: ModelRequest | None = None
-
-    async def __call__(self, request: ModelRequest) -> ModelResponse:
-        self.calls += 1
-        self.request = request
-        return ModelResponse(result=[AIMessage(content="real answer")])
-
-
 # --- clarify gate (before_model) --------------------------------------------------------
 
 
@@ -62,7 +44,15 @@ async def test_flash_mode_never_gates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pro_underspecified_request_ends_with_clarification() -> None:
+async def test_pro_underspecified_request_pauses_with_clarification_interrupt() -> None:
+    """The gate pauses the real graph via interrupt(), carrying the clarification payload; the
+    user's answer resumes the run and is injected so the model proceeds (no jump_to=end, no
+    synthesized tool message that could re-pop)."""
+
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+
     gate = _gate(
         {
             "actionable": False,
@@ -71,14 +61,16 @@ async def test_pro_underspecified_request_ends_with_clarification() -> None:
             "options": ["CSV", "Excel", "Markdown"],
         }
     )
-    result = await gate.abefore_model({"messages": [HumanMessage("做个表格")]}, Runtime(context=_ctx("pro")))
+    model = _ToolAwareFake(responses=[AIMessage(content="好的，导出为 CSV。")])
+    graph = create_agent(model=model, tools=[], middleware=[gate], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "tg"}}
+    # RunContext drives the gate's mode check; create_agent forwards context via the runtime.
+    ctx = _ctx("pro")
 
-    assert result["jump_to"] == "end"
-    ai_message, tool_message = result["messages"]
-    assert ai_message.tool_calls[0]["name"] == "ask_clarification"
-    assert isinstance(tool_message, ToolMessage)
-    assert tool_message.name == "ask_clarification"
-    payload = json.loads(tool_message.content)
+    await graph.ainvoke({"messages": [{"role": "user", "content": "做个表格"}]}, config=config, context=ctx)
+    state = await graph.aget_state(config)
+    assert state.interrupts, "underspecified pro request should pause for clarification"
+    payload = state.interrupts[0].value
     assert payload["type"] == "clarification"
     assert payload["source"] == "slotflow_clarification"  # projection requires this exact source
     assert payload["question"] == "导出成什么格式？"
@@ -86,17 +78,25 @@ async def test_pro_underspecified_request_ends_with_clarification() -> None:
     assert labels[:3] == ["CSV", "Excel", "Markdown"]
     assert "其他" in labels[-1]  # free-text escape always appended last
 
+    # Answer resumes the run; the answer is injected verbatim as the user's message (no
+    # meta-frame, so the model won't echo a wrapper) and the model produces its final reply.
+    result = await graph.ainvoke(Command(resume="CSV"), config=config, context=ctx)
+    assert result["messages"][-1].content == "好的，导出为 CSV。"
+    injected = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.content == "CSV"]
+    assert injected, "the user's answer should be injected verbatim as a HumanMessage"
+    after = await graph.aget_state(config)
+    assert not after.interrupts  # answered -> no pending interrupt -> cannot re-pop
+
 
 @pytest.mark.asyncio
-async def test_pro_actionable_request_stashes_triage_and_does_not_gate() -> None:
-    gate = _gate({"actionable": True, "needs_plan": False})
+async def test_actionable_request_does_not_gate() -> None:
+    gate = _gate({"actionable": True})
     result = await gate.abefore_model(
         {"messages": [HumanMessage("把'你好'翻译成英文")], "slotflow": {"keep": 1}},
         Runtime(context=_ctx("pro")),
     )
-    assert "jump_to" not in result  # actionable -> stash, not end
-    assert result["slotflow"]["keep"] == 1  # does not clobber existing slotflow keys
-    assert result["slotflow"]["clarify_gate_triage"]["actionable"] is True
+    # Actionable -> let the model run; the gate makes no state change.
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -109,8 +109,8 @@ async def test_does_not_re_clarify_after_a_prior_clarification() -> None:
         HumanMessage("CSV"),
     ]
     result = await gate.abefore_model({"messages": messages}, Runtime(context=_ctx("pro")))
-    # anti-loop: actionable=False but already clarified -> stash, never a second clarification
-    assert "jump_to" not in (result or {})
+    # anti-loop: actionable=False but already clarified -> never a second clarification
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -130,157 +130,3 @@ async def test_triage_failure_fails_open() -> None:
     gate = _gate(None)
     result = await gate.abefore_model({"messages": [HumanMessage("做个表格")]}, Runtime(context=_ctx("pro")))
     assert result is None
-
-
-# --- ultra skill-first / plan-first directive (wrap_model_call) -------------------------
-
-
-@pytest.mark.asyncio
-async def test_ultra_injects_skill_directive_when_installed_skill_present() -> None:
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("帮我做一份金融分析报告")],
-        _ctx("ultra"),
-        tools=[{"name": "skill_match"}, {"name": "write_todos"}],
-        state={
-            "messages": [],
-            "slotflow": {
-                "skills_preflight": {"installed_matches": [{"name": "finance"}]},
-                "clarify_gate_triage": {"actionable": True, "needs_plan": True},
-            },
-        },
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-    assert handler.request.tool_choice is None  # forcing breaks DeepSeek thinking
-    assert "skill_match" in handler.request.system_message.content
-
-
-@pytest.mark.asyncio
-async def test_ultra_specialized_task_injects_skill_discovery_directive() -> None:
-    """Specialized task pushes skill discovery even when NO Skill is installed yet."""
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("用专业方法分析这组销量数据并出图")],
-        _ctx("ultra"),
-        tools=[{"name": "skill_match"}, {"name": "find-skills"}, {"name": "write_todos"}],
-        state={
-            "messages": [],
-            "slotflow": {
-                "skills_preflight": {"installed_matches": []},  # nothing installed
-                "clarify_gate_triage": {"actionable": True, "specialized": True, "needs_plan": False},
-            },
-        },
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-    assert handler.request.tool_choice is None
-    assert "skill_match" in handler.request.system_message.content
-
-
-@pytest.mark.asyncio
-async def test_ultra_skill_directive_fires_when_preflight_ran_even_without_triage_flag() -> None:
-    """The skills preflight running (specialized terms detected) is enough to push discovery."""
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("分析这组销量数据并出趋势图")],
-        _ctx("ultra"),
-        tools=[{"name": "skill_match"}, {"name": "find-skills"}],
-        state={
-            "messages": [],
-            "slotflow": {
-                "skills_preflight": {"installed_matches": [], "installable_search": {}},
-                "clarify_gate_triage": {"actionable": True, "specialized": False, "needs_plan": False},
-            },
-        },
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-    assert "skill_match" in handler.request.system_message.content
-
-
-@pytest.mark.asyncio
-async def test_ultra_injects_plan_directive_for_nontrivial_task() -> None:
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("帮我搭一个多页的产品介绍网站")],
-        _ctx("ultra"),
-        tools=[{"name": "skill_match"}, {"name": "write_todos"}],
-        state={
-            "messages": [],
-            "slotflow": {
-                "skills_preflight": {"installed_matches": []},
-                "clarify_gate_triage": {"actionable": True, "needs_plan": True, "specialized": False},
-            },
-        },
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-    assert "write_todos" in handler.request.system_message.content
-
-
-@pytest.mark.asyncio
-async def test_ultra_parallel_task_injects_subagent_delegation_directive() -> None:
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("分别调研 A、B、C 三家公司再对比")],
-        _ctx("ultra"),
-        tools=[{"name": "task_tool"}, {"name": "write_todos"}],
-        state={
-            "messages": [],
-            "slotflow": {
-                "clarify_gate_triage": {"actionable": True, "needs_subagent": True, "needs_plan": True},
-            },
-        },
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-    assert "task_tool" in handler.request.system_message.content
-
-
-@pytest.mark.asyncio
-async def test_ultra_trivial_task_injects_no_directive() -> None:
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("1+1 等于几？")],
-        _ctx("ultra"),
-        tools=[{"name": "write_todos"}],
-        state={"messages": [], "slotflow": {"clarify_gate_triage": {"actionable": True, "needs_plan": False}}},
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_pro_mode_wrap_model_call_injects_no_directive() -> None:
-    gate = SlotFlowClarifyGateMiddleware()
-    handler = _Handler()
-    request = _request(
-        [HumanMessage("帮我搭一个多页的产品介绍网站")],
-        _ctx("pro"),
-        tools=[{"name": "write_todos"}],
-        state={"messages": [], "slotflow": {"clarify_gate_triage": {"actionable": True, "needs_plan": True}}},
-    )
-
-    await gate.awrap_model_call(request, handler)
-
-    assert handler.calls == 1
-    assert handler.request.system_message is None  # ultra-only enforcement

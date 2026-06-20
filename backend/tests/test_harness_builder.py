@@ -73,7 +73,6 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     # The builder passes the harness tool registry to the graph (key tools, no duplicates).
     assert {
         "ask_clarification",
-        "slotflow_context",
         "artifact_write",
         "web_search",
         "skill_match",
@@ -85,7 +84,6 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
-        "SlotFlowClarificationMiddleware",
         "SlotFlowClarifyGateMiddleware",
         "SlotFlowTodoMiddleware",
         "SlotFlowArtifactDiscoveryMiddleware",
@@ -171,7 +169,6 @@ def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkey
         "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
-        "SlotFlowClarificationMiddleware",
         "SlotFlowClarifyGateMiddleware",
         "SlotFlowTodoMiddleware",
         "SlotFlowArtifactDiscoveryMiddleware",
@@ -248,7 +245,7 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
                 artifact_discovery_enabled=False,
                 summarization_enabled=False,
                 skills_preflight_enabled=False,
-                clarification_enabled=False,
+                clarify_gate_enabled=False,
                 uploads_enabled=False,
                 todo_enabled=False,
             ),

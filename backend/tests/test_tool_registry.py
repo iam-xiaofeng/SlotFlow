@@ -34,7 +34,7 @@ def test_registry_has_no_duplicate_tool_names() -> None:
 
 def test_registry_exposes_key_tools_per_category() -> None:
     names = set(_tool_names())
-    assert {"slotflow_context", "ask_clarification"} <= names  # builtin
+    assert {"ask_clarification"} <= names  # builtin
     assert {"workspace_read", "artifact_write"} <= names  # workspace
     assert {"web_fetch", "web_search"} <= names  # network
     assert {  # customization / skill + mcp discovery
@@ -55,13 +55,13 @@ def test_registry_orders_workspace_then_network_then_customization() -> None:
 
 
 def test_registry_dedupes_with_first_name_wins() -> None:
-    @tool("slotflow_context")
+    @tool("ask_clarification")
     def replacement() -> str:
-        """Replacement context tool to prove first-name-wins dedupe."""
+        """Replacement builtin to prove first-name-wins dedupe."""
 
         return "x"
 
     tools = build_harness_tools(features=_features(), extra_tools=[replacement])
     names = [t.name for t in tools]
     assert tools[0] is replacement
-    assert names.count("slotflow_context") == 1
+    assert names.count("ask_clarification") == 1

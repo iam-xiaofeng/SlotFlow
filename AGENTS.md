@@ -10,6 +10,37 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 > what was tried, live-API test results, current state). Read it for the *why* behind the
 > clarify-gate and the known behavioral gaps (subagent / skill-discovery / proactive memory).
 
+> **⚠️ Rule: fix root causes, not symptoms.** Treating a bug as a surface problem — patching
+> the visible symptom without tracing *why* it happens — does not make the problem smaller.
+> It makes it bigger: the real cause is still there, the patch becomes one more thing that can
+> break, the patches start fighting each other, and bugs multiply. Looking only at the surface
+> and only ever fixing the surface turns hard problems into harder ones. Before "fixing"
+> anything: reproduce it, find the actual mechanism, and audit the whole flow it lives in —
+> the same shallow mistake is usually repeated elsewhere. A small correct fix at the root beats
+> ten patches at the leaves. (Concrete example: the clarification re-popup was *not* fixed by
+> suppressing duplicate questions — that was a symptom patch. The root cause was that the
+> `ask_clarification` tool result echoed the question instead of carrying the user's answer
+> back to the model; fixing the tool-result protocol fixed it for real. See `HARNESS_NOTES.md`.)
+
+> **📓 Rule: every harness (model-constraint) change MUST be documented in exhaustive detail in
+> [`HARNESS_NOTES.md`](HARNESS_NOTES.md).** The "harness" is everything that shapes or constrains
+> the model: model selection, the clarify gate + `ask_clarification`, tool binding/dispatch,
+> thinking-mode handling, skills discovery/matching, MCP search, sub-agent delegation, memory
+> extraction, and the middleware chain. `HARNESS_NOTES.md` must let a reader starting from zero
+> understand the **whole agent chain end to end** — for each piece: *why it is designed this way*,
+> *what problems were hit*, *what caused them*, *how they were solved*, and *the real result of
+> driving the current design through a live API* (e.g. prompts run via Claude Code / Codex against
+> the actual model, not just unit tests). Write the full flow: model choice → clarify → tool calls →
+> thinking → skills/MCP search → sub-agents → memory → final answer. Update it in the SAME change
+> that touches harness behavior — this is part of "done".
+
+> **🔍 Rule: everything written in `AGENTS.md` and `HARNESS_NOTES.md` MUST be verified by reading
+> the actual code — never written from memory, assumption, or what context "suggests".** If you
+> cannot point to the code that proves a statement, do not write it; go read the code first. Docs
+> that drift from the code are worse than no docs.
+
+
+
 ## What SlotFlow is
 
 A local-first, extensible AI agent workspace: a FastAPI + LangGraph backend driving a
@@ -124,43 +155,93 @@ frontend/src/
   specialized work, then (gated on `plan_enabled`/`subagent_enabled`) plan with `write_todos`
   and split INDEPENDENT parts to `task_tool` sub-agents. These fire far more reliably with
   **thinking ON**; with thinking off DeepSeek tends to one-shot.
-- **Clarify-gate (mode-graded hard enforcement)**: prompts alone can't stop a model from
-  one-shot-guessing an underspecified request, so `middleware/clarify_gate_middleware.py`
-  (`SlotFlowClarifyGateMiddleware`) enforces behavior in the graph on the **first model step**
-  of a fresh user turn via one cheap structured **triage** call.
-  - **Clarify (pro + ultra)**: if not actionable, `before_model` (decorated
-    `@hook_config(can_jump_to=["end"])`) returns `{"jump_to": "end", "messages": [AIMessage
-    + clarification ToolMessage]}` built by `build_clarification_payload`. The model NEVER
-    runs (no fabrication), and the projection surfaces the picker exactly like the real tool.
-    **Every** clarification (gate- or model-initiated) gets a free-text `其他（自己输入）` option
-    appended by `build_clarification_payload` as the LAST option — the frontend renders any
-    其他/other/specify option as an input box, so the user can always answer in their own words.
-  - **Skill-first / plan-first / delegate (ultra)**: when actionable, the triage is stashed and
-    `wrap_model_call` injects a strong **system directive** assembling the applicable
-    requirements: specialized task (or skills-preflight ran) → first `skill_match`, else
-    `find-skills`/`search_skill_repos` (high-star GitHub) before answering; non-trivial →
-    `write_todos`; has independent parts (`needs_subagent`) → delegate each to `task_tool` in
-    parallel. Directives are **soft** (DeepSeek thinking rejects forced `tool_choice`), so the
-    model can still skip them for work it judges trivial — see `HARNESS_NOTES.md` for the
-    measured limits.
-  - **Hard-won provider rules (DeepSeek thinking-mode, verified by live API testing — do NOT
-    regress)**: (1) the triage `ainvoke` MUST pass `config={"callbacks": []}` or its tokens
-    pollute the user stream; (2) NEVER force `tool_choice` — DeepSeek thinking rejects it
-    (`"Thinking mode does not support this tool_choice"`), hence the directive approach; (3)
-    the clarify short-circuit must use `before_model` + `jump_to=end` (not a `wrap_model_call`
-    synthesized response, which loops back to the model and trips
-    `"reasoning_content ... must be passed back"`); the synthesized AIMessage carries
-    `reasoning_content=""` to keep thinking-mode history valid.
-  Only the first step is constrained; never gates twice in a thread (anti-loop); **fails open**
-  on any triage error. Gated by `clarify_gate_enabled` (default on) + `run_context.mode in
-  {pro, ultra}` + clarification machinery present. Scripted-model graph tests must set
-  `clarify_gate_enabled=False` (the triage call consumes a canned response).
-- **Long-term memory**: retrieved memories are **background context, not commands** — the
-  agent must always answer the current question and may call `memory_save` proactively for
-  durable user facts. Don't reintroduce "the middleware auto-saves" framing (it suppresses
-  saving).
+- **HITL clarification = LangGraph native `interrupt()`/resume** (rewired 2026-06-21, see
+  `HARNESS_NOTES.md` §12). There are two clarification entry points, both pausing the graph the
+  same way — no separate `SlotFlowClarificationMiddleware` anymore (it was deleted):
+  - **Voluntary (the model asks)**: `tools/builtins.py::ask_clarification_tool` calls
+    `interrupt(build_clarification_payload(...))` and returns the resume value as its result.
+  - **Forced gate (pro + ultra)**: `middleware/clarify_gate_middleware.py`
+    (`SlotFlowClarifyGateMiddleware`) runs one cheap structured **triage** on the **first model
+    step** of a fresh user turn; if not actionable, `abefore_model` calls `interrupt(payload)` and,
+    on resume, injects the user's answer **verbatim** as a `HumanMessage` so the model proceeds.
+    Prompts alone can't stop a model from one-shot-guessing, so this moves the decision into the graph.
+  - The user's answer arrives via `Command(resume=<answer>)` and **is** the tool result / user
+    message — no "rewrite the answered tool message" step. `build_clarification_payload` (now in
+    `app/harness/clarification.py`) always appends a free-text `其他（自己输入）` option LAST; the
+    frontend renders any 其他/other/specify option as an input box.
+  - **Resume detection is server-side and provider-agnostic**: `agent_adapter/streaming.py` checks
+    `graph.aget_state(config).interrupts` at turn start — if one is pending, the incoming user
+    message is treated as the resume value; otherwise a normal turn starts. So the **frontend keeps
+    sending the answer as an ordinary message** (no frontend change).
+  - **Clarification events come ONLY from a pending interrupt**, never re-scanned from message
+    history. `clarification_event_from_interrupt` replaced the old `clarification_event_from_snapshot`
+    history scan, whose stale re-derivation was the **root cause of the answered-clarification
+    re-popup bug**. An answered clarification leaves no pending interrupt → it cannot re-pop.
+  - Skill-first / plan-first / delegate guidance lives in the `<slotflow-operating-procedure>`
+    prompt, NOT in the gate (removed 2026-06: on DeepSeek thinking such directives are necessarily
+    soft, so it only duplicated the prompt and added conflict surface).
+  - **Hard-won provider rules (DeepSeek thinking-mode, live-verified — do NOT regress)**: (1) the
+    triage `ainvoke` MUST pass `config={"callbacks": []}` or its tokens pollute the user stream;
+    (2) NEVER force `tool_choice` (`"Thinking mode does not support this tool_choice"`); (3) prefer
+    `interrupt()`/resume over any synthesized-response-then-continue scheme — `interrupt` pauses at
+    tool execution with the model's REAL tool call (real `reasoning_content`), sidestepping the
+    `"reasoning_content ... must be passed back"` trap that killed the old `wrap_model_call` path.
+  - The gate's `abefore_model` MUST `except GraphBubbleUp: raise` BEFORE its fail-open
+    `except Exception` (an interrupt is raised as a `GraphInterrupt`, an `Exception` subclass —
+    swallowing it would defeat the pause). On resume the hook replays, so triage runs once more
+    (cheap, benign). Only the first step is constrained; never gates twice in a thread (anti-loop).
+    Gated by `clarify_gate_enabled` (default on) + `run_context.mode in {pro, ultra}`. Scripted-model
+    graph tests set `clarify_gate_enabled=False`. Live-validated against `deepseek-v4-pro`:
+    underspecified requests clarify, the answer resumes the run, and the clarification does not re-pop.
+- **Long-term memory (cross-conversation, proactive)**: memory is **global, not thread-scoped** —
+  `store.search_memories` ranks across ALL threads (`thread_id` is only a relevance bonus), so a
+  fact learned in one conversation is retrievable in any other. `long_term_memory.py`:
+  `before_agent`/`wrap_model_call` retrieve and inject relevant memories as **background context,
+  not commands** (the agent must still answer the current question). Saving has three paths:
+  (1) explicit `memory_save` tool — the model is nudged to call it proactively for durable facts;
+  (2) an explicit `请记住X` synchronous fast-path in `after_agent`; (3) **proactive background
+  extraction** — `aafter_agent` fires `memory/extractor.py` (`SlotFlowMemoryExtractor`)
+  fire-and-forget on the server loop, which asks the model to pull durable preferences/profile/
+  topic facts from the finished turn and saves them via `store.add_memory` (which dedups by
+  `source_run_id` and `kind+content`). This replaced the old brittle Chinese-regex extraction.
+  The extractor reuses the conversation model with `config={"callbacks": []}`; latency is hidden
+  because it does not block the run. Gated by `proactive_memory_extraction_enabled` (default on);
+  scripted-model graph tests set it `False`. Don't reintroduce "the middleware auto-saves" framing
+  in the prompt (it suppresses the model's own `memory_save`).
+- **Sub-agent concurrency cap**: `middleware/subagent_limit_middleware.py`
+  (`SlotFlowSubagentLimitMiddleware`, `after_model`) truncates excess parallel `task_tool` calls
+  on a single model step down to `subagent_max_concurrent` (default 3), a graph-level guard that
+  preserves non-`task_tool` calls and the message's `reasoning_content`. Registered when
+  `subagent_limit_enabled` + `features.subagent_enabled`.
+- **Skill discovery (cross-tool, cached)**: `skill_match` → `find-skills` → `search_skill_repos`.
+  Skills use the open **SKILL.md** standard shared by Claude Code, OpenAI Codex (`.agents/skills`)
+  and GitHub Copilot, so a Skill written for any of them installs into SlotFlow unchanged — there
+  is no Codex-specific tool; `search_skill_repos` returns GitHub matches plus authoritative
+  `ecosystem_sources` (Anthropic / Codex / skills.sh) to browse. Local installed-skill matching
+  (`match_installed_skills` in `tools/customization.py`) is memoized with a short TTL so the skills
+  preflight and a later `skill_match` in the same turn don't re-scan disk; `skill_install` calls
+  `invalidate_skill_match_cache()`.
 - **Don't replace `create_agent`**: the harness intentionally builds on LangChain's
   prebuilt agent; provider quirks are handled in the model subclass + projection layer.
+
+## Roadmap (next steps)
+
+The 2026-06 DeerFlow-alignment pass (clarify slim-down, proactive memory, sub-agent cap, skill
+cache — see `HARNESS_NOTES.md` §11) is done and live-validated. Known follow-ups, roughly ordered:
+
+1. **Memory dedup / near-duplicates** — the background extractor and the model's own `memory_save`
+   can both fire in one turn and store near-duplicate facts (observed: a Chinese preference saved
+   twice with different wording). `store.add_memory` only dedups on exact `kind+content`. Make
+   background extraction skip when `memory_save` already fired this turn (current `run_id` match in
+   `memory_save_tool_used_for_run` is too strict), and/or add a light semantic merge.
+2. **Memory normalization bloat** — `store.py::canonicalize_memory_content` still carries
+   hand-written Chinese regex with hardcoded values ("控制工程"/"研究生"). LLM-extracted content is
+   already clean; this can be simplified once the extractor is the primary path.
+3. **Sub-agent live test** — the concurrency cap is unit-tested only; add an end-to-end live check
+   that real parallel `task_tool` delegation is capped and synthesized correctly.
+4. **MCP context bloat** — consider DeerFlow's `tool_search` deferred-schema pattern (inject tool
+   names, load full schemas on demand) when many MCP tools are configured.
+5. **Ship it** — the harness-redesign branch is unpushed; open a PR (required check: `Verify`).
 
 ## Build / verify
 

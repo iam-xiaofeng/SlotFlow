@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from typing import Literal
 
 from langchain_core.tools import tool
+from langgraph.types import interrupt
+
+from app.harness.clarification import (
+    build_clarification_payload,
+    clarification_answer_text,
+)
 
 
 @tool("ask_clarification")
@@ -33,33 +38,20 @@ def ask_clarification_tool(
     the answer genuinely changes what you do — do not ask when a reasonable default exists.
     """
 
-    return json.dumps(
+    # HITL via LangGraph native interrupt(): pause the graph and surface the clarification
+    # payload to the UI; the user's answer is fed back with Command(resume=<answer>) and IS
+    # this tool's result. No "rewrite the answered tool message" step is needed because the
+    # resume value lands here directly. See app/harness/clarification.py and HARNESS_NOTES.md.
+    payload = build_clarification_payload(
         {
-            "question": question,
-            "clarification_type": clarification_type,
-            "context": context,
-            "options": options or [],
-            "source": "slotflow_clarification_tool",
-        },
-        ensure_ascii=False,
+            "name": "ask_clarification",
+            "args": {
+                "question": question,
+                "clarification_type": clarification_type,
+                "context": context,
+                "options": options,
+            },
+        }
     )
-
-
-@tool("slotflow_context")
-def slotflow_context_tool(thread_id: str, run_id: str, mode: str) -> str:
-    """Return a compact SlotFlow run context summary.
-
-    This tool is intentionally read-only and side-effect free. It exists first to prove
-    that the harness can bind tools into the LangGraph agent before we expose tools that
-    touch files, networks, MCP servers, or sandbox backends.
-    """
-
-    return json.dumps(
-        {
-            "thread_id": thread_id,
-            "run_id": run_id,
-            "mode": mode,
-            "source": "slotflow_context_tool",
-        },
-        ensure_ascii=False,
-    )
+    answer = interrupt(payload)
+    return f"用户对该澄清问题的回答是：{clarification_answer_text(answer)}"

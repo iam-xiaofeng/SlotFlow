@@ -20,7 +20,7 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
-from app.harness.tools import ask_clarification_tool, slotflow_context_tool
+from app.harness.tools import ask_clarification_tool
 from app.harness.tools.registry import build_harness_tools
 from app.harness.tools.workspace import build_workspace_tools
 
@@ -41,62 +41,81 @@ def _bundle():
     )
 
 
-def test_slotflow_context_tool_is_read_only_and_json_shaped() -> None:
-    """第一批内置工具只返回上下文摘要，不碰文件、网络或 sandbox。"""
+@pytest.mark.asyncio
+async def test_ask_clarification_interrupts_and_resume_carries_answer() -> None:
+    """ask_clarification pauses the graph via interrupt(); the resume value becomes the tool
+    result, and once answered there is NO pending interrupt left (so it cannot re-pop)."""
 
-    raw = slotflow_context_tool.invoke(
-        {
-            "thread_id": "thread_tool",
-            "run_id": "run_tool",
-            "mode": "pro",
-        }
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+
+    model = ToolAwareFakeMessagesListChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "ask_clarification",
+                        "args": {
+                            "question": "你想分析哪个币种？",
+                            "clarification_type": "ambiguous_requirement",
+                            "options": ["BTC", "ETH"],
+                        },
+                        "id": "call_clarify",
+                    }
+                ],
+            ),
+            AIMessage(content="好的，分析 BTC。"),
+        ]
     )
-
-    assert json.loads(raw) == {
-        "thread_id": "thread_tool",
-        "run_id": "run_tool",
-        "mode": "pro",
-        "source": "slotflow_context_tool",
-    }
-
-
-def test_ask_clarification_tool_returns_structured_placeholder() -> None:
-    raw = ask_clarification_tool.invoke(
-        {
-            "question": "你想分析哪个币种？",
-            "clarification_type": "ambiguous_requirement",
-            "context": "昨天的记忆里有 BTC 和 ETH。",
-            "options": ["BTC", "ETH", "其他"],
-        }
+    graph = create_agent(
+        model=model,
+        tools=[ask_clarification_tool],
+        checkpointer=InMemorySaver(),
     )
+    config = {"configurable": {"thread_id": "thread_clarify"}}
 
-    assert json.loads(raw) == {
-        "question": "你想分析哪个币种？",
-        "clarification_type": "ambiguous_requirement",
-        "context": "昨天的记忆里有 BTC 和 ETH。",
-        "options": ["BTC", "ETH", "其他"],
-        "source": "slotflow_clarification_tool",
-    }
+    # Turn 1: the model asks → the graph pauses with the clarification payload.
+    await graph.ainvoke({"messages": [{"role": "user", "content": "分析一下"}]}, config=config)
+    state = await graph.aget_state(config)
+    assert state.interrupts, "ask_clarification should pause the graph"
+    payload = state.interrupts[0].value
+    assert payload["type"] == "clarification"
+    assert payload["source"] == "slotflow_clarification"
+    assert payload["question"] == "你想分析哪个币种？"
+
+    # Resume with the user's answer → it becomes the tool result; the run completes.
+    result = await graph.ainvoke(Command(resume="BTC"), config=config)
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].name == "ask_clarification"
+    assert "BTC" in str(tool_messages[0].content)
+    assert result["messages"][-1].content == "好的，分析 BTC。"
+
+    # Root-cause guard for the re-popup bug: an ANSWERED clarification leaves no pending interrupt.
+    after = await graph.aget_state(config)
+    assert not after.interrupts
 
 
 def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
     """registry 是 builtin/workspace/network/customization 等工具的统一入口。"""
 
-    @tool("slotflow_context")
-    def replacement_context_tool() -> str:
+    @tool("ask_clarification")
+    def replacement_clarification_tool() -> str:
         """Replacement tool used to prove first-name wins dedupe."""
 
         return "replacement"
 
     tools = build_harness_tools(
         features=features_from_run_context(_bundle().context),
-        extra_tools=[replacement_context_tool],
+        extra_tools=[replacement_clarification_tool],
     )
 
     names = [tool.name for tool in tools]
-    # First-name-wins dedupe: the replacement context tool wins, no name appears twice.
-    assert tools[0] is replacement_context_tool
-    assert names.count("slotflow_context") == 1
+    # First-name-wins dedupe: the replacement clarification tool wins, no name appears twice.
+    assert tools[0] is replacement_clarification_tool
+    assert names.count("ask_clarification") == 1
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     # The registry unifies builtin + workspace + network + customization tools.
     assert {
@@ -265,22 +284,28 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_harness_graph_can_execute_builtin_tool_call() -> None:
-    """真实 LangGraph graph 能执行 harness 绑定的内置工具。"""
+    """真实 LangGraph graph 能执行 harness 绑定的工具。"""
 
     bundle = _bundle()
+
+    @tool("echo_context")
+    def echo_context_tool(thread_id: str, run_id: str) -> str:
+        """Echo back the run context — a read-only tool for graph execution tests."""
+
+        return json.dumps({"thread_id": thread_id, "run_id": run_id}, ensure_ascii=False)
+
     model = ToolAwareFakeMessagesListChatModel(
         responses=[
             AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": "slotflow_context",
+                        "name": "echo_context",
                         "args": {
                             "thread_id": bundle.context.thread_id,
                             "run_id": bundle.context.run_id,
-                            "mode": bundle.context.mode,
                         },
-                        "id": "call_slotflow_context",
+                        "id": "call_echo_context",
                     }
                 ],
             ),
@@ -294,6 +319,7 @@ async def test_harness_graph_can_execute_builtin_tool_call() -> None:
             system_prompt="你是测试 harness 的助手。",
             middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
         ),
+        tools=[echo_context_tool],
     )
 
     result = await graph.ainvoke(
@@ -309,7 +335,7 @@ async def test_harness_graph_can_execute_builtin_tool_call() -> None:
     ]
 
     assert len(tool_messages) == 1
-    assert tool_messages[0].name == "slotflow_context"
+    assert tool_messages[0].name == "echo_context"
     assert json.loads(str(tool_messages[0].content))["run_id"] == bundle.context.run_id
     assert result["messages"][-1].content == "工具结果已经收到。"
 
@@ -388,6 +414,45 @@ def test_find_skill_repos_on_github_parses_results(monkeypatch: pytest.MonkeyPat
     assert [item["repo"] for item in result["results"]] == ["acme/research-skill", "x/y"]
     assert result["results"][0]["stars"] == 42
     assert result["source"] == "slotflow_customization"
+    # cross-tool SKILL.md ecosystem entry points (Anthropic / Codex / skills.sh) always surfaced
+    repos = [item["repo"] for item in result["ecosystem_sources"]]
+    assert "anthropics/skills" in repos
+    assert any("codex" in repo for repo in repos)
+
+
+def test_match_installed_skills_caches_and_invalidates(tmp_path, monkeypatch) -> None:
+    """Local installed-skill matching is memoized within a short TTL; install clears it."""
+
+    from app.harness.tools import customization
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "research-pro"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: research-pro\ndescription: Deep research and analysis workflows.\n---\n# x\n",
+        encoding="utf-8",
+    )
+
+    customization.invalidate_skill_match_cache()
+    calls = {"n": 0}
+    real_loader = customization.load_enabled_skills
+
+    def counting_loader(**kwargs):
+        calls["n"] += 1
+        return real_loader(**kwargs)
+
+    monkeypatch.setattr(customization, "load_enabled_skills", counting_loader)
+
+    first = customization.match_installed_skills(query="research", skills_root=skills_root)
+    second = customization.match_installed_skills(query="research", skills_root=skills_root)
+
+    assert first and first[0]["name"] == "research-pro"
+    assert second == first
+    assert calls["n"] == 1  # second call served from cache
+
+    customization.invalidate_skill_match_cache()
+    customization.match_installed_skills(query="research", skills_root=skills_root)
+    assert calls["n"] == 2  # cache cleared -> recomputed
 
 
 def test_find_skill_repos_on_github_surfaces_fetch_error(monkeypatch: pytest.MonkeyPatch) -> None:

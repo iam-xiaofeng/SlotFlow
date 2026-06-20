@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from urllib.parse import quote_plus
 
 from langchain_core.tools import BaseTool, tool
@@ -12,6 +13,43 @@ from app.harness.mcp import SlotFlowMcpConfigStore
 from app.harness.skills import ProtectedSkillError, SlotFlowSkillsConfigStore, load_enabled_skills
 from app.harness.tools.network import fetch_url, search_web
 from app.harness.sandbox import SlotFlowSandboxConfig
+
+
+# Authoritative, stable entry points for the open SKILL.md standard (originated at Anthropic;
+# now shared by Claude Code, OpenAI Codex, and GitHub Copilot). A skill published for any of
+# them is a plain SKILL.md directory and installs into SlotFlow unchanged — so discovery does
+# not need a Codex-specific tool, just awareness of where the ecosystem lives.
+SKILL_ECOSYSTEM_SOURCES: tuple[dict[str, str], ...] = (
+    {
+        "repo": "anthropics/skills",
+        "url": "https://github.com/anthropics/skills",
+        "note": "Anthropic 官方 Skills(SKILL.md 开放标准的来源)。",
+    },
+    {
+        "repo": "vercel-labs/skills",
+        "url": "https://github.com/vercel-labs/skills",
+        "note": "skills.sh 注册表 / find-skills 默认源,高星社区 Skills 集合。",
+    },
+    {
+        "repo": "openai/codex (.agents/skills)",
+        "url": "https://developers.openai.com/codex/skills",
+        "note": "OpenAI Codex 用同一 SKILL.md 标准,从仓库 .agents/skills 等目录加载;为 Codex 写的 Skill 可直接用。",
+    },
+)
+
+# Short-TTL memo for LOCAL installed-skill matching (no network). The skills preflight and a
+# subsequent skill_match tool call in the same turn would otherwise re-load and re-score every
+# SKILL.md on disk. TTL keeps it fresh enough that a skill_install (which also clears the cache)
+# becomes visible quickly.
+_MATCH_CACHE: dict[tuple, tuple[float, list[dict[str, object]]]] = {}
+_MATCH_CACHE_TTL_SECONDS = 10.0
+
+
+def invalidate_skill_match_cache() -> None:
+    """Drop cached installed-skill matches (call after installing/removing a Skill)."""
+
+    _MATCH_CACHE.clear()
+
 
 
 def build_customization_tools(
@@ -82,6 +120,7 @@ def build_customization_tools(
                 ensure_ascii=False,
             )
 
+        invalidate_skill_match_cache()
         return json.dumps(
             {
                 "installed": True,
@@ -151,8 +190,11 @@ def build_customization_tools(
         """Search GitHub for installable Skill repositories by capability.
 
         Query by what a Skill DOES (e.g. 'research', 'pdf', 'finance', 'slides'), not by
-        the user's topic. Returns repositories you can then install with
-        skill_install(package_url, skill_name).
+        the user's topic. Skills use the open SKILL.md standard shared by Claude Code, OpenAI
+        Codex (.agents/skills), and GitHub Copilot, so a Skill written for any of them installs
+        into SlotFlow unchanged. The result also lists authoritative ecosystem sources
+        (Anthropic / Codex / skills.sh) you can browse directly. Returns repositories you can
+        then install with skill_install(package_url, skill_name).
         """
 
         return json.dumps(
@@ -218,7 +260,11 @@ def find_skill_repos_on_github(
     return {
         "query": stripped,
         "results": results,
-        "hint": "If a repo matches, install it with skill_install(package_url=<url>, skill_name=<name>).",
+        "ecosystem_sources": [dict(item) for item in SKILL_ECOSYSTEM_SOURCES],
+        "hint": (
+            "If a repo matches, install it with skill_install(package_url=<url>, skill_name=<name>). "
+            "Any SKILL.md repo (Claude / Codex / Copilot) works — check ecosystem_sources too."
+        ),
         "source": "slotflow_customization",
     }
 
@@ -275,6 +321,17 @@ def match_installed_skills(
 ) -> list[dict[str, object]]:
     if skills_root is None:
         return []
+
+    cache_key = (
+        str(skills_root),
+        re.sub(r"\s+", " ", query.strip().lower()),
+        max(1, max_results),
+        id(skills_config_store),
+    )
+    cached = _MATCH_CACHE.get(cache_key)
+    if cached is not None and cached[0] > time.monotonic():
+        return cached[1]
+
     if skills_config_store is not None:
         skills_config_store.ensure_default_find_skills()
         configs = skills_config_store.configs()
@@ -313,7 +370,9 @@ def match_installed_skills(
         )
 
     matches.sort(key=lambda item: (-item[0], str(item[1]["name"])))
-    return [item for _, item in matches[:max(1, max_results)]]
+    result = [item for _, item in matches[:max(1, max_results)]]
+    _MATCH_CACHE[cache_key] = (time.monotonic() + _MATCH_CACHE_TTL_SECONDS, result)
+    return result
 
 
 def _skill_match_score(

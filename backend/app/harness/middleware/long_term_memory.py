@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from dataclasses import replace
 import json
@@ -15,12 +16,33 @@ from langgraph.runtime import Runtime
 
 from app.chat.models import RunContext
 from app.harness.memory import MemoryKind, MemoryRecord, SlotFlowMemoryStore
+from app.harness.memory.extractor import SlotFlowMemoryExtractor
 from app.harness.state import SlotFlowAgentState
 from app.harness.utils import message_role
 
 
+# Holds references to fire-and-forget extraction tasks so the event loop does not GC them
+# mid-flight; the done-callback discards each task when it finishes.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _schedule_background(coro: Coroutine[Any, Any, Any]) -> bool:
+    """Schedule a coroutine on the running loop, fire-and-forget. No-op without a loop."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return False
+    task = loop.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return True
+
+
 class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunContext]):
-    """Inject relevant persisted memories and save compact turn memories."""
+    """Inject relevant persisted memories, save explicit "记住X" turns synchronously, and
+    extract other durable facts in the background via an LLM (see ``memory.extractor``)."""
 
     def __init__(
         self,
@@ -29,10 +51,14 @@ class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
         run_context: RunContext | None = None,
         tools_enabled: bool = True,
         max_results: int = 5,
+        model: Any = None,
+        proactive_extraction_enabled: bool = True,
     ) -> None:
         self._memory_store = memory_store
         self._tools_enabled = tools_enabled
         self._max_results = max_results
+        self._proactive_extraction_enabled = proactive_extraction_enabled
+        self._extractor = SlotFlowMemoryExtractor(model)
         self.tools = []
         if tools_enabled:
             from app.harness.tools.memory import build_memory_tools
@@ -91,7 +117,43 @@ class SlotFlowLongTermMemoryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
         state: SlotFlowAgentState,
         runtime: Runtime[RunContext],
     ) -> dict[str, Any] | None:
-        return self.after_agent(state, runtime)
+        # Explicit "记住X" is saved synchronously below; other durable facts are extracted by
+        # the model in the background so they never block the user-visible run completion.
+        sync_update = self.after_agent(state, runtime)
+        self._maybe_schedule_extraction(state, runtime)
+        return sync_update
+
+    def _maybe_schedule_extraction(
+        self,
+        state: SlotFlowAgentState,
+        runtime: Runtime[RunContext],
+    ) -> None:
+        if not self._proactive_extraction_enabled or not self._extractor.available:
+            return
+        context = runtime.context
+        if context is None:
+            return
+        messages = list(state.get("messages") or [])
+        if memory_save_tool_used_for_run(messages, run_id=context.run_id):
+            return
+        conversation = build_extraction_conversation(messages)
+        if not conversation:
+            return
+        _schedule_background(self._aextract_and_save(conversation, context))
+
+    async def _aextract_and_save(self, conversation: str, context: RunContext) -> None:
+        facts = await self._extractor.aextract(conversation)
+        for fact in facts:
+            try:
+                self._memory_store.add_memory(
+                    thread_id=context.thread_id,
+                    source_run_id=None,  # explicit save (if any) already claimed the run id
+                    kind=fact["kind"],
+                    content=fact["content"],
+                    metadata={"source": "memory_extractor", "extraction": "llm"},
+                )
+            except Exception:  # noqa: BLE001 - skip a bad fact, keep the rest
+                continue
 
     def _request_with_memories(
         self,
@@ -219,11 +281,11 @@ def build_turn_memory_content(messages: list[Any]) -> str | None:
 
 
 def build_turn_memory_candidate(messages: list[Any]) -> MemoryCandidate | None:
-    """Extract only durable user facts from the latest turn.
+    """Extract a durable fact the user EXPLICITLY asked to remember ("记住X").
 
-    This intentionally avoids saving arbitrary Q&A summaries. Long-term memory
-    should contain user preferences, stable profile information, and current
-    recurring project/topic context.
+    Implicit durable facts (preferences/profile/project context stated in passing) are no
+    longer matched by brittle regex here — they are pulled by the background LLM extractor
+    (``memory.extractor``). This synchronous path stays for the reliable, free explicit case.
     """
 
     assistant_index = latest_message_index(messages, roles={"assistant", "ai"})
@@ -241,31 +303,31 @@ def build_turn_memory_candidate(messages: list[Any]) -> MemoryCandidate | None:
     if not user_text:
         return None
 
-    return extract_memory_candidate_from_user_text(user_text)
-
-
-def extract_memory_candidate_from_user_text(text: str) -> MemoryCandidate | None:
-    normalized = re.sub(r"\s+", " ", text).strip()
+    normalized = re.sub(r"\s+", " ", user_text).strip()
     if not normalized:
         return None
+    return extract_explicit_memory(normalized)
 
-    explicit = extract_explicit_memory(normalized)
-    if explicit is not None:
-        return explicit
 
-    if looks_like_question(normalized):
-        return None
+def build_extraction_conversation(messages: list[Any]) -> str:
+    """Render the latest user turn + final assistant reply for background fact extraction."""
 
-    if re.search(r"(我喜欢|我更喜欢|我希望|我偏好|以后.*(请|要|用|不要)|回答.*(简洁|详细|中文|英文)|不要.*回答)", normalized):
-        return MemoryCandidate(kind="preference", content=normalize_memory_sentence(normalized))
+    assistant_index = latest_message_index(messages, roles={"assistant", "ai"})
+    if assistant_index is None:
+        return ""
+    user_index = latest_message_index(messages[:assistant_index], roles={"user", "human"})
+    if user_index is None:
+        return ""
 
-    if re.search(r"(我是|我叫|我的名字|我的背景|我的工作|我在.+(公司|学校|项目|团队)|我负责)", normalized):
-        return MemoryCandidate(kind="profile", content=normalize_memory_sentence(normalized))
+    user_text = message_text(messages[user_index]).strip()
+    assistant_text = message_text(messages[assistant_index]).strip()
+    if not user_text:
+        return ""
 
-    if re.search(r"(我们现在|当前项目|这个项目|最近在|正在做|下一阶段|下一步|目前重点)", normalized):
-        return MemoryCandidate(kind="topic", content=normalize_memory_sentence(normalized))
-
-    return None
+    parts = [f"User: {user_text}"]
+    if assistant_text:
+        parts.append(f"Assistant: {assistant_text}")
+    return "\n".join(parts)
 
 
 def extract_explicit_memory(text: str) -> MemoryCandidate | None:
@@ -283,10 +345,6 @@ def extract_explicit_memory(text: str) -> MemoryCandidate | None:
     elif re.search(r"(项目|最近|当前|正在|下一步|阶段)", content):
         kind = "topic"
     return MemoryCandidate(kind=kind, content=content)
-
-
-def looks_like_question(text: str) -> bool:
-    return text.endswith(("?", "？")) or bool(re.search(r"(吗|么|什么|为什么|怎么|如何|能否|是不是|是否)", text))
 
 
 def normalize_memory_sentence(text: str) -> str:

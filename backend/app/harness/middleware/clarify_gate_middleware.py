@@ -1,20 +1,24 @@
-"""Deterministic pre-answer constraints for pro/ultra runs.
+"""Deterministic clarify gate for pro/ultra runs.
 
-Soft prompting cannot stop a model from one-shot-guessing an underspecified request,
-nor reliably make it discover Skills or plan before acting. This middleware moves the
-enforcement into the graph itself, on the FIRST model step of a fresh user turn:
+Soft prompting cannot stop a model from one-shot-guessing an underspecified request.
+This middleware moves *only the clarify decision* into the graph, on the FIRST model step
+of a fresh user turn: a cheap structured triage decides whether the request is actionable.
+If not, ``abefore_model`` calls LangGraph native ``interrupt()`` with a clarification payload
+(built by ``build_clarification_payload``) so the agent adapter surfaces the picker exactly
+like the real ``ask_clarification`` tool would. The model never runs before the user answers,
+so it cannot fabricate.
 
-1. **Clarify gate (pro + ultra)** — a cheap structured triage decides whether the request
-   is actionable. If not, ``before_model`` ends the run with a synthesized
-   ``ask_clarification`` AIMessage + matching clarification ToolMessage (built by
-   ``build_clarification_payload``), so the projection layer surfaces the picker exactly
-   like the real tool would. The model never runs, so it cannot fabricate — and there is no
-   second model call (which is what broke DeepSeek thinking-mode's reasoning round-trip).
-2. **Skill-first / plan-first (ultra)** — when the request IS actionable, the triage result
-   is stashed and ``wrap_model_call`` injects a strong system directive: if the preflight
-   matched an installed Skill, the model's first action must be ``skill_match``; else for a
-   non-trivial task it must be ``write_todos``. We inject a directive (not a forced
-   ``tool_choice``) because DeepSeek thinking-mode rejects forced tool choices.
+When the user answers, the graph resumes with ``Command(resume=<answer>)``; ``interrupt()``
+returns that answer and the gate injects it as a HumanMessage so the model can proceed. The
+answer is therefore part of the conversation directly — there is no "rewrite the answered tool
+message" step. NOTE: on resume LangGraph REPLAYS ``before_model`` from the top, so the cheap
+triage call runs a second time before ``interrupt()`` returns the buffered answer; this is
+benign (callbacks are detached, fail-open) and is the price of interrupting inside a hook.
+
+Skill-first / plan-first / delegate guidance lives in the ``<slotflow-operating-procedure>``
+system prompt (``harness/builder.py``), NOT here: on DeepSeek thinking-mode such directives
+are necessarily soft (no forced ``tool_choice``), so duplicating them as a per-turn injection
+added cost and prompt conflict without changing behaviour. This middleware does ONE thing.
 
 Only the first step is constrained; it never gates twice in a thread (anti-loop) and fails
 OPEN on any triage error.
@@ -23,28 +27,27 @@ OPEN on any triage error.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from hashlib import sha256
 from typing import Any, override
 
-from langchain.agents.middleware import (
-    AgentMiddleware,
-    ModelRequest,
-    ModelResponse,
-    hook_config,
-)
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.runtime import Runtime
+from langgraph.types import interrupt
 
 from app.chat.models import RunContext
-from app.harness.middleware.clarification_middleware import build_clarification_payload
+from app.harness.clarification import (
+    build_clarification_payload,
+    clarification_answer_text,
+)
 from app.harness.state import SlotFlowAgentState
 
 
 TriageFn = Callable[[str], dict[str, Any] | None]
 
 _CLARIFY_MODES = {"pro", "ultra"}
-_TRIAGE_STATE_KEY = "clarify_gate_triage"
 
 _TRIAGE_SYSTEM = (
     "You are a routing classifier for an AI agent — NOT the agent. Given the user's latest "
@@ -53,19 +56,16 @@ _TRIAGE_SYSTEM = (
     "unstated key preference would force the agent to GUESS a materially different result. "
     "Prefer actionable=true whenever a reasonable default exists — do NOT over-ask. When you DO "
     "ask, the `options` MUST be your 2-4 BEST-GUESS concrete directions the user can one-click "
-    "(the UI also gives the user a free-text box for 'none of these'). Also judge: needs_plan "
-    "(non-trivial, multi-step), needs_subagent (the task has 2+ INDEPENDENT parts that could run "
-    "in parallel), specialized (a domain / professional / expert task a Skill could help with). "
+    "(the UI also gives the user a free-text box for 'none of these'). "
     "Respond with ONLY a compact JSON object, no prose, no markdown fences:\n"
     '{"actionable": bool, "clarification_type": '
     '"missing_info|ambiguous_requirement|approach_choice|risk_confirmation|suggestion", '
-    '"question": "the single most blocking question", "options": ["2-4 best-guess directions"], '
-    '"needs_plan": bool, "needs_subagent": bool, "specialized": bool}'
+    '"question": "the single most blocking question", "options": ["2-4 best-guess directions"]}'
 )
 
 
 class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunContext]):
-    """Force clarification (pro+ultra) / skill-first / plan-first (ultra) on the first step."""
+    """Force clarification (pro+ultra) on the first model step of a fresh user turn."""
 
     name = "SlotFlowClarifyGateMiddleware"
 
@@ -78,9 +78,8 @@ class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunConte
         self._model = model
         self._triage_fn = triage
 
-    # --- clarify gate + triage (runs before the model, can end the run) ---------------
+    # --- clarify gate + triage (runs before the model, can pause via interrupt) --------
 
-    @hook_config(can_jump_to=["end"])
     def before_model(
         self,
         state: SlotFlowAgentState,
@@ -91,7 +90,6 @@ class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunConte
         return None
 
     @override
-    @hook_config(can_jump_to=["end"])
     async def abefore_model(
         self,
         state: SlotFlowAgentState,
@@ -99,6 +97,10 @@ class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunConte
     ) -> dict[str, Any] | None:
         try:
             return await self._gate(state, runtime)
+        except GraphBubbleUp:
+            # interrupt() signals a pause by raising a GraphBubbleUp; let it propagate so the
+            # graph checkpoints and surfaces the clarification instead of being swallowed.
+            raise
         except Exception:  # noqa: BLE001 - never let the gate break a real run
             return None
 
@@ -114,90 +116,16 @@ class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunConte
         messages = list(state.get("messages") or [])
         if not _is_fresh_user_turn(messages):
             return None
+        if _already_clarified(messages):
+            return None
 
         triage = await self._triage(messages)
         if triage is None:
             return None
 
-        if not triage.get("actionable", True) and not _already_clarified(messages):
-            return _clarification_update(triage, ctx)
-
-        # Actionable: stash triage so wrap_model_call can apply the ultra directive without a
-        # second triage call. Merge to avoid clobbering skills_preflight in the slotflow dict.
-        slotflow = dict(state.get("slotflow") or {})
-        slotflow[_TRIAGE_STATE_KEY] = triage
-        return {"slotflow": slotflow}
-
-    # --- ultra skill-first / plan-first directive (modifies the model request) --------
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest[RunContext],
-        handler: Callable[[ModelRequest[RunContext]], ModelResponse[Any]],
-    ) -> ModelResponse[Any]:
-        return handler(request)
-
-    @override
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[RunContext],
-        handler: Callable[[ModelRequest[RunContext]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        try:
-            directive = self._ultra_directive(request)
-        except Exception:  # noqa: BLE001
-            directive = None
-        if directive is None:
-            return await handler(request)
-        base = request.system_message
-        base_text = base.content if base is not None else ""
-        new_system = SystemMessage(content=f"{base_text}\n\n{directive}".strip())
-        return await handler(request.override(system_message=new_system))
-
-    def _ultra_directive(self, request: ModelRequest[RunContext]) -> str | None:
-        if _run_mode(request) != "ultra":
-            return None
-        if not _is_fresh_user_turn(list(request.messages or [])):
-            return None
-        triage = _slotflow(request.state).get(_TRIAGE_STATE_KEY) or {}
-
-        lines: list[str] = []
-        # The skills preflight only runs for specialized requests (it detects domain terms),
-        # so its presence is a more reliable "specialized" signal than the conservative triage.
-        specialized = (
-            triage.get("specialized")
-            or _has_installed_skill_match(request.state)
-            or _skills_preflight_ran(request.state)
-        )
-        if specialized and _tool_available(request, "skill_match"):
-            lines.append(
-                "- Call skill_match FIRST to check for a relevant INSTALLED Skill. If none is "
-                "installed, use find-skills and search_skill_repos (prefer high-star GitHub "
-                "repos) to look for an installable one before doing the work — do not answer "
-                "from memory before checking."
-            )
-        if (
-            triage.get("needs_plan")
-            and not _has_todos(request.state)
-            and _tool_available(request, "write_todos")
-        ):
-            lines.append(
-                "- Call write_todos with a concise 3-7 step plan before doing the work, then "
-                "work the list."
-            )
-        if triage.get("needs_subagent") and _tool_available(request, "task_tool"):
-            lines.append(
-                "- This task has INDEPENDENT parts: delegate each independent part to a "
-                "sub-agent via task_tool and run them in parallel, then synthesize the results "
-                "yourself — do NOT do every part sequentially in one thread."
-            )
-        if not lines:
-            return None
-        body = "\n".join(lines)
-        return (
-            f"<slotflow-ultra-enforcement>\nBefore doing the work, you MUST:\n{body}\n"
-            "</slotflow-ultra-enforcement>"
-        )
+        if not triage.get("actionable", True):
+            return self._clarify_via_interrupt(triage, ctx)
+        return None
 
     async def _triage(self, messages: list[Any]) -> dict[str, Any] | None:
         user_text = _latest_user_text(messages)
@@ -223,34 +151,36 @@ class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunConte
         return _parse_triage(_message_text(getattr(response, "content", "")))
 
 
-def _clarification_update(triage: dict[str, Any], ctx: RunContext | None) -> dict[str, Any]:
-    question = _clean(triage.get("question")) or "请补充需要确认的信息,我才能继续。"
-    clarification_type = _clean(triage.get("clarification_type")) or "missing_info"
-    options = [opt for opt in (_clean(item) for item in _as_list(triage.get("options"))) if opt][:4]
+    def _clarify_via_interrupt(
+        self, triage: dict[str, Any], ctx: RunContext | None
+    ) -> dict[str, Any]:
+        """Pause the graph to ask the user, then inject their answer as a HumanMessage.
 
-    seed = f"{getattr(ctx, 'run_id', '')}:{question}"
-    call_id = f"clarifygate-{sha256(seed.encode('utf-8')).hexdigest()[:12]}"
+        ``interrupt()`` raises on first run (the graph checkpoints and surfaces the payload);
+        on resume it returns the user's answer. We inject the answer AS the user's own message —
+        verbatim, not wrapped in a meta-frame — because the model treats the latest HumanMessage
+        as the user speaking, and a meta-framed wrapper ("the user's answer to Q is …") makes the
+        model echo that wrapper at the start of its reply. The original request is still in
+        history, so the bare answer is enough context. NOTE: on resume the whole hook replays, so
+        the triage above ran a second time; that is benign (see module docstring).
+        """
 
-    tool_args = {"question": question, "clarification_type": clarification_type, "options": options}
-    tool_call = {"name": "ask_clarification", "args": tool_args, "id": call_id, "type": "tool_call"}
-    payload = build_clarification_payload(tool_call, run_context=ctx)
+        question = _clean(triage.get("question")) or "请补充需要确认的信息,我才能继续。"
+        clarification_type = _clean(triage.get("clarification_type")) or "missing_info"
+        options = [opt for opt in (_clean(item) for item in _as_list(triage.get("options"))) if opt][:4]
 
-    # AIMessage carries reasoning_content="" so thinking-mode history stays valid; the matching
-    # ToolMessage is what the projection layer turns into clarification.requested. jump_to=end
-    # ends the run with no model call (the wrong mechanism would break DeepSeek's reasoning
-    # round-trip — see git history).
-    ai_message = AIMessage(
-        content="",
-        tool_calls=[tool_call],
-        additional_kwargs={"reasoning_content": ""},
-    )
-    tool_message = ToolMessage(
-        id=payload["id"],
-        content=json.dumps(payload, ensure_ascii=False),
-        name="ask_clarification",
-        tool_call_id=call_id,
-    )
-    return {"jump_to": "end", "messages": [ai_message, tool_message]}
+        seed = f"{getattr(ctx, 'run_id', '')}:{question}"
+        call_id = f"clarifygate-{sha256(seed.encode('utf-8')).hexdigest()[:12]}"
+        tool_call = {
+            "name": "ask_clarification",
+            "args": {"question": question, "clarification_type": clarification_type, "options": options},
+            "id": call_id,
+            "type": "tool_call",
+        }
+        payload = build_clarification_payload(tool_call, run_context=ctx)
+
+        answer = interrupt(payload)
+        return {"messages": [HumanMessage(content=clarification_answer_text(answer))]}
 
 
 def _is_fresh_user_turn(messages: list[Any]) -> bool:
@@ -270,51 +200,6 @@ def _already_clarified(messages: list[Any]) -> bool:
         if isinstance(message, dict) and message.get("name") == "ask_clarification":
             return True
     return False
-
-
-def _has_installed_skill_match(state: Any) -> bool:
-    preflight = _slotflow(state).get("skills_preflight")
-    if not isinstance(preflight, dict):
-        return False
-    return bool(preflight.get("installed_matches"))
-
-
-def _skills_preflight_ran(state: Any) -> bool:
-    """The preflight only runs for specialized requests, so its presence == specialized."""
-
-    return isinstance(_slotflow(state).get("skills_preflight"), dict)
-
-
-def _has_todos(state: Any) -> bool:
-    if isinstance(state, dict):
-        return bool(state.get("todos"))
-    return bool(getattr(state, "todos", None))
-
-
-def _tool_available(request: ModelRequest[RunContext], name: str) -> bool:
-    for tool in request.tools or []:
-        tool_name = getattr(tool, "name", None) or (tool.get("name") if isinstance(tool, dict) else None)
-        if tool_name == name:
-            return True
-    return False
-
-
-def _slotflow(state: Any) -> dict[str, Any]:
-    if isinstance(state, dict):
-        value = state.get("slotflow")
-    else:
-        value = getattr(state, "slotflow", None)
-    return value if isinstance(value, dict) else {}
-
-
-def _run_context(request: ModelRequest[RunContext]) -> RunContext | None:
-    runtime = getattr(request, "runtime", None)
-    return getattr(runtime, "context", None)
-
-
-def _run_mode(request: ModelRequest[RunContext]) -> str | None:
-    ctx = _run_context(request)
-    return getattr(ctx, "mode", None)
 
 
 def _is_human(message: Any) -> bool:

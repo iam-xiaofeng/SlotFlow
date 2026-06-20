@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from langgraph.types import Command
+
 from app.chat.agent_adapter.events import (
     AgentEvent,
     build_agent_input,
@@ -22,7 +24,7 @@ from app.chat.agent_adapter.events import (
     make_prepared_event,
 )
 from app.chat.agent_adapter.projections import (
-    clarification_event_from_snapshot,
+    clarification_event_from_interrupt,
     is_summarization_item,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
@@ -53,7 +55,16 @@ class LangGraphEventAgentAdapter:
 
         yield make_prepared_event(bundle=bundle)
 
-        stream_input = build_agent_input(request, bundle=bundle)
+        # HITL clarification uses LangGraph native interrupt()/resume. If this thread is paused
+        # on a pending interrupt (a clarification awaiting an answer), the incoming user message
+        # IS that answer: resume the graph with it instead of starting a fresh turn. Otherwise
+        # start a normal turn. Detection is provider-agnostic (graph-level), so the frontend can
+        # keep sending the answer as an ordinary message. See HARNESS_NOTES.md.
+        pending = await _pending_interrupt(self._graph, bundle.config)
+        if pending is not None:
+            stream_input: Any = Command(resume=request.message)
+        else:
+            stream_input = build_agent_input(request, bundle=bundle)
 
         projection_stream = await self._graph.astream_events(
             stream_input,
@@ -64,7 +75,48 @@ class LangGraphEventAgentAdapter:
         async for event in iter_projection_agent_events(projection_stream, bundle=bundle):
             yield event
 
+        # A clarification is surfaced ONLY when the graph is now paused on a fresh interrupt —
+        # never re-derived from past messages. This is what makes an answered clarification stop
+        # re-popping: a resolved clarification leaves no pending interrupt.
+        clarification = await _clarification_from_pending_interrupt(self._graph, bundle)
+        if clarification is not None:
+            yield clarification
+
         yield make_finished_event(bundle=bundle)
+
+
+async def _pending_interrupt(graph: Any, config: Any) -> Any | None:
+    """Return the first pending Interrupt on this thread, or None.
+
+    Guarded so test stub graphs without a checkpointer/``aget_state`` degrade to "no interrupt"
+    (they never pause), keeping the non-HITL streaming path unchanged.
+    """
+
+    aget_state = getattr(graph, "aget_state", None)
+    if not callable(aget_state):
+        return None
+    try:
+        state = await aget_state(config)
+    except Exception:  # pragma: no cover - missing checkpointer / fresh thread
+        return None
+
+    interrupts = list(getattr(state, "interrupts", None) or [])
+    if not interrupts:
+        for task in getattr(state, "tasks", None) or []:
+            task_interrupts = getattr(task, "interrupts", None) or []
+            if task_interrupts:
+                interrupts = list(task_interrupts)
+                break
+    return interrupts[0] if interrupts else None
+
+
+async def _clarification_from_pending_interrupt(
+    graph: Any, bundle: RunConfigBundle
+) -> AgentEvent | None:
+    pending = await _pending_interrupt(graph, bundle.config)
+    if pending is None:
+        return None
+    return clarification_event_from_interrupt(getattr(pending, "value", None), bundle=bundle)
 
 
 @dataclass(slots=True)
@@ -93,12 +145,11 @@ async def iter_projection_agent_events(
     queue: asyncio.Queue[ProjectionEnvelope | BaseException | object] = asyncio.Queue()
     done_sentinel = object()
     latest_snapshot: AgentEvent | None = None
-    latest_clarification: AgentEvent | None = None
     latest_todos_signature: str | None = None
     compression_announced = False
 
     async def pump_projection(projection: str, channel: Any) -> None:
-        nonlocal compression_announced, latest_clarification, latest_snapshot, latest_todos_signature
+        nonlocal compression_announced, latest_snapshot, latest_todos_signature
         try:
             async for item in channel:
                 if projection == "values":
@@ -118,9 +169,6 @@ async def iter_projection_agent_events(
                             if signature != latest_todos_signature:
                                 latest_todos_signature = signature
                                 await queue.put(todo_event)
-                        latest_clarification = clarification_event_from_snapshot(
-                            latest_snapshot.data
-                        )
                     continue
                 if projection == "messages":
                     if is_summarization_item(item):
@@ -170,8 +218,6 @@ async def iter_projection_agent_events(
             )
             if event is not None:
                 yield event
-        if latest_clarification is not None:
-            yield latest_clarification
         if latest_snapshot is not None:
             yield latest_snapshot
     finally:

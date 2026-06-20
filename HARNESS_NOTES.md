@@ -4,8 +4,8 @@
 > 本文是「工程日志」：我们遇到的**行为问题**、**试过的方案**、**结果**、**现在怎么做**、
 > **实测结论**。给新对话（人或 AI）快速建立对 harness 现状的准确认知。
 >
-> 最近一次更新：2026-06（feature/clarify-gate）。所有结论均经**真实 DeepSeek API 实测**，
-> 非纸面推断。
+> 最近一次更新：2026-06-21（feature/custom-endpoint-routing；迭代 4 = HITL 改 interrupt/resume，见 §12）。
+> 所有结论均经**真实 DeepSeek API 实测**，非纸面推断。
 
 ---
 
@@ -61,6 +61,10 @@ reasoning 流）。但真实使用中，agent 的**行为**不达标：
 ---
 
 ## 4. 实现：`SlotFlowClarifyGateMiddleware`
+
+> ⚠️ **本节描述的是迭代 1–3 的实现（`jump_to=end` + 合成 AIMessage/ToolMessage + 投影扫历史）。
+> 迭代 4（2026-06-21）已把 HITL 澄清整体改为 LangGraph 原生 `interrupt()/resume`,见 [§12](#12-迭代-42026-06-21hitl-澄清改用-langgraph-原生-interruptresume--完整-agent-链路)。
+> 下面保留作历史对照；当前代码以 §12 为准。**
 
 文件：`backend/app/harness/middleware/clarify_gate_middleware.py`
 注册：`middleware/registry.py`，仅当 `clarify_gate_enabled`(默认开) + `mode∈{pro,ultra}` +
@@ -207,3 +211,183 @@ from app.chat.runtime.adapter import build_agent_adapter
 判定标准：clarify 看有无 `clarification.requested`；todo 看 `todo.updated` 计数；
 subagent 看 `tool_name` 是否含 `task`；memory 看是否含 `memory_save`；skills 看是否含
 `skill_match`/`find`。
+
+---
+
+## 11. 迭代 3(2026-06-20):参考 DeerFlow 做减法 + 记忆主动化
+
+### 背景结论(重要,纠正之前的假设)
+深入读 DeerFlow(`/home/dell/code/deer-flow`)后确认:**DeerFlow 与 SlotFlow 是同一种架构**
+——单个 LangChain `create_agent` ReAct 循环 + middleware,**不是**确定性 graph 节点/状态机。
+所以「照 DeerFlow 改成图」是伪命题。真正差异只在三处,且都指向「更简单/更对」:
+- 澄清:DeerFlow 只有一个机制(`ask_clarification` 工具 + `awrap_tool_call` 拦截 → `goto END`);
+  SlotFlow 当时有两个(同样的拦截 + 377 行 ClarifyGate triage 门 + 软指令注入)。
+- 记忆:DeerFlow `after_agent` → 去抖队列 → **后台 LLM 抽取**;SlotFlow 用手写中文正则抽取(脆)。
+- 子代理:DeerFlow 有 `after_model` 并发上限守卫;SlotFlow 无。
+- skills/MCP:SlotFlow 反而更强(自主 GitHub 发现)。DeerFlow 是预配置 + tool_search 延迟加载。
+
+### 做了什么(四块,全部对齐 DeerFlow 的「简单」一侧)
+1. **澄清瘦身** `clarify_gate_middleware.py` 377→~210 行:删 `wrap_model_call`/`_ultra_directive`
+   及其 helper、triage stash、triage schema 里 needs_plan/needs_subagent/specialized 字段
+   
+   。
+   **只保留**硬短路(triage 判不可做 → `before_model` + `jump_to=end` 直接弹澄清,模型不跑)。
+   skill-first/plan/delegate 的引导**收敛到** `<slotflow-operating-procedure>` 提示词(本就在那、
+   且对 DeepSeek thinking 本就是软的)。去掉了一个提示词冲突源。
+2. **记忆主动化**:新增 `memory/extractor.py`(`SlotFlowMemoryExtractor`),`long_term_memory.py`
+   的 `aafter_agent` 改为 **fire-and-forget 后台 LLM 抽取**(复用对话模型、`callbacks=[]`、延迟被
+   隐藏因为不阻塞 run);删掉 preference/profile/topic 的正则分支,只保留 `请记住X` 同步快路径。
+   记忆**本来就是跨对话全局的**(`store.search_memories` 用 `list_memories(limit=200)` 无 thread
+   过滤,thread_id 只 +2 加分)——**不改作用域**,只换抽取方式。开关
+   `proactive_memory_extraction_enabled`(脚本化 graph 测试需置 False)。
+3. **子代理并发上限**:新增 `subagent_limit_middleware.py`(`after_model` 截断超额 `task_tool`
+   到 `subagent_max_concurrent=3`,保留非 task 调用与 `reasoning_content`)。
+4. **skills 发现**:`match_installed_skills` 加短 TTL 进程缓存(preflight 与 skill_match 同轮不重复
+   扫盘;`skill_install` 调 `invalidate_skill_match_cache()`);`search_skill_repos` 结果新增
+   `ecosystem_sources`(Anthropic/Codex/skills.sh)并在 docstring 说明 SKILL.md 是 Claude/Codex/
+   Copilot 通用标准——**无需 Codex 专用工具**,同标准仓库装进来即可用。
+
+### DeerFlow 参考实现位置(供以后查)
+- 澄清:`backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py`(拦截→`Command(goto=END)`)。
+- 记忆:`.../memory_middleware.py`(after_agent 入队)+ `agents/memory/{queue,updater}.py`(去抖 + LLM 抽取)。
+- 子代理:`.../subagent_limit_middleware.py`(after_model 截断)+ `subagents/executor.py`(线程池)。
+
+### 实测结果(真实 `deepseek-v4-pro`,scratch 脚本跑在 /tmp、已删、未提交)
+- 澄清:`帮我分析一下这些数据`/`帮我做个网站` → 正确弹澄清(带最佳猜测选项 + 末尾自由输入框),模型不脑补;
+  `把'你好世界'翻译成英文`、`一句话解释 TCP 三次握手` → **不**误触澄清,直接作答。决策质量两轮稳定。
+- 记忆:`我是控制工程研究生,以后回答用中文且简洁` → 后台抽取保存(`extraction=llm`),且模型**自己也**调了
+  `memory_save`(软提示在真实 DeepSeek 上生效);换一个全新 thread 检索能命中 → 跨对话主动记忆成立。
+- 子代理/缓存:确定性,离线单测覆盖(`test_subagent_limit_middleware.py`、`test_harness_tools.py`)。
+
+### 离线验收
+`uv run ruff check app tests` 通过;`uv run pytest -q -k "not live"` **274 passed**。
+
+### 不变量(沿用第 5/8 节,勿回归)
+不强制 `tool_choice`;内部小调用(triage / memory 抽取)`config={"callbacks": []}`;澄清短路用
+`before_model`+`jump_to=end`(合成 AIMessage 带 `reasoning_content=""`);模型客户端 `max_retries>=2`。
+
+> ⚠️ 上一条「澄清短路用 `jump_to=end`」已被**迭代 4 取代**为 `interrupt()/resume`,见下节。
+
+---
+
+## 12. 迭代 4(2026-06-21):HITL 澄清改用 LangGraph 原生 `interrupt()/resume` + 完整 agent 链路
+
+> 本节所有论断均**对照当前代码核实**(文件:行),并经**真实 `deepseek-v4-pro`(thinking)
+> 实测**。给从 0 接手的人:读这一节即可理解当前 clarify 全貌与整条 agent 链路。
+
+### 12.0 TL;DR
+- 删掉 `SlotFlowClarificationMiddleware`(原 `clarification_middleware.py`,已删除)整个机制:
+  `wrap_tool_call`(goto=END 回显)+ `wrap_model_call`(把已答澄清的工具结果重写成答案)。
+- 澄清(工具路径 + 门路径)统一改为 **LangGraph 原生 `interrupt()`**;用户的回答通过
+  `Command(resume=<答案>)` 注入,**天然成为工具结果 / 用户消息**,不再有「重写工具结果」这层 hack。
+- `build_clarification_payload` 等纯函数从被删的中间件移到新模块 `app/harness/clarification.py`。
+- 跨模型:`interrupt/resume` 是 graph 执行层机制,与 provider 无关(DeepSeek/OpenAI/Anthropic/中转站
+  一视同仁),且**反而绕开** DeepSeek thinking 的 `reasoning_content` 回传坑(§5 坑 3)——因为模型发的是
+  **真实**工具调用(带真 reasoning_content),graph 在工具执行处暂停,恢复后返回正常 ToolMessage。
+- 顺手删了死脚手架工具 `slotflow_context_tool`(模块 11 时为证明「能绑工具」而留的 proof-of-concept,
+  之前仍绑在主 agent + 每个子 agent;`builtins.py`/`tools/__init__.py`/`tools/registry.py` 已清理,
+  相关测试改用 `ask_clarification`/自定义 echo 工具)。
+
+### 12.1 「回答后澄清又自己弹出来」的真根因(代码核实)
+用户多次报告:回答澄清后,模型给了完整回答,**同一个澄清又弹一次**。逐层查代码定位到**后端**
+(前端只是忠实渲染后端事件),根因是**每个后续回合都从历史里重新派生澄清事件**:
+1. `streaming.py` 旧逻辑对**每个** `values` 快照算 `clarification_event_from_snapshot(...)`,
+   并在 run 末尾 `yield`。
+2. `projections.py::clarification_event_from_snapshot` 逆序扫消息,命中**第一条**内容仍是澄清
+   payload(`type=="clarification"`)的 `ask_clarification` ToolMessage 就发 `clarification.requested`。
+3. 回答回合的 graph 状态(由 checkpointer 重建)里**仍留着上一回合那条澄清 ToolMessage**,其
+   持久化内容**还是问题 payload**——因为旧的 `wrap_model_call` 重写只改「喂给模型的那次请求」,
+   **从不改持久化状态**。
+4. ⇒ 扫到旧 payload ⇒ 再发 `clarification.requested` ⇒ 前端再弹一次。**这就是 re-pop**。
+
+这是典型「治表象」陷阱:之前加过「相似度抑制 / 一线程只澄清一次」都是补丁;真因是
+**澄清事件该只在「图当前真的停在某个澄清上」时出现,而不是从历史里反复扒**。
+
+### 12.2 迭代 4 的修法(代码核实)
+- **工具路径** `app/harness/tools/builtins.py::ask_clarification_tool`:工具体内
+  `answer = interrupt(build_clarification_payload(...))`,`return f"用户对该澄清问题的回答是:{...}"`。
+  工具只调 `interrupt` 再返回,无其它副作用 → resume 重放安全。
+- **门路径** `app/harness/middleware/clarify_gate_middleware.py::_clarify_via_interrupt`:triage 判不可做 →
+  `answer = interrupt(payload)`;**resume 后把答案原样作为一条 `HumanMessage` 注入**
+  (`{"messages":[HumanMessage(content=clarification_answer_text(answer))]}`),模型据此继续。
+  - `abefore_model` 用 `except GraphBubbleUp: raise` **在** fail-open 的 `except Exception` 之前,
+    否则 `interrupt()` 抛的 `GraphInterrupt`(是 `Exception` 子类)会被吞掉 → 暂停失效。已核实
+    `GraphInterrupt` MRO:`GraphInterrupt → GraphBubbleUp → Exception`。
+  - **代价(已知、良性)**:resume 时整个 `before_model` 节点**从头重放**,triage(`callbacks=[]`)会
+    再跑一次;若它偶发翻成 actionable 而不再调 `interrupt`,resume 值会被**静默丢弃**(实测不崩,
+    见 /tmp 探针),仅该次回答未进模型上下文。门内除 triage 外无副作用,可接受。
+- **事件来源换成「待处理 interrupt」** `app/chat/agent_adapter/streaming.py`:
+  - 进入回合先 `_pending_interrupt(graph, config)`(读 `graph.aget_state(config).interrupts`,
+    无 `aget_state` 的测试桩降级为 None);**有待处理 interrupt ⇒ 这条用户消息就是答案**,用
+    `Command(resume=request.message)` 恢复;否则 `build_agent_input(...)` 正常开新回合。
+  - run 结束后 `_clarification_from_pending_interrupt(...)`:**仅当图现在真的停在一个 interrupt 上**
+    才发 `clarification.requested`(payload = interrupt 的 value)。已答的澄清不留 pending interrupt ⇒
+    **结构上不可能 re-pop**。`projections.py::clarification_event_from_interrupt` 取代了原扫历史函数。
+  - `iter_projection_agent_events` 删掉了 `latest_clarification` 那条扫快照的支路。
+- **注册/配置**:`middleware/registry.py` 去掉 `SlotFlowClarificationMiddleware`,门不再依赖它
+  (改注释);删 `config.py::clarification_enabled` 与 env `SLOTFLOW_CLARIFICATION_MIDDLEWARE`。
+- **前端零改动**:`chat-app.tsx::handleSelectClarification` 仍把选择当普通消息 `submitMessage` 发出;
+  后端按「是否有待处理 interrupt」决定 resume 还是开新回合,前端无感知。
+
+### 12.3 实测又抓出一个真 bug:门注入的答案被模型「回显」(已修)
+首轮 live 跑 `介绍一个东西` → 答 `计算机深度学习` 后,助手回答**开头多了一段**
+`针对澄清问题「…」，用户的回答是：…`。用 fake 模型探针(`/tmp/diag_stream2.py`)证明:**注入的
+HumanMessage 不会被 messages 投影流式输出**——所以那段是**真实模型把我注入的「元包装」文案照抄**了。
+修法:门注入时**不要加元包装**,直接注入用户原话(`HumanMessage(content=clarification_answer_text(answer))`),
+和「用户直接发了这句」完全一致。再次 live 验证:元包装消失,**无 re-pop**,回答正确。
+(模型可能仍轻度复述用户选择,属正常对话行为,非 bug。)
+
+### 12.4 真实 API 实测结果(`deepseek-v4-pro` thinking,mode=ultra,走生产 `build_agent_adapter`)
+脚本 `/tmp/live_clarify_test.py`(throwaway,内存 checkpointer 不碰真库;**不提交、不上传远程**):
+- 回合 1 `介绍一个东西`:门 triage 判不可做 → `interrupt` → 事件
+  `[run.prepared, state.snapshot, clarification.requested, run.finished]`,问题
+  「你想让我介绍什么?」+ 4 个最佳猜测选项 + `其他（自己输入）`。
+- 回合 2 `我选择 计算机深度学习`:检测到待处理 interrupt → `Command(resume=...)` → 流式输出完整
+  深度学习介绍;**`clarification.requested` = False(无 re-pop)**。VERDICT: PASS。
+- 用户也在真实 UI 上确认「bug 没了」。
+
+### 12.5 完整 agent 链路(端到端,代码核实)
+一次 `POST /api/chat/threads/{id}/runs/stream`(`chat/routes.py::stream_thread_run`)的全过程:
+
+1. **接入/落库**:校验 thread、上传文件;存用户消息;`repo.create_run`;`build_run_config` 出
+   `bundle`(`config={"configurable":{"thread_id"}}` + `RunContext`);`adapter.stream_events`。
+2. **模型选择** `chat/runtime/models.py::create_chat_model`:provider 优先级 = 显式 > `run_context.
+   model_provider` > 按 id 前缀推断(`claude-`→anthropic、`gpt-`/`o`→openai、否则 deepseek)。
+   deepseek/custom 走**带 reasoning 桥接的 ChatOpenAI 子类**;DeepSeek v4 **thinking 默认开**,开关
+   必须显式经 `extra_body={"thinking":{"type":"enabled"/"disabled"}}` 下发(漏传≠关)。`max_retries>=2`。
+3. **graph 组装** `harness/builder.py::build_slotflow_harness_graph`:`create_agent`(单 ReAct 循环)
+   + 工具(`tools/registry.py`)+ 中间件(`middleware/registry.py`)+ system prompt + sqlite checkpointer。
+   无 `bind_tools` 能力的模型不挂工具(降级)。
+4. **中间件链(生产 ultra + 有 memory_store 时的顺序,registry.py 核实)**:
+   `Dangling(修悬空工具调用)` → `ToolSafety` → `Summarization(超阈值压上下文)` →
+   `LongTermMemory(before_agent 检索注入 + aafter_agent 后台抽取)` → `SkillsPreflight(命中已装 Skill
+   注入候选)` → `Uploads(把上传文件路径写进最新用户消息)` → `ClarifyGate(pro/ultra:首步 triage,不可做→
+   interrupt 澄清)` → `Todo(plan)` → `SubagentLimit(subagent:截断超额 task_tool 到 3)` →
+   `ArtifactDiscovery(收集本 run 产物)` → `RuntimeSummary`。
+5. **思考/澄清/工具循环**:模型在 thinking 通道出 reasoning(投影按通道分流,见 `projections.py`),
+   正文走 content 通道;要澄清就调 `ask_clarification`(或被门拦在首步)→ `interrupt` 暂停。
+6. **skills/MCP 发现**(提示词 `<slotflow-extension-tools>` + preflight 引导):`skill_match`(先查已装,
+   短 TTL 缓存)→ `find-skills`(注册表)→ `search_skill_repos`(GitHub,含 `ecosystem_sources`)→
+   `skill_install`;MCP 用 `mcp_add_http` 等;按**能力/任务类型英文检索**,非字面主题词。
+7. **子代理**:独立子任务 `task_tool` 并行,`SubagentLimit` 兜底并发上限;主 agent 汇总。
+8. **产物**:用户可见交付物必须 `artifact_write`(唯一进产物面板的途径)。
+9. **记忆**:`长期记忆`跨对话全局(`store.search_memories` 无 thread 过滤);回合末 fire-and-forget
+   LLM 抽取持久事实(`memory/extractor.py`,`callbacks=[]`),`请记住X` 走同步快路径。
+10. **流式投影/收尾** `streaming.py` + `routes.py`:v3 projections(messages/values/tool_calls)→
+    `AgentEvent`(message.delta / tool.delta / todo.updated / state.snapshot);run 末按「待处理 interrupt」
+    决定是否发 `clarification.requested`;`run.finished` 落库 assistant 消息或澄清消息、更新 run 状态。
+
+### 12.6 更新后的不变量(勿回归)
+- 不强制 `tool_choice`;内部小调用 `config={"callbacks": []}`;模型客户端 `max_retries>=2`(§5/§8 仍有效)。
+- **HITL 澄清 = `interrupt()/resume`**:工具/门**只调 `interrupt` + 无其它副作用**(resume 会重放节点);
+  门的 `abefore_model` 必须 `except GraphBubbleUp: raise` 在 fail-open catch 之前。
+- 澄清事件**只能**来自「当前待处理 interrupt」(`graph.aget_state().interrupts`),**禁止**再从消息历史
+  扫 `ask_clarification` ToolMessage 派生——那正是 re-pop 的根因。
+- 门注入答案用**用户原话**的 `HumanMessage`,不要加「针对澄清问题…用户的回答是…」之类元包装(会被模型回显)。
+
+### 12.7 离线验收
+`uv run ruff check app tests` 通过;`uv run pytest -q -k "not live"` **274 passed**。新增/改动测试:
+`test_harness_tools.py`(interrupt/resume 端到端 + 答后无 pending interrupt)、
+`test_agent_adapter.py`(adapter 两回合:答后不 re-pop)、`test_clarify_gate_middleware.py`(门 interrupt 端到端)、
+`test_harness_middleware.py`/`test_harness_builder.py`/`test_tool_registry.py`(去掉已删中间件/工具)。
+

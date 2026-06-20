@@ -14,9 +14,6 @@ from app.harness.middleware.artifact_discovery_middleware import (
     SlotFlowArtifactDiscoveryMiddleware,
 )
 from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
-from app.harness.middleware.clarification_middleware import (
-    SlotFlowClarificationMiddleware,
-)
 from app.harness.middleware.clarify_gate_middleware import (
     SlotFlowClarifyGateMiddleware,
 )
@@ -27,6 +24,9 @@ from app.harness.middleware.dangling_tool_call_middleware import (
 from app.harness.middleware.long_term_memory import SlotFlowLongTermMemoryMiddleware
 from app.harness.middleware.skills_preflight_middleware import (
     SlotFlowSkillsPreflightMiddleware,
+)
+from app.harness.middleware.subagent_limit_middleware import (
+    SlotFlowSubagentLimitMiddleware,
 )
 from app.harness.middleware.summarization_middleware import (
     SlotFlowSummarizationMiddleware,
@@ -82,6 +82,8 @@ def build_harness_middleware(
                 memory_store=memory_store,
                 run_context=run_context,
                 tools_enabled=tools_enabled,
+                model=model,
+                proactive_extraction_enabled=resolved.proactive_memory_extraction_enabled,
             )
         )
 
@@ -97,16 +99,13 @@ def build_harness_middleware(
     if resolved.uploads_enabled:
         middleware.append(SlotFlowUploadsMiddleware(sandbox_config=sandbox_config))
 
-    if tools_enabled and resolved.clarification_enabled:
-        middleware.append(SlotFlowClarificationMiddleware())
-
-    # Clarify-gate forces clarification (pro+ultra) / skill-first + plan-first (ultra) on the
-    # first model step. It relies on the clarification middleware to surface its synthesized
-    # ask_clarification, so it only engages when that machinery is present.
+    # Clarify-gate forces clarification (pro+ultra) on the first model step of a fresh user
+    # turn. It pauses the graph with LangGraph native interrupt(); the answer resumes the run.
+    # The voluntary ``ask_clarification`` tool uses the same interrupt() mechanism, so no
+    # separate clarification middleware is needed to surface either path.
     if (
         tools_enabled
         and resolved.clarify_gate_enabled
-        and resolved.clarification_enabled
         and run_context is not None
         and run_context.mode in ("pro", "ultra")
     ):
@@ -114,6 +113,13 @@ def build_harness_middleware(
 
     if tools_enabled and resolved.todo_enabled and features.plan_enabled:
         middleware.append(SlotFlowTodoMiddleware())
+
+    if tools_enabled and resolved.subagent_limit_enabled and features.subagent_enabled:
+        middleware.append(
+            SlotFlowSubagentLimitMiddleware(
+                max_concurrent=resolved.subagent_max_concurrent,
+            )
+        )
 
     if resolved.artifact_discovery_enabled:
         middleware.append(

@@ -4,9 +4,6 @@ from app.harness.middleware.artifact_discovery_middleware import (
     SlotFlowArtifactDiscoveryMiddleware,
 )
 from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
-from app.harness.middleware.clarification_middleware import (
-    SlotFlowClarificationMiddleware,
-)
 from app.harness.middleware.config import SlotFlowMiddlewareConfig
 from app.harness.middleware.dangling_tool_call_middleware import (
     SlotFlowDanglingToolCallMiddleware,
@@ -29,7 +26,6 @@ from app.harness.middleware.uploads_middleware import SlotFlowUploadsMiddleware
 __all__ = [
     "SlotFlowAgentMiddleware",
     "SlotFlowArtifactDiscoveryMiddleware",
-    "SlotFlowClarificationMiddleware",
     "SlotFlowDanglingToolCallMiddleware",
     "SlotFlowLongTermMemoryMiddleware",
     "SlotFlowMiddlewareConfig",
