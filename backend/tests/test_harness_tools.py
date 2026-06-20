@@ -100,6 +100,7 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         "workspace_tree",
         "workspace_search",
         "artifact_list",
+        "artifact_write",
         "web_fetch",
         "web_search",
         "skill_match",
@@ -119,7 +120,9 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
     (root / "docs" / "a.txt").write_text("hello", encoding="utf-8")
     tools = {
         item.name: item
-        for item in build_workspace_tools(SlotFlowSandboxConfig(workspace_root=root))
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=False)
+        )
     }
 
     assert list(tools) == [
@@ -215,11 +218,11 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
     ]
 
 
-def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> None:
-    """workspace_write 必须由 sandbox config 显式开启。"""
+def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> None:
+    """artifact_write 仅在 sandbox 开启写入时注册，且是唯一的写工具。"""
 
     read_only_tools = build_workspace_tools(
-        SlotFlowSandboxConfig(workspace_root=tmp_path / "readonly")
+        SlotFlowSandboxConfig(workspace_root=tmp_path / "readonly", writes_enabled=False)
     )
     assert [item.name for item in read_only_tools] == [
         "workspace_list",
@@ -236,13 +239,10 @@ def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) ->
             SlotFlowSandboxConfig(
                 workspace_root=writable_root,
                 writes_enabled=True,
-            )
+            ),
+            thread_id="thread_abc123abc123",
         )
     }
-
-    raw = writable_tools["workspace_write"].invoke(
-        {"path": "notes/a.txt", "content": "hello"}
-    )
 
     assert list(writable_tools) == [
         "workspace_list",
@@ -250,17 +250,21 @@ def test_workspace_write_tool_is_only_registered_when_enabled(tmp_path: Path) ->
         "workspace_tree",
         "workspace_search",
         "artifact_list",
-        "workspace_write",
         "artifact_write",
     ]
-    assert "draft or intermediate" in writable_tools["workspace_write"].description
-    assert "user-visible" in writable_tools["artifact_write"].description
+    assert "workspace_write" not in writable_tools
+
+    raw = writable_tools["artifact_write"].invoke(
+        {"path": "notes/a.txt", "content": "hello"}
+    )
     assert json.loads(raw) == {
-        "path": "notes/a.txt",
+        "path": "artifacts/thread_abc123abc123/notes/a.txt",
         "bytes_written": 5,
         "source": "slotflow_workspace",
     }
-    assert (writable_root / "notes" / "a.txt").read_text(encoding="utf-8") == "hello"
+    assert (
+        writable_root / "artifacts" / "thread_abc123abc123" / "notes" / "a.txt"
+    ).read_text(encoding="utf-8") == "hello"
 
 
 @pytest.mark.asyncio

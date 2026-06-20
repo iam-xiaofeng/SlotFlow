@@ -165,6 +165,7 @@ def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary()
         "workspace_tree",
         "workspace_search",
         "artifact_list",
+        "artifact_write",
         "web_fetch",
         "web_search",
         "skill_match",

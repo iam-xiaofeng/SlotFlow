@@ -47,7 +47,10 @@ def build_harness_tools(
         config=mcp_config or SlotFlowMcpConfig(),
         provider=mcp_tool_provider,
     )
-    workspace_tools = build_workspace_tools(sandbox_config)
+    workspace_tools = build_workspace_tools(
+        sandbox_config,
+        thread_id=run_context.thread_id if run_context is not None else None,
+    )
     network_tools = build_network_tools(sandbox_config)
     customization_tools = build_customization_tools(
         skills_root=skills_root,

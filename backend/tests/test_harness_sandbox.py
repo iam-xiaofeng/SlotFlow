@@ -126,11 +126,11 @@ def test_workspace_read_and_list_enforce_root_and_read_size(tmp_path: Path) -> N
         raise AssertionError("oversized read was accepted")
 
 
-def test_workspace_write_is_disabled_by_default_and_limited(tmp_path: Path) -> None:
-    """写入默认关闭；显式打开后仍受 max_write_bytes 约束。"""
+def test_workspace_write_can_be_disabled_and_is_byte_limited(tmp_path: Path) -> None:
+    """显式关闭写入后拒绝写；打开后仍受 max_write_bytes 约束。"""
 
     read_only_workspace = SlotFlowWorkspace(
-        SlotFlowSandboxConfig(workspace_root=tmp_path / "readonly")
+        SlotFlowSandboxConfig(workspace_root=tmp_path / "readonly", writes_enabled=False)
     )
     try:
         read_only_workspace.write_text("a.txt", "hello")

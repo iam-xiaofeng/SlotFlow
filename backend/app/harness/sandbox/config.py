@@ -18,7 +18,10 @@ class SlotFlowSandboxConfig:
     """Safety limits for the local SlotFlow workspace boundary."""
 
     workspace_root: Path | None = None
-    writes_enabled: bool = False
+    # Enabled by default: the only model-facing writer is the sandboxed artifact_write
+    # (path-validated, size-limited, confined to artifacts/<thread_id>/). Set the env
+    # flag false to make the workspace fully read-only.
+    writes_enabled: bool = True
     max_read_bytes: int = DEFAULT_MAX_READ_BYTES
     max_write_bytes: int = DEFAULT_MAX_WRITE_BYTES
     network_enabled: bool = True

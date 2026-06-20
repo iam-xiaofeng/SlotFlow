@@ -190,9 +190,9 @@ def test_deepseek_thinking_kwargs_follow_run_context() -> None:
     assert pro_kwargs["reasoning_effort"] == "high"
     assert pro_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
     assert "reasoning_effort" not in no_thinking_kwargs
-    assert "extra_body" not in no_thinking_kwargs
+    assert no_thinking_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "reasoning_effort" not in flash_kwargs
-    assert "extra_body" not in flash_kwargs
+    assert flash_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 def test_openai_reasoning_effort_only_for_reasoning_models() -> None:

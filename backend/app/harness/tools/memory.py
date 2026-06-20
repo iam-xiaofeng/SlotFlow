@@ -46,7 +46,17 @@ def build_memory_tools(
 
     @tool("memory_save")
     def memory_save(content: str, kind: MemoryKind = "manual") -> str:
-        """Save a durable SlotFlow long-term memory with a category."""
+        """Save a durable fact about the user for future sessions.
+
+        Call this PROACTIVELY whenever you learn something with lasting value about the
+        user — even if they never said "remember". Save preferences, stable profile
+        facts, and current recurring project/topic context. Examples:
+        - preference: "我更喜欢简洁的中文回答" (kind="preference")
+        - profile: "我是控制工程的研究生" (kind="profile")
+        - topic: "我们在做 SlotFlow 这个项目" (kind="topic")
+        Pick kind from preference / profile / topic / fact / manual. Do not save one-off
+        questions or transient task details. Saving the same fact twice is safe (deduped).
+        """
 
         try:
             record = memory_store.add_memory(
