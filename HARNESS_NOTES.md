@@ -135,16 +135,31 @@ clarification 机制存在时挂载。只作用于**一次用户回合的首个 
 
 ## 7. 仍存在的差距与方向
 
-1. **subagent 强制（ultra）**：可并行任务未委派 `task_tool`。方向：在 ultra「计划优先」指令里
-   追加「INDEPENDENT 部分必须用 `task_tool` 并行」，或做成 plan 里强制含委派步骤。
-2. **skills 自主发现（点 2）**：模型不会主动搜 Skill。方向：(a) 把 `find-skills` 之外的发现渠道补全
-   —— 增加按能力检索 GitHub **高星 skills 仓库**的方法；(b) 对专业任务**强制**先 `skill_match`，
-   即使本地没装也要联网搜一轮再决定。
-3. **memory 主动性（点 1）**：目前靠显式「请记住」。方向：参考 ChatGPT memory / 开源做法
-   （如基于规则+小模型抽取「值得长期记住的用户事实」的 after-turn 钩子；或 mem0 这类持久记忆层）。
-4. **clarify-gate 在 ultra 是否太激进**：实测中它**拦截了** todo/skills 的测试（因为那些 prompt
-   本身欠规约）。这是设计权衡：ultra 到底该「先澄清」还是「先假设+计划再干」？需要用户拍板。
-5. **架构瘦身（点 3）**：近期功能快速膨胀，存在冗余兼容层与过时代码，值得一次小重构清理。
+> **迭代 2（2026-06，feature/clarify-gate 续）**：已把 ultra 指令从「仅 plan」扩展到
+> **skill 发现 + 计划 + subagent 委派**三合一（triage 增加 `needs_subagent`/`specialized`；
+> skill 触发还兜底用「skills_preflight 是否跑过」这个更可靠的专业任务信号）。单测覆盖。
+> **但实测暴露了硬限制**：
+
+1. **subagent 强制委派**：实测「分别调研三家公司」这类任务，clarify-gate 会**先**判定欠规约
+   去澄清（符合你「先假设但一定要问」的选择）；subagent 委派指令要到**澄清回答后的下一轮**
+   （请求已明确）才注入。即：委派是「条件触发、可能延后一轮」，不是每次都立刻发生。
+2. **skills 自主发现（点 2）—— 真正的硬骨头**：指令已注入（专业任务都会推 `skill_match` →
+   `find-skills`/`search_skill_repos`，GitHub 已按 star 降序），**但指令是「软」的**：对模型自认
+   能直接做的任务（如「分析这组销量并出图」），它仍会跳过 skill 发现直接 artifact_write。
+   - 根因：DeepSeek thinking 模式**拒绝强制 `tool_choice`**，且「合成 skill_match 调用→执行→
+     继续」会再次触发 reasoning_content 回传错误（见第 5 节坑 3）。所以**无法在 thinking 模式下
+     确定性地强制工具调用**。
+   - 可选路线（待定）：(a) 接受软指令（当前）；(b) 只在「确实装了相关 Skill」时才强推（高确定性、
+     低召回）；(c) 为 skill 发现单独走一个 thinking-off 的子调用链;(d) 把候选 Skill 更醒目地塞进
+     用户消息（preflight 已做，可再加强）。**这是产品权衡，需要拍板。**
+3. **memory 主动性（点 1）**：仍只在显式「请记住」时存。方向：after-turn 抽取钩子 / mem0 类持久层。
+   **尚未实现。**
+4. **架构瘦身（点 3）**：**尚未开始。**
+5. **clarify-gate 在 ultra 的取舍**：已按用户选择定为「先假设但一定要问」——保持 pro+ultra 都澄清,
+   triage 产出「最佳猜测方向」作为选项,前端选择框自带自由文本兜底。
+
+## 7.0 历史方向（迭代 1 原始差距，供对照）
+
 
 ---
 

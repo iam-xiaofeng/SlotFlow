@@ -132,9 +132,14 @@ frontend/src/
     `@hook_config(can_jump_to=["end"])`) returns `{"jump_to": "end", "messages": [AIMessage
     + clarification ToolMessage]}` built by `build_clarification_payload`. The model NEVER
     runs (no fabrication), and the projection surfaces the picker exactly like the real tool.
-  - **Skill-first / plan-first (ultra)**: when actionable, the triage is stashed and
-    `wrap_model_call` injects a strong **system directive** (preflight-matched installed Skill
-    → first action `skill_match`; else non-trivial task → `write_todos`).
+  - **Skill-first / plan-first / delegate (ultra)**: when actionable, the triage is stashed and
+    `wrap_model_call` injects a strong **system directive** assembling the applicable
+    requirements: specialized task (or skills-preflight ran) → first `skill_match`, else
+    `find-skills`/`search_skill_repos` (high-star GitHub) before answering; non-trivial →
+    `write_todos`; has independent parts (`needs_subagent`) → delegate each to `task_tool` in
+    parallel. Directives are **soft** (DeepSeek thinking rejects forced `tool_choice`), so the
+    model can still skip them for work it judges trivial — see `HARNESS_NOTES.md` for the
+    measured limits.
   - **Hard-won provider rules (DeepSeek thinking-mode, verified by live API testing — do NOT
     regress)**: (1) the triage `ainvoke` MUST pass `config={"callbacks": []}` or its tokens
     pollute the user stream; (2) NEVER force `tool_choice` — DeepSeek thinking rejects it

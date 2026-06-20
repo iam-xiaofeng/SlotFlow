@@ -51,13 +51,16 @@ _TRIAGE_SYSTEM = (
     "request, decide whether the agent can proceed or must first ask ONE clarifying question. "
     "A request is NOT actionable when a blocking ambiguity, a missing required input, or an "
     "unstated key preference would force the agent to GUESS a materially different result. "
-    "Prefer actionable=true whenever a reasonable default exists — do NOT over-ask. Only block "
-    "on a genuinely blocking ambiguity. Also judge needs_plan: whether the task is non-trivial "
-    "and multi-step. Respond with ONLY a compact JSON object, no prose, no markdown fences:\n"
+    "Prefer actionable=true whenever a reasonable default exists — do NOT over-ask. When you DO "
+    "ask, the `options` MUST be your 2-4 BEST-GUESS concrete directions the user can one-click "
+    "(the UI also gives the user a free-text box for 'none of these'). Also judge: needs_plan "
+    "(non-trivial, multi-step), needs_subagent (the task has 2+ INDEPENDENT parts that could run "
+    "in parallel), specialized (a domain / professional / expert task a Skill could help with). "
+    "Respond with ONLY a compact JSON object, no prose, no markdown fences:\n"
     '{"actionable": bool, "clarification_type": '
     '"missing_info|ambiguous_requirement|approach_choice|risk_confirmation|suggestion", '
-    '"question": "the single most blocking question", "options": ["2-4 concise options"], '
-    '"needs_plan": bool}'
+    '"question": "the single most blocking question", "options": ["2-4 best-guess directions"], '
+    '"needs_plan": bool, "needs_subagent": bool, "specialized": bool}'
 )
 
 
@@ -157,24 +160,44 @@ class SlotFlowClarifyGateMiddleware(AgentMiddleware[SlotFlowAgentState, RunConte
         if not _is_fresh_user_turn(list(request.messages or [])):
             return None
         triage = _slotflow(request.state).get(_TRIAGE_STATE_KEY) or {}
-        if _has_installed_skill_match(request.state) and _tool_available(request, "skill_match"):
-            return (
-                "<slotflow-ultra-enforcement>\nA relevant INSTALLED Skill was found for this "
-                "request (see the skills preflight). Your FIRST action MUST be to call "
-                "skill_match to inspect it, then use the matching Skill to do the work. Do not "
-                "answer from memory before checking it.\n</slotflow-ultra-enforcement>"
+
+        lines: list[str] = []
+        # The skills preflight only runs for specialized requests (it detects domain terms),
+        # so its presence is a more reliable "specialized" signal than the conservative triage.
+        specialized = (
+            triage.get("specialized")
+            or _has_installed_skill_match(request.state)
+            or _skills_preflight_ran(request.state)
+        )
+        if specialized and _tool_available(request, "skill_match"):
+            lines.append(
+                "- Call skill_match FIRST to check for a relevant INSTALLED Skill. If none is "
+                "installed, use find-skills and search_skill_repos (prefer high-star GitHub "
+                "repos) to look for an installable one before doing the work — do not answer "
+                "from memory before checking."
             )
         if (
             triage.get("needs_plan")
             and not _has_todos(request.state)
             and _tool_available(request, "write_todos")
         ):
-            return (
-                "<slotflow-ultra-enforcement>\nThis is a non-trivial, multi-step task. Your "
-                "FIRST action MUST be to call write_todos with a concise 3-7 step plan before "
-                "doing any of the work, then work the list.\n</slotflow-ultra-enforcement>"
+            lines.append(
+                "- Call write_todos with a concise 3-7 step plan before doing the work, then "
+                "work the list."
             )
-        return None
+        if triage.get("needs_subagent") and _tool_available(request, "task_tool"):
+            lines.append(
+                "- This task has INDEPENDENT parts: delegate each independent part to a "
+                "sub-agent via task_tool and run them in parallel, then synthesize the results "
+                "yourself — do NOT do every part sequentially in one thread."
+            )
+        if not lines:
+            return None
+        body = "\n".join(lines)
+        return (
+            f"<slotflow-ultra-enforcement>\nBefore doing the work, you MUST:\n{body}\n"
+            "</slotflow-ultra-enforcement>"
+        )
 
     async def _triage(self, messages: list[Any]) -> dict[str, Any] | None:
         user_text = _latest_user_text(messages)
@@ -254,6 +277,12 @@ def _has_installed_skill_match(state: Any) -> bool:
     if not isinstance(preflight, dict):
         return False
     return bool(preflight.get("installed_matches"))
+
+
+def _skills_preflight_ran(state: Any) -> bool:
+    """The preflight only runs for specialized requests, so its presence == specialized."""
+
+    return isinstance(_slotflow(state).get("skills_preflight"), dict)
 
 
 def _has_todos(state: Any) -> bool:

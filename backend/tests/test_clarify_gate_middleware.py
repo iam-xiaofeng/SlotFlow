@@ -158,6 +158,55 @@ async def test_ultra_injects_skill_directive_when_installed_skill_present() -> N
 
 
 @pytest.mark.asyncio
+async def test_ultra_specialized_task_injects_skill_discovery_directive() -> None:
+    """Specialized task pushes skill discovery even when NO Skill is installed yet."""
+    gate = SlotFlowClarifyGateMiddleware()
+    handler = _Handler()
+    request = _request(
+        [HumanMessage("用专业方法分析这组销量数据并出图")],
+        _ctx("ultra"),
+        tools=[{"name": "skill_match"}, {"name": "find-skills"}, {"name": "write_todos"}],
+        state={
+            "messages": [],
+            "slotflow": {
+                "skills_preflight": {"installed_matches": []},  # nothing installed
+                "clarify_gate_triage": {"actionable": True, "specialized": True, "needs_plan": False},
+            },
+        },
+    )
+
+    await gate.awrap_model_call(request, handler)
+
+    assert handler.calls == 1
+    assert handler.request.tool_choice is None
+    assert "skill_match" in handler.request.system_message.content
+
+
+@pytest.mark.asyncio
+async def test_ultra_skill_directive_fires_when_preflight_ran_even_without_triage_flag() -> None:
+    """The skills preflight running (specialized terms detected) is enough to push discovery."""
+    gate = SlotFlowClarifyGateMiddleware()
+    handler = _Handler()
+    request = _request(
+        [HumanMessage("分析这组销量数据并出趋势图")],
+        _ctx("ultra"),
+        tools=[{"name": "skill_match"}, {"name": "find-skills"}],
+        state={
+            "messages": [],
+            "slotflow": {
+                "skills_preflight": {"installed_matches": [], "installable_search": {}},
+                "clarify_gate_triage": {"actionable": True, "specialized": False, "needs_plan": False},
+            },
+        },
+    )
+
+    await gate.awrap_model_call(request, handler)
+
+    assert handler.calls == 1
+    assert "skill_match" in handler.request.system_message.content
+
+
+@pytest.mark.asyncio
 async def test_ultra_injects_plan_directive_for_nontrivial_task() -> None:
     gate = SlotFlowClarifyGateMiddleware()
     handler = _Handler()
@@ -169,7 +218,7 @@ async def test_ultra_injects_plan_directive_for_nontrivial_task() -> None:
             "messages": [],
             "slotflow": {
                 "skills_preflight": {"installed_matches": []},
-                "clarify_gate_triage": {"actionable": True, "needs_plan": True},
+                "clarify_gate_triage": {"actionable": True, "needs_plan": True, "specialized": False},
             },
         },
     )
@@ -178,6 +227,28 @@ async def test_ultra_injects_plan_directive_for_nontrivial_task() -> None:
 
     assert handler.calls == 1
     assert "write_todos" in handler.request.system_message.content
+
+
+@pytest.mark.asyncio
+async def test_ultra_parallel_task_injects_subagent_delegation_directive() -> None:
+    gate = SlotFlowClarifyGateMiddleware()
+    handler = _Handler()
+    request = _request(
+        [HumanMessage("分别调研 A、B、C 三家公司再对比")],
+        _ctx("ultra"),
+        tools=[{"name": "task_tool"}, {"name": "write_todos"}],
+        state={
+            "messages": [],
+            "slotflow": {
+                "clarify_gate_triage": {"actionable": True, "needs_subagent": True, "needs_plan": True},
+            },
+        },
+    )
+
+    await gate.awrap_model_call(request, handler)
+
+    assert handler.calls == 1
+    assert "task_tool" in handler.request.system_message.content
 
 
 @pytest.mark.asyncio
