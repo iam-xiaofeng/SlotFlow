@@ -28,6 +28,7 @@ from app.chat.models import (
     ChatStreamRequest,
     MessageRecord,
     ModelCatalogRecord,
+    ModelProvider,
     ThreadSearchResultRecord,
     ThreadCreateRequest,
     ThreadRecord,
@@ -259,6 +260,7 @@ async def stream_thread_run(
                             repo,
                             thread_id=thread_id,
                             model_name=body.model_name,
+                            provider=body.provider,
                         )
                     repo.update_run_status(run.id, status="completed")
                     completed = True
@@ -296,6 +298,7 @@ async def update_thread_title_after_first_exchange(
     *,
     thread_id: str,
     model_name: str,
+    provider: ModelProvider | None = None,
 ) -> None:
     thread = repo.get_thread(thread_id)
     messages = repo.list_messages(thread_id)
@@ -303,6 +306,7 @@ async def update_thread_title_after_first_exchange(
         thread=thread,
         messages=messages,
         model_name=model_name,
+        provider=provider,
     )
     if title and title != thread.title:
         repo.update_thread_title(thread_id, title)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 WorkspaceEntryKind = Literal["file", "directory"]
@@ -29,3 +29,17 @@ class WorkspaceReadRecord(BaseModel):
     metadata: dict[str, Any]
     content: str | None = None
     warning: str | None = None
+
+
+class ThreadWorkspaceRecord(BaseModel):
+    """Per-thread grouping for the unified workspace panel.
+
+    `generated` = model-written artifacts under `artifacts/<thread_id>/`;
+    `uploads` = files the user attached in this thread, virtually grouped from the
+    thread's chat messages (no storage migration).
+    """
+
+    thread_id: str
+    title: str
+    generated: list[WorkspaceEntryRecord] = Field(default_factory=list)
+    uploads: list[WorkspaceEntryRecord] = Field(default_factory=list)

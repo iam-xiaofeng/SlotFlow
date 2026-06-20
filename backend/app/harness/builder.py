@@ -128,18 +128,37 @@ def build_system_prompt(
             "When public web or fetched data supports a claim, include a Markdown source link next to the relevant sentence or data point, for example [来源](https://example.com/page).",
             "Use skill_match to check installed Skills first; it falls back to find-skills only when no local match exists.",
             "Use find-skills to search installable Skills when skill_match finds no relevant installed Skill. find-skills is a callable tool, not only a prompt skill.",
+            "Query find-skills (and search_skill_repos) by CAPABILITY or task type in English — e.g. 'research', 'data analysis', 'web scraping', 'pdf', 'slides', 'stock'/'finance' — NOT by the literal topic words of the request (do not search '世界杯' or '股市'). Skills are organized by what they DO, not by subject. If the first query returns nothing, try synonyms and broader capability terms, and use search_skill_repos / web_search to look on GitHub before concluding that no Skill exists. Do not give up after one literal-keyword search.",
+            "Use search_skill_repos to find installable Skills hosted on GitHub when the curated find-skills registry has no match; it returns repositories you can then install with skill_install.",
             "When the user asks about a domain, profession, specialized task, or expert workflow, call skill_match before doing the work so you can discover whether a matching installed or installable Skill exists.",
             "For specialized requests, SlotFlow also injects a backend skills preflight into the latest user message when possible; review installed_matches before deciding whether to search, install, or use a Skill.",
             "Use skill_install only when a concrete package_url and skill_name are known or the user explicitly asks for that exact install.",
             "After installing a relevant Skill, use it for the corresponding work as soon as it is available; if it only becomes available on the next run, say that plainly and continue with the best current tools.",
             "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
             "When uploaded files are present, their workspace paths are injected into the latest user message; call workspace_read(path) before answering file-content questions.",
-            "Prefer ask_clarification over guessing when a request is ambiguous, underspecified, risky, or needs a user preference; give 2-4 concise options. Do not over-ask — skip it when a reasonable default is obvious.",
-            "Every user-visible file MUST be produced with artifact_write — reports, charts, HTML/Markdown pages, visualizations, comparison tables, interactive demos, code previews. It is the only way a file appears in the artifact panel; files live in this conversation's artifact folder next to the user's uploads.",
-            "When the answer includes a chart, report, visualization, flowchart, comparison table, interactive demo, or code preview, create an artifact by default unless the user explicitly asks for text only.",
+            "When you need input from the user before you can proceed — an ambiguous or underspecified request, a required preference, or a risky/irreversible action — you MUST call ask_clarification with 2-4 concise options. It renders an interactive picker (with a free-text 'other' option) that the user clicks; do NOT instead write your questions as plain message text and wait for a reply. If several things are unknown, ask the single most blocking question via ask_clarification first rather than a long plain-text questionnaire. Still skip it when a reasonable default is obvious — don't over-ask.",
+            "Every user-visible file MUST be produced with artifact_write — reports, charts, HTML/Markdown pages, visualizations, comparison tables, interactive demos, code previews. It is the only way a file appears in the artifact panel; files live in this conversation's artifact folder next to the user's uploads. Do NOT create user-facing deliverables with the filesystem MCP server or any other write path — files written that way will NOT appear in the artifact panel. Never claim you saved a file unless you actually called artifact_write for it.",
+            "Decide when a result deserves an artifact. Create one for SUBSTANTIAL, STANDALONE deliverables the user will keep, open, share, or iterate on — full reports/documents, complete HTML pages or apps, rendered charts/diagrams/visualizations, slide decks, large or structured datasets, and long or multi-file code. Do NOT create an artifact for ordinary conversational answers — a short explanation, a brief comparison or small table, a few bullet points, or a short snippet meant to be read in context; answer those inline in the message. Rule of thumb: use artifact_write when the output is longer than roughly a screenful, is a complete document/page/app, or the user asked to generate/export a file; otherwise reply inline.",
+            "For complex planning workflows with human approval steps, create the final approved plan/report as an artifact with artifact_write after the required approval is received. Keep the chat reply short and point to the saved artifact path returned by the tool.",
             "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",
             "</slotflow-extension-tools>",
         ]
+    )
+    orchestration_lines: list[str] = [
+        "Operating procedure for non-trivial tasks — work through it; do NOT jump straight to a one-shot answer:",
+        "- If something blocking is ambiguous or needs the user's choice, call ask_clarification FIRST (the interactive picker), instead of guessing or writing plain-text questions.",
+        "- For a specialized, domain, or expert task, call skill_match before doing the work to find a relevant Skill.",
+    ]
+    if features.plan_enabled:
+        orchestration_lines.append(
+            "- Plan the work with write_todos (3-7 concrete steps) and work the list, marking items in_progress/completed as you go — don't keep the plan only in your head.",
+        )
+    if features.subagent_enabled:
+        orchestration_lines.append(
+            "- When the task splits into INDEPENDENT parts (research multiple items, evaluate multiple options, build multiple components), delegate each to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself — don't do every part sequentially in one thread.",
+        )
+    sections.extend(
+        ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
     )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
     skills_prompt = build_skills_prompt(enabled_skills)

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote_plus
 
 from langchain_core.tools import BaseTool, tool
 
 from app.harness.mcp import SlotFlowMcpConfigStore
 from app.harness.skills import ProtectedSkillError, SlotFlowSkillsConfigStore, load_enabled_skills
-from app.harness.tools.network import search_web
+from app.harness.tools.network import fetch_url, search_web
 from app.harness.sandbox import SlotFlowSandboxConfig
 
 
@@ -145,7 +146,81 @@ def build_customization_tools(
             ensure_ascii=False,
         )
 
-    return [skill_match, find_skills, skill_list, skill_install, mcp_add_http]
+    @tool("search_skill_repos")
+    def search_skill_repos(query: str, max_results: int = 5) -> str:
+        """Search GitHub for installable Skill repositories by capability.
+
+        Query by what a Skill DOES (e.g. 'research', 'pdf', 'finance', 'slides'), not by
+        the user's topic. Returns repositories you can then install with
+        skill_install(package_url, skill_name).
+        """
+
+        return json.dumps(
+            find_skill_repos_on_github(query=query, max_results=max_results, config=config),
+            ensure_ascii=False,
+        )
+
+    return [
+        skill_match,
+        find_skills,
+        skill_list,
+        skill_install,
+        mcp_add_http,
+        search_skill_repos,
+    ]
+
+
+def find_skill_repos_on_github(
+    *,
+    query: str,
+    max_results: int,
+    config: SlotFlowSandboxConfig,
+) -> dict:
+    """Search GitHub repositories for installable Skills via the public search API.
+
+    Capability-oriented: callers should pass what a Skill does, not the topic. Returns
+    repos (full_name/url/description/stars) that skill_install can consume.
+    """
+
+    stripped = re.sub(r"\s+", " ", query).strip()
+    if not stripped:
+        return {"query": query, "results": [], "error": "empty_query", "source": "slotflow_customization"}
+
+    safe_limit = max(1, min(max_results, 10))
+    api_url = (
+        "https://api.github.com/search/repositories?q="
+        + quote_plus(f"{stripped[:160]} skill")
+        + f"&sort=stars&order=desc&per_page={safe_limit}"
+    )
+    fetched = fetch_url(url=api_url, config=config, include_raw=True)
+    if fetched.get("error"):
+        return {"query": stripped, "results": [], "error": fetched["error"], "source": "slotflow_customization"}
+
+    try:
+        payload = json.loads(fetched.get("_raw_content") or "")
+    except (json.JSONDecodeError, TypeError):
+        return {"query": stripped, "results": [], "error": "invalid_github_response", "source": "slotflow_customization"}
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    results: list[dict] = []
+    if isinstance(items, list):
+        for item in items[:safe_limit]:
+            if not isinstance(item, dict):
+                continue
+            results.append(
+                {
+                    "repo": item.get("full_name"),
+                    "url": item.get("html_url"),
+                    "description": item.get("description"),
+                    "stars": item.get("stargazers_count"),
+                }
+            )
+    return {
+        "query": stripped,
+        "results": results,
+        "hint": "If a repo matches, install it with skill_install(package_url=<url>, skill_name=<name>).",
+        "source": "slotflow_customization",
+    }
 
 
 def find_relevant_skills(

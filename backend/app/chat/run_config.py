@@ -82,6 +82,7 @@ def build_run_config(
             thread_id=thread_id,
             run_id=run_id,
             model_name=request.model_name,
+            model_provider=request.provider,
             mode=request.mode,
             agent_name=request.agent_name,
             files=list(request.files),

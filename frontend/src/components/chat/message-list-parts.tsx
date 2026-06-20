@@ -107,6 +107,7 @@ export function MessageBubble({
     message.status === "streaming" &&
     !isCompressingContext &&
     !hasAssistantBody &&
+    message.thinkingStarted === true &&
     !message.reasoningContent?.trim();
   const canShowAssistantActions =
     !clarification &&

@@ -221,19 +221,29 @@ def test_read_artifact_returns_html_as_text(tmp_path: Path) -> None:
     }
 
 
-def test_read_artifact_rejects_non_artifact_paths(tmp_path: Path) -> None:
+def test_read_rejects_private_workspace_paths(tmp_path: Path) -> None:
+    """Read/preview is limited to artifacts/ and uploads/; other areas stay private."""
+
     client, store = _client(tmp_path)
+    secret = store.workspace.resolve_path("skills/secret/SKILL.md")
+    secret.parent.mkdir(parents=True)
+    secret.write_text("private", encoding="utf-8")
+
+    blocked = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "skills/secret/SKILL.md"},
+    )
+    assert blocked.status_code == 400
+
+    # User uploads ARE viewable (the unified workspace panel previews them).
     upload_path = store.workspace.resolve_path("uploads/file_abc123abc123/note.md")
     upload_path.parent.mkdir(parents=True)
-    upload_path.write_text("# Private upload", encoding="utf-8")
-
-    response = client.get(
+    upload_path.write_text("# upload", encoding="utf-8")
+    allowed = client.get(
         "/api/workspace/artifacts/read",
         params={"path": "uploads/file_abc123abc123/note.md"},
     )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "artifact path must be under artifacts/"
+    assert allowed.status_code == 200
 
 
 def test_raw_artifact_serves_html_inline(tmp_path: Path) -> None:

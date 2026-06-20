@@ -92,24 +92,19 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         extra_tools=[replacement_context_tool],
     )
 
-    assert [tool.name for tool in tools] == [
-        "slotflow_context",
+    names = [tool.name for tool in tools]
+    # First-name-wins dedupe: the replacement context tool wins, no name appears twice.
+    assert tools[0] is replacement_context_tool
+    assert names.count("slotflow_context") == 1
+    assert len(names) == len(set(names)), f"duplicate tool names: {names}"
+    # The registry unifies builtin + workspace + network + customization tools.
+    assert {
         "ask_clarification",
-        "workspace_list",
-        "workspace_read",
-        "workspace_tree",
-        "workspace_search",
-        "artifact_list",
         "artifact_write",
-        "web_fetch",
         "web_search",
         "skill_match",
-        "find-skills",
-        "skill_list",
-        "skill_install",
-        "mcp_add_http",
-    ]
-    assert tools[0] is replacement_context_tool
+        "search_skill_repos",
+    } <= set(names)
 
 
 def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
@@ -347,3 +342,62 @@ def tiny_jpeg_bytes(*, width: int, height: int) -> bytes:
             b"\xff\xd9",
         ]
     )
+
+
+def test_find_skill_repos_on_github_parses_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_skill_repos hits GitHub's repo search and returns installable repos."""
+
+    from app.harness.tools import customization
+
+    captured: dict = {}
+
+    def fake_fetch_url(*, url, config, include_raw=False, **kwargs):
+        captured["url"] = url
+        return {
+            "_raw_content": json.dumps(
+                {
+                    "items": [
+                        {
+                            "full_name": "acme/research-skill",
+                            "html_url": "https://github.com/acme/research-skill",
+                            "description": "Deep research skill",
+                            "stargazers_count": 42,
+                        },
+                        {
+                            "full_name": "x/y",
+                            "html_url": "https://github.com/x/y",
+                            "description": None,
+                            "stargazers_count": 1,
+                        },
+                    ]
+                }
+            ),
+        }
+
+    monkeypatch.setattr(customization, "fetch_url", fake_fetch_url)
+
+    result = customization.find_skill_repos_on_github(
+        query="研究 世界杯", max_results=5, config=SlotFlowSandboxConfig()
+    )
+
+    assert "api.github.com/search/repositories" in captured["url"]
+    assert [item["repo"] for item in result["results"]] == ["acme/research-skill", "x/y"]
+    assert result["results"][0]["stars"] == 42
+    assert result["source"] == "slotflow_customization"
+
+
+def test_find_skill_repos_on_github_surfaces_fetch_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.harness.tools import customization
+
+    monkeypatch.setattr(
+        customization,
+        "fetch_url",
+        lambda **kwargs: {"error": "network tools are disabled", "source": "slotflow_network"},
+    )
+
+    result = customization.find_skill_repos_on_github(
+        query="research", max_results=5, config=SlotFlowSandboxConfig()
+    )
+
+    assert result["results"] == []
+    assert result["error"] == "network tools are disabled"

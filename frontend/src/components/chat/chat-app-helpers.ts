@@ -2,6 +2,7 @@ import { type ChatUiMessage } from "@/hooks/use-chat-stream";
 import {
   type ModelCatalogRecord,
   type ModelOptionRecord,
+  type ModelProvider,
   type UploadedFileRecord,
 } from "@/lib/chat-stream";
 
@@ -43,15 +44,9 @@ export function makeQueueId() {
 
 export function flattenModelOptions(catalog: ModelCatalogRecord | null): ModelOptionRecord[] {
   if (!catalog) {
-    return [
-      {
-        id: defaultModelName,
-        provider: "deepseek",
-        label: `DeepSeek · ${defaultModelName}`,
-        available: true,
-        source: "fallback",
-      },
-    ];
+    // No fake default while the catalog is still loading — the composer shows a
+    // loading state instead of a hardcoded model that may not actually exist.
+    return [];
   }
 
   return catalog.providers.flatMap((provider) =>
@@ -63,6 +58,16 @@ export function modelExists(catalog: ModelCatalogRecord, modelName: string): boo
   return catalog.providers.some((provider) =>
     provider.models.some((model) => model.available && model.id === modelName),
   );
+}
+
+/** The catalog-carried provider for a selected model id, so the backend routes by
+ *  provenance instead of guessing from the id (third-party relays serve claude/gpt/qwen
+ *  over the OpenAI schema). */
+export function providerForModel(
+  options: ModelOptionRecord[],
+  modelName: string,
+): ModelProvider | undefined {
+  return options.find((model) => model.id === modelName)?.provider;
 }
 
 export function formatUploadToast(files: UploadedFileRecord[]) {

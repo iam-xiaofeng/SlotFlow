@@ -1,13 +1,16 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
+  Blocks,
   Boxes,
+  Brain,
   FileText,
   Folder,
   LibraryBig,
   MessageSquarePlus,
   MoreHorizontal,
+  Plug,
   Trash2,
 } from "lucide-react";
 
@@ -49,8 +52,9 @@ import {
 } from "@/lib/chat-stream";
 
 import { filterThreadArtifacts } from "./chat-format";
-import { ContextPickerMenu } from "./chat-sidebar-context";
+import { DirectoryModal, type DirectoryTab } from "./directory-modal";
 import { SearchMenu } from "./chat-sidebar-search";
+import { SlotFlowLogo } from "./slotflow-logo";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
@@ -122,6 +126,13 @@ export function ThreadSidebar({
   onUploadSkill,
 }: ThreadSidebarProps) {
   const { state } = useSidebar();
+  const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [directoryTab, setDirectoryTab] = useState<DirectoryTab>("skills");
+
+  function openDirectory(tab: DirectoryTab) {
+    setDirectoryTab(tab);
+    setDirectoryOpen(true);
+  }
 
   if (state === "collapsed") {
     return (
@@ -137,10 +148,36 @@ export function ThreadSidebar({
 
   return (
     <>
+      <DirectoryModal
+        open={directoryOpen}
+        tab={directoryTab}
+        onOpenChange={setDirectoryOpen}
+        onTabChange={setDirectoryTab}
+        skills={skills}
+        mcpServers={mcpServers}
+        memories={memories}
+        onInstallSkill={onInstallSkill}
+        onUploadSkill={onUploadSkill}
+        onToggleSkill={onToggleSkill}
+        onPinSkill={onPinSkill}
+        onReorderSkills={onReorderSkills}
+        onDeleteSkill={onDeleteSkill}
+        onAddHttpMcpServer={onAddHttpMcpServer}
+        onToggleMcpServer={onToggleMcpServer}
+        onPinMcpServer={onPinMcpServer}
+        onReorderMcpServers={onReorderMcpServers}
+        onDeleteMcpServer={onDeleteMcpServer}
+        onAddMemory={onAddMemory}
+        onEditMemory={onEditMemory}
+        onDeleteMemory={onDeleteMemory}
+      />
       <SidebarHeader className="px-2 py-0">
         <div className="group/slotflow-sidebar-header flex h-12 items-center justify-between gap-2">
-          <div className="min-w-0 pl-2 font-serif text-[1.05rem] font-semibold leading-none text-foreground group-data-[collapsible=icon]:hidden">
-            SlotFlow
+          <div className="flex min-w-0 items-center gap-2 pl-2 group-data-[collapsible=icon]:pl-0">
+            <SlotFlowLogo className="size-6 shrink-0 rounded-md" />
+            <span className="min-w-0 truncate font-serif text-[1.05rem] font-semibold leading-none text-foreground group-data-[collapsible=icon]:hidden">
+              SlotFlow
+            </span>
           </div>
           <div className="flex items-center gap-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:justify-center">
             <SearchMenu
@@ -171,45 +208,52 @@ export function ThreadSidebar({
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu
-                  kind="skills"
-                  skills={skills}
-                  onDeleteSkill={onDeleteSkill}
-                  onInstallSkill={onInstallSkill}
-                  onPinSkill={onPinSkill}
-                  onReorderSkills={onReorderSkills}
-                  onToggleSkill={onToggleSkill}
-                  onUploadSkill={onUploadSkill}
-                />
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="Skills"
+                  onClick={() => openDirectory("skills")}
+                  disabled={disabled}
+                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
+                >
+                  <Blocks className="size-4" />
+                  <span>Skills</span>
+                </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu
-                  kind="mcp"
-                  mcpServers={mcpServers}
-                  onAddHttpMcpServer={onAddHttpMcpServer}
-                  onDeleteMcpServer={onDeleteMcpServer}
-                  onPinMcpServer={onPinMcpServer}
-                  onReorderMcpServers={onReorderMcpServers}
-                  onToggleMcpServer={onToggleMcpServer}
-                />
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="MCP"
+                  onClick={() => openDirectory("mcp")}
+                  disabled={disabled}
+                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
+                >
+                  <Plug className="size-4" />
+                  <span>MCP</span>
+                </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu
-                  kind="memory"
-                  memories={memories}
-                  onAddMemory={onAddMemory}
-                  onDeleteMemory={onDeleteMemory}
-                  onEditMemory={onEditMemory}
-                />
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="记忆"
+                  onClick={() => openDirectory("memory")}
+                  disabled={disabled}
+                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
+                >
+                  <Brain className="size-4" />
+                  <span>记忆</span>
+                </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <ContextPickerMenu
-                  kind="artifacts"
-                  artifacts={artifacts}
-                  onDeleteArtifact={onDeleteArtifact}
-                  onOpenArtifacts={onOpenArtifacts}
-                  onPreviewArtifact={onPreviewArtifact}
-                />
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="工作区"
+                  onClick={onOpenArtifacts}
+                  disabled={disabled}
+                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
+                >
+                  <Folder className="size-4" />
+                  <span>工作区</span>
+                </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <MoreToolsMenu />

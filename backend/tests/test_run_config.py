@@ -173,3 +173,29 @@ def test_build_run_config_respects_explicit_thinking_override() -> None:
     assert bundle.context.thinking_enabled is False
     assert bundle.context.is_plan_mode is True
     assert bundle.context.subagent_enabled is False
+
+
+def test_build_run_config_carries_model_provider_provenance() -> None:
+    """前端所选模型的来源 provider 要进入 context，供 runtime 按来源路由（而非按 id 猜）。"""
+
+    request = ChatStreamRequest(
+        message="用中转站的 claude",
+        model_name="claude-3-5-sonnet",
+        provider="custom",
+    )
+
+    bundle = build_run_config(thread_id="t", run_id="r", request=request)
+
+    assert bundle.context.model_provider == "custom"
+
+
+def test_build_run_config_defaults_model_provider_to_none() -> None:
+    """老客户端不带 provider 时 model_provider 为 None，runtime 回退到按 id 前缀推断。"""
+
+    bundle = build_run_config(
+        thread_id="t",
+        run_id="r",
+        request=ChatStreamRequest(message="老客户端"),
+    )
+
+    assert bundle.context.model_provider is None

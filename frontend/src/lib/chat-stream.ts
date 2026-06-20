@@ -48,7 +48,7 @@ export type ClarificationRequestRecord = {
 
 export type ChatMode = "flash" | "pro" | "ultra";
 
-export type ModelProvider = "deepseek" | "openai" | "anthropic";
+export type ModelProvider = "deepseek" | "openai" | "anthropic" | "custom";
 
 export type ModelOptionRecord = {
   id: string;
@@ -75,6 +75,7 @@ export type ModelCatalogRecord = {
 export type ChatStreamRequest = {
   message: string;
   model_name?: string;
+  provider?: ModelProvider;
   mode?: ChatMode;
   thinking_enabled?: boolean;
   agent_name?: string;
@@ -108,6 +109,13 @@ export type WorkspaceReadRecord = {
   metadata: Record<string, unknown>;
   content?: string | null;
   warning?: string | null;
+};
+
+export type ThreadWorkspaceRecord = {
+  thread_id: string;
+  title: string;
+  generated: WorkspaceEntryRecord[];
+  uploads: WorkspaceEntryRecord[];
 };
 
 export type SkillRecord = {
@@ -282,17 +290,39 @@ export async function uploadFile(
 }
 
 export async function listArtifacts(
-  options: ChatRequestOptions = {},
+  options: ChatRequestOptions & { path?: string } = {},
 ): Promise<WorkspaceEntryRecord[]> {
-  const response = await fetch("/api/workspace/artifacts", {
-    signal: options.signal,
-  });
+  const params = new URLSearchParams();
+  if (options.path) {
+    params.set("path", options.path);
+  }
+  const query = params.toString();
+  const response = await fetch(
+    `/api/workspace/artifacts${query ? `?${query}` : ""}`,
+    {
+      signal: options.signal,
+    },
+  );
 
   if (!response.ok) {
     throw new Error(`list artifacts failed: ${response.status}`);
   }
 
   return response.json() as Promise<WorkspaceEntryRecord[]>;
+}
+
+export async function listThreadWorkspaces(
+  options: ChatRequestOptions = {},
+): Promise<ThreadWorkspaceRecord[]> {
+  const response = await fetch("/api/workspace/threads", {
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`list thread workspaces failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<ThreadWorkspaceRecord[]>;
 }
 
 export async function readArtifact(

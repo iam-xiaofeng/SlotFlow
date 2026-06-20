@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from app.chat.models import MessageRecord, ThreadRecord
+from app.chat.models import MessageRecord, ModelProvider, ThreadRecord
 from app.chat.runtime import create_chat_model
 
 
@@ -24,6 +24,7 @@ async def maybe_generate_thread_title(
     thread: ThreadRecord,
     messages: list[MessageRecord],
     model_name: str,
+    provider: ModelProvider | None = None,
 ) -> str | None:
     if not should_generate_title(messages):
         return None
@@ -42,7 +43,13 @@ async def maybe_generate_thread_title(
     )
 
     try:
-        model = create_chat_model(os.environ.get("SLOTFLOW_TITLE_MODEL", "").strip() or model_name)
+        # SLOTFLOW_TITLE_MODEL 覆盖时按它自己的 id 推断 provider；否则沿用本轮对话所选
+        # 模型的来源 provider，custom 中转站才不会被错误路由到 deepseek。
+        title_model = os.environ.get("SLOTFLOW_TITLE_MODEL", "").strip()
+        if title_model:
+            model = create_chat_model(title_model)
+        else:
+            model = create_chat_model(model_name, provider=provider)
         response = await model.ainvoke(
             prompt,
             config={

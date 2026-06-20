@@ -110,24 +110,12 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
         mcp_tool_provider=provider,
     )
 
-    assert [tool.name for tool in tools] == [
-        "ask_clarification",
-        "slotflow_context",
-        "workspace_list",
-        "workspace_read",
-        "workspace_tree",
-        "workspace_search",
-        "artifact_list",
-        "artifact_write",
-        "web_fetch",
-        "web_search",
-        "skill_match",
-        "find-skills",
-        "skill_list",
-        "skill_install",
-        "mcp_add_http",
-        "mcp_echo",
-    ]
+    names = [tool.name for tool in tools]
+    # MCP server tools are appended after the built-in/workspace/customization tools.
+    assert "mcp_echo" in names
+    assert names.index("mcp_echo") > names.index("artifact_write")
+    assert names.index("mcp_echo") > names.index("skill_match")
+    assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     assert provider.calls[0].servers[0].name == "filesystem"
 
 

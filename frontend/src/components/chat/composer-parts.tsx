@@ -612,7 +612,11 @@ function ComposerModelSelect({
         className="inline-flex h-10 min-w-0 max-w-[17rem] items-center justify-center gap-1.5 rounded-xl bg-muted px-3 text-sm font-medium outline-none transition-colors hover:bg-muted/80 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 aria-expanded:bg-muted/80 sm:max-w-[19rem]"
       >
         <span className="min-w-0 truncate">
-          {shortModelName(activeModel?.id ?? value)}
+          {hasOptions
+            ? shortModelName(activeModel?.id ?? value)
+            : isLoading
+              ? "加载中…"
+              : "无可用模型"}
         </span>
         <span className="shrink-0 text-muted-foreground">{MODE_OPTIONS[mode].label}</span>
         <span className="shrink-0 text-muted-foreground">
@@ -740,6 +744,9 @@ function modelDescription(model: ModelOptionRecord) {
   }
   if (model.provider === "anthropic") {
     return "For careful writing and reasoning";
+  }
+  if (model.provider === "custom") {
+    return "Served via your custom endpoint";
   }
   return "General-purpose reasoning model";
 }

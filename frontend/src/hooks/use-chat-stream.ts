@@ -377,6 +377,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         const body: ChatStreamRequest = {
           message: text,
           model_name: overrides.model_name ?? defaultModelName,
+          provider: overrides.provider,
           mode: effectiveMode,
           thinking_enabled: effectiveThinkingEnabled,
           agent_name: overrides.agent_name ?? defaultAgentName,

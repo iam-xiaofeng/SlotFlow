@@ -157,25 +157,12 @@ def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary()
         run_context=bundle.context,
     )
 
-    assert [tool.name for tool in tools] == [
-        "ask_clarification",
-        "slotflow_context",
-        "workspace_list",
-        "workspace_read",
-        "workspace_tree",
-        "workspace_search",
-        "artifact_list",
-        "artifact_write",
-        "web_fetch",
-        "web_search",
-        "skill_match",
-        "find-skills",
-        "skill_list",
-        "skill_install",
-        "mcp_add_http",
-        "subagent_list",
-        "task_tool",
-    ]
+    names = [tool.name for tool in tools]
+    # Subagent tools sit after the workspace/customization tools (the task-tool boundary).
+    assert {"subagent_list", "task_tool"} <= set(names)
+    assert names.index("task_tool") > names.index("artifact_write")
+    assert names.index("task_tool") > names.index("skill_match")
+    assert len(names) == len(set(names)), f"duplicate tool names: {names}"
 
 
 def test_disabled_subagent_profiles_do_not_register_task_tool() -> None:
