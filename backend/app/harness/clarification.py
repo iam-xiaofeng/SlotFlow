@@ -1,19 +1,22 @@
-"""Human-in-the-loop clarification middleware for SlotFlow harness runs."""
+"""Shared clarification payload construction for SlotFlow harness HITL.
+
+Both the ``ask_clarification`` tool (``harness/tools/builtins.py``) and the clarify gate
+(``harness/middleware/clarify_gate_middleware.py``) turn a clarification request into the SAME
+structured payload, which the agent adapter surfaces to the UI as ``clarification.requested``.
+
+Mechanism note: clarification is delivered through LangGraph native ``interrupt()``/resume.
+The tool/gate call ``interrupt(build_clarification_payload(...))`` to pause the graph; the
+user's answer is fed back via ``Command(resume=<answer>)`` and becomes the tool result
+directly — so there is no separate "rewrite the answered tool message" step. See HARNESS_NOTES.md.
+"""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
 from hashlib import sha256
-from typing import Any, override
-
-from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
-from langchain_core.messages import ToolMessage
-from langgraph.graph import END
-from langgraph.types import Command
+from typing import Any
 
 from app.chat.models import RunContext
-from app.harness.state import SlotFlowAgentState
 
 
 CLARIFICATION_SOURCE = "slotflow_clarification"
@@ -27,62 +30,17 @@ _ALLOWED_TYPES = {
 }
 
 
-class SlotFlowClarificationMiddleware(
-    AgentMiddleware[SlotFlowAgentState, RunContext]
-):
-    """Convert ask_clarification tool calls into a user-facing interruption."""
-
-    name = "SlotFlowClarificationMiddleware"
-
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
-    ) -> ToolMessage | Command[Any]:
-        if _tool_name(request.tool_call) != "ask_clarification":
-            return handler(request)
-        return _clarification_command(request)
-
-    @override
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
-    ) -> ToolMessage | Command[Any]:
-        if _tool_name(request.tool_call) != "ask_clarification":
-            return await handler(request)
-        return _clarification_command(request)
-
-
-def _clarification_command(request: ToolCallRequest) -> Command[Any]:
-    payload = build_clarification_payload(
-        request.tool_call,
-        run_context=getattr(request.runtime, "context", None),
-    )
-    return Command(
-        update={
-            "messages": [
-                ToolMessage(
-                    id=payload["id"],
-                    content=json.dumps(payload, ensure_ascii=False),
-                    name="ask_clarification",
-                    tool_call_id=_tool_call_id(request.tool_call),
-                )
-            ]
-        },
-        goto=END,
-    )
-
-
 def build_clarification_payload(
     tool_call: Any,
     *,
     run_context: RunContext | None = None,
 ) -> dict[str, Any]:
+    """Build the structured clarification payload surfaced to the UI picker."""
+
     args = _tool_args(tool_call)
     question = _clean_text(args.get("question")) or "请补充需要确认的信息。"
     context = _clean_text(args.get("context"))
-    options = _normalize_options(args.get("options"))
+    options = _append_freeform_option(_normalize_options(args.get("options")))
     clarification_type = _clean_text(args.get("clarification_type")) or "missing_info"
     if clarification_type not in _ALLOWED_TYPES:
         clarification_type = "missing_info"
@@ -107,12 +65,6 @@ def build_clarification_payload(
         else f"clarification:{_payload_digest(base_payload)}"
     )
     return base_payload
-
-
-def _tool_name(tool_call: Any) -> str:
-    if isinstance(tool_call, dict):
-        return str(tool_call.get("name") or "")
-    return str(getattr(tool_call, "name", "") or "")
 
 
 def _tool_call_id(tool_call: Any) -> str:
@@ -161,6 +113,23 @@ def _normalize_options(raw: Any) -> list[dict[str, str]]:
     return options
 
 
+_FREEFORM_TERMS = ("其他", "请说明", "other", "specify")
+
+
+def _append_freeform_option(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Always offer a free-text escape as the LAST option.
+
+    The user must be able to answer in their own words when none of the guessed options fit;
+    the frontend renders any option whose label contains 其他/other/specify as a text input.
+    """
+
+    for option in options:
+        if any(term in option.get("label", "").lower() for term in _FREEFORM_TERMS):
+            return options
+    option_id = chr(ord("A") + len(options))
+    return [*options, {"id": option_id, "label": "其他（自己输入）"}]
+
+
 def _clean_text(value: Any) -> str:
     if value is None:
         return ""
@@ -175,3 +144,17 @@ def _clean_text(value: Any) -> str:
 def _payload_digest(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def clarification_answer_text(answer: Any) -> str:
+    """Normalize a resume value into the user's answer text for the tool result."""
+
+    if isinstance(answer, str):
+        return answer.strip()
+    if isinstance(answer, dict):
+        for key in ("label", "text", "value", "answer"):
+            value = answer.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return json.dumps(answer, ensure_ascii=False)
+    return str(answer)

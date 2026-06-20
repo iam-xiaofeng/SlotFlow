@@ -29,7 +29,7 @@ from app.chat.agent_adapter.events import (
     make_prepared_event,
 )
 from app.chat.agent_adapter.projections import (
-    clarification_event_from_snapshot,
+    clarification_event_from_interrupt,
     extract_content_block_delta,
     extract_message_delta,
     extract_message_delta_parts,
@@ -79,7 +79,7 @@ __all__ = [
     "make_context_compressing_event",
     "make_finished_event",
     "make_prepared_event",
-    "clarification_event_from_snapshot",
+    "clarification_event_from_interrupt",
     "extract_content_block_delta",
     "extract_message_delta",
     "extract_message_delta_parts",

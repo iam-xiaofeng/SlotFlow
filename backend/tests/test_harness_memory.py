@@ -17,8 +17,13 @@ from app.chat.runtime import SlotFlowRuntimeConfig
 from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.memory import SlotFlowMemoryStore
+from app.harness.memory.extractor import SlotFlowMemoryExtractor, parse_extracted_facts
 from app.harness.middleware import SlotFlowLongTermMemoryMiddleware
-from app.harness.middleware.long_term_memory import build_turn_memory_content
+from app.harness.middleware.config import SlotFlowMiddlewareConfig
+from app.harness.middleware.long_term_memory import (
+    build_extraction_conversation,
+    build_turn_memory_content,
+)
 from app.main import create_app
 
 
@@ -244,7 +249,8 @@ def test_build_turn_memory_content_ignores_generic_turns() -> None:
     assert content is None
 
 
-def test_build_turn_memory_content_extracts_preference() -> None:
+def test_build_turn_memory_content_ignores_implicit_preference() -> None:
+    # Implicit preferences are now handled by the background LLM extractor, not this sync path.
     content = build_turn_memory_content(
         [
             HumanMessage(content="我希望以后回答更简洁"),
@@ -252,7 +258,78 @@ def test_build_turn_memory_content_extracts_preference() -> None:
         ]
     )
 
+    assert content is None
+
+
+def test_build_turn_memory_content_extracts_explicit_remember() -> None:
+    content = build_turn_memory_content(
+        [
+            HumanMessage(content="请记住我希望以后回答更简洁"),
+            AIMessage(content="好的。"),
+        ]
+    )
+
     assert content == "我希望以后回答更简洁"
+
+
+def test_build_extraction_conversation_renders_latest_turn() -> None:
+    conversation = build_extraction_conversation(
+        [
+            HumanMessage(content="我在做控制工程方向的研究"),
+            AIMessage(content="了解了。"),
+        ]
+    )
+
+    assert "User: 我在做控制工程方向的研究" in conversation
+    assert "Assistant: 了解了。" in conversation
+
+
+def test_parse_extracted_facts_reads_json_array_and_coerces_kind() -> None:
+    facts = parse_extracted_facts(
+        '思考...\n[{"kind": "preference", "content": "用户喜欢简洁"}, '
+        '{"kind": "weird", "content": "用户在做控制工程"}, {"content": ""}]'
+    )
+
+    assert facts == [
+        {"kind": "preference", "content": "用户喜欢简洁"},
+        {"kind": "fact", "content": "用户在做控制工程"},  # unknown kind -> fact, blank dropped
+    ]
+
+
+def test_parse_extracted_facts_returns_empty_on_junk() -> None:
+    assert parse_extracted_facts("no json here") == []
+    assert parse_extracted_facts("[]") == []
+
+
+@pytest.mark.asyncio
+async def test_memory_extractor_reads_facts_from_model() -> None:
+    model = FakeListChatModel(
+        responses=['[{"kind": "topic", "content": "用户正在做 SlotFlow 项目"}]']
+    )
+    extractor = SlotFlowMemoryExtractor(model)
+
+    facts = await extractor.aextract("User: 我最近在做 SlotFlow\nAssistant: 好的")
+
+    assert facts == [{"kind": "topic", "content": "用户正在做 SlotFlow 项目"}]
+
+
+@pytest.mark.asyncio
+async def test_memory_middleware_background_extraction_saves_facts(tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    model = FakeListChatModel(
+        responses=['[{"kind": "profile", "content": "用户是控制工程硕士"}]']
+    )
+    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store, model=model)
+
+    await middleware._aextract_and_save(
+        "User: 我是控制工程硕士\nAssistant: 了解",
+        _context(),
+    )
+
+    records = store.list_memories(thread_id="thread_memory")
+    assert len(records) == 1
+    assert records[0].kind == "profile"
+    assert records[0].metadata["extraction"] == "llm"
 
 
 def test_memory_middleware_tools_save_and_list_memories(tmp_path: Path) -> None:
@@ -332,6 +409,9 @@ async def test_harness_graph_runs_long_term_memory_middleware_async(
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试长期记忆的助手。",
             memory_store=store,
+            middleware_config=SlotFlowMiddlewareConfig(
+                proactive_memory_extraction_enabled=False,
+            ),
         ),
     )
 
@@ -353,7 +433,7 @@ async def test_harness_graph_saves_durable_memory_when_user_states_preference(
     bundle = build_run_config(
         thread_id="thread_memory",
         run_id="run_graph_memory_save",
-        request=ChatStreamRequest(message="我希望以后回答更简洁"),
+        request=ChatStreamRequest(message="请记住:我希望以后回答更简洁"),
     )
     graph = build_slotflow_harness_graph(
         model=FakeListChatModel(responses=["memory ok"]),
@@ -361,11 +441,14 @@ async def test_harness_graph_saves_durable_memory_when_user_states_preference(
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试长期记忆的助手。",
             memory_store=store,
+            middleware_config=SlotFlowMiddlewareConfig(
+                proactive_memory_extraction_enabled=False,
+            ),
         ),
     )
 
     result = await graph.ainvoke(
-        {"messages": [{"role": "user", "content": "我希望以后回答更简洁"}]},
+        {"messages": [{"role": "user", "content": "请记住:我希望以后回答更简洁"}]},
         config=bundle.config,
         context=bundle.context,
     )

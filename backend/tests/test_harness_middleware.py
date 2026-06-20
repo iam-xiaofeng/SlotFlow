@@ -22,7 +22,6 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
 from app.harness.middleware import (
     SlotFlowArtifactDiscoveryMiddleware,
-    SlotFlowClarificationMiddleware,
     SlotFlowDanglingToolCallMiddleware,
     SlotFlowMiddlewareConfig,
     SlotFlowRuntimeSummaryMiddleware,
@@ -33,7 +32,7 @@ from app.harness.middleware import (
     SlotFlowUploadsMiddleware,
     build_harness_middleware,
 )
-from app.harness.middleware.clarification_middleware import build_clarification_payload
+from app.harness.clarification import build_clarification_payload
 from app.harness.middleware.dangling_tool_call_middleware import (
     repair_dangling_tool_calls,
 )
@@ -101,8 +100,8 @@ def test_build_harness_middleware_adds_runtime_summary_by_default() -> None:
         "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
-        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowSubagentLimitMiddleware",
         "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
@@ -122,8 +121,8 @@ def test_build_harness_middleware_can_disable_runtime_summary() -> None:
         "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
-        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowSubagentLimitMiddleware",
         "SlotFlowArtifactDiscoveryMiddleware",
     ]
 
@@ -140,8 +139,8 @@ def test_build_harness_middleware_can_disable_tool_safety() -> None:
         "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
-        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowSubagentLimitMiddleware",
         "SlotFlowArtifactDiscoveryMiddleware",
         "SlotFlowRuntimeSummaryMiddleware",
     ]
@@ -164,8 +163,8 @@ def test_build_harness_middleware_dedupes_by_name() -> None:
         "SlotFlowSummarizationMiddleware",
         "SlotFlowSkillsPreflightMiddleware",
         "SlotFlowUploadsMiddleware",
-        "SlotFlowClarificationMiddleware",
         "SlotFlowTodoMiddleware",
+        "SlotFlowSubagentLimitMiddleware",
         "SlotFlowArtifactDiscoveryMiddleware",
     ]
     assert middleware[0] is replacement
@@ -243,46 +242,6 @@ def test_skills_preflight_middleware_skips_simple_chat() -> None:
     assert calls == []
 
 
-def test_clarification_middleware_intercepts_tool_call() -> None:
-    middleware = SlotFlowClarificationMiddleware()
-    request = ToolCallRequest(
-        tool_call={
-            "name": "ask_clarification",
-            "args": {
-                "question": "你想分析哪个币种？",
-                "clarification_type": "ambiguous_requirement",
-                "context": "昨天的记忆里有 BTC 和 ETH。",
-                "options": '["BTC", "ETH", "其他"]',
-            },
-            "id": "call_clarify",
-        },
-        tool=None,
-        state={},
-        runtime=Runtime(context=_bundle().context),
-    )
-
-    def handler(_: ToolCallRequest) -> ToolMessage:
-        raise AssertionError("clarification tool should be intercepted")
-
-    command = middleware.wrap_tool_call(request, handler)
-
-    assert command.goto == "__end__"
-    message = command.update["messages"][0]
-    payload = json.loads(str(message.content))
-    assert isinstance(message, ToolMessage)
-    assert message.name == "ask_clarification"
-    assert message.tool_call_id == "call_clarify"
-    assert payload["id"] == "clarification:call_clarify"
-    assert payload["type"] == "clarification"
-    assert payload["source"] == "slotflow_clarification"
-    assert payload["question"] == "你想分析哪个币种？"
-    assert payload["options"] == [
-        {"id": "A", "label": "BTC"},
-        {"id": "B", "label": "ETH"},
-        {"id": "C", "label": "其他"},
-    ]
-
-
 def test_clarification_payload_normalizes_dict_options() -> None:
     payload = build_clarification_payload(
         {
@@ -299,7 +258,19 @@ def test_clarification_payload_normalizes_dict_options() -> None:
     assert payload["options"] == [
         {"id": "A", "label": "先做后端"},
         {"id": "B", "label": "先做前端"},
+        {"id": "C", "label": "其他（自己输入）"},  # free-text escape always appended last
     ]
+
+
+def test_clarification_payload_does_not_duplicate_existing_freeform_option() -> None:
+    payload = build_clarification_payload(
+        {
+            "name": "ask_clarification",
+            "args": {"question": "选一个", "options": ["方案甲", "其他（请说明）"]},
+        }
+    )
+    labels = [opt["label"] for opt in payload["options"]]
+    assert labels == ["方案甲", "其他（请说明）"]  # model already provided a freeform option
 
 
 def test_todo_middleware_exposes_write_todos_tool_and_prompt() -> None:
@@ -608,6 +579,7 @@ async def test_harness_graph_turns_tool_exception_into_error_tool_message(tmp_pa
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试 tool safety 的助手。",
             sandbox_config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
+            middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
         ),
     )
 

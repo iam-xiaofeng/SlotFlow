@@ -385,6 +385,15 @@ function McpGrid({
   );
 }
 
+function displayMemoryContent(content: string): string {
+  // The category is shown as a section header, so drop the redundant "用户的…是：" prefix
+  // (and tidy multi-field profile sentences) for a concise, table-like reading.
+  let text = content.trim();
+  text = text.replace(/^(用户的偏好是|用户资料|用户近期关注|用户事实|用户记录|用户的)\s*[:：]?\s*/, "");
+  text = text.replace(/。用户的/g, "。").replace(/用户的/g, "");
+  return text.trim() || content.trim();
+}
+
 function MemoryGrid({
   query,
   memories,
@@ -403,6 +412,15 @@ function MemoryGrid({
       ? memories.filter((memory) => memory.content.toLowerCase().includes(q))
       : memories;
   }, [memories, query]);
+
+  // Group by category in a stable, reading-friendly order.
+  const groups = useMemo(() => {
+    return MEMORY_KINDS.map((kind) => ({
+      kind: kind.value,
+      label: kind.label,
+      items: filtered.filter((memory) => memory.kind === kind.value),
+    })).filter((group) => group.items.length > 0);
+  }, [filtered]);
 
   function submitDraft() {
     const content = draftContent.trim();
@@ -443,92 +461,103 @@ function MemoryGrid({
         </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {groups.length === 0 ? (
         <EmptyState text={query ? "没有匹配的记忆" : "暂无长期记忆"} />
       ) : (
-        <CardGrid>
-          {filtered.map((memory) => {
-            const kindLabel =
-              MEMORY_KINDS.find((kind) => kind.value === memory.kind)?.label ?? memory.kind;
-            const isEditing = editingId === memory.id;
-            return (
-              <div
-                key={memory.id}
-                className="group flex min-h-32 flex-col gap-2 rounded-lg border bg-card p-4 transition-colors hover:border-foreground/20 hover:shadow-sm"
-              >
-                {isEditing ? (
-                  <>
-                    <textarea
-                      value={editContent}
-                      onChange={(event) => setEditContent(event.target.value)}
-                      rows={3}
-                      className="w-full resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
-                    />
-                    <div className="flex items-center justify-end gap-1">
-                      <Button
-                        type="button"
-                        size="icon-xs"
-                        variant="ghost"
-                        title="取消"
-                        onClick={() => setEditingId(null)}
-                      >
-                        <X className="size-3.5" />
-                      </Button>
-                      <Button
-                        type="button"
-                        size="icon-xs"
-                        variant="ghost"
-                        title="保存"
-                        onClick={() => {
-                          const content = editContent.trim();
-                          if (content) {
-                            onEditMemory(memory, content, memory.kind);
-                          }
-                          setEditingId(null);
-                        }}
-                      >
-                        <Check className="size-3.5" />
-                      </Button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <p className="line-clamp-4 whitespace-pre-wrap text-sm text-foreground">
-                      {memory.content}
-                    </p>
-                    <div className="mt-auto flex items-center justify-between gap-2 pt-1">
-                      <CardChip>{kindLabel}</CardChip>
-                      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                        <Button
-                          type="button"
-                          size="icon-xs"
-                          variant="ghost"
-                          title="编辑"
-                          onClick={() => {
-                            setEditingId(memory.id);
-                            setEditContent(memory.content);
-                          }}
-                        >
-                          <Pencil className="size-3.5" />
-                        </Button>
-                        <Button
-                          type="button"
-                          size="icon-xs"
-                          variant="ghost"
-                          title="删除"
-                          className="text-muted-foreground hover:text-destructive"
-                          onClick={() => onDeleteMemory(memory)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                    </div>
-                  </>
-                )}
+        <div className="flex flex-col gap-5">
+          {groups.map((group) => (
+            <section key={group.kind} className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-2 px-1">
+                <span className="text-xs font-medium text-foreground">{group.label}</span>
+                <span className="text-xs text-muted-foreground">{group.items.length}</span>
+                <div className="h-px flex-1 bg-border" />
               </div>
-            );
-          })}
-        </CardGrid>
+              <div className="overflow-hidden rounded-lg border bg-card">
+                {group.items.map((memory, index) => {
+                  const isEditing = editingId === memory.id;
+                  return (
+                    <div
+                      key={memory.id}
+                      className={`group flex items-start gap-2 px-3 py-2 transition-colors hover:bg-muted/40 ${
+                        index > 0 ? "border-t" : ""
+                      }`}
+                    >
+                      {isEditing ? (
+                        <div className="flex w-full flex-col gap-2">
+                          <textarea
+                            value={editContent}
+                            onChange={(event) => setEditContent(event.target.value)}
+                            rows={2}
+                            className="w-full resize-none rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                          />
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              title="取消"
+                              onClick={() => setEditingId(null)}
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              title="保存"
+                              onClick={() => {
+                                const content = editContent.trim();
+                                if (content) {
+                                  onEditMemory(memory, content, memory.kind);
+                                }
+                                setEditingId(null);
+                              }}
+                            >
+                              <Check className="size-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <p
+                            className="line-clamp-2 flex-1 whitespace-pre-wrap text-sm leading-relaxed text-foreground"
+                            title={memory.content}
+                          >
+                            {displayMemoryContent(memory.content)}
+                          </p>
+                          <div className="flex items-center gap-0.5 pt-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              title="编辑"
+                              onClick={() => {
+                                setEditingId(memory.id);
+                                setEditContent(displayMemoryContent(memory.content));
+                              }}
+                            >
+                              <Pencil className="size-3.5" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              title="删除"
+                              className="text-muted-foreground hover:text-destructive"
+                              onClick={() => onDeleteMemory(memory)}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
       )}
     </div>
   );

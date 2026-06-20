@@ -1,0 +1,112 @@
+"""Background long-term memory extraction.
+
+DeerFlow's lesson: durable-fact extraction should be an LLM job, not hand-written regex.
+SlotFlow previously matched a few Chinese sentence shapes (`extract_memory_candidate_from_user_text`),
+which is brittle and the main reason the agent "doesn't like to remember". This extractor asks
+the model to pull durable user facts from a finished turn and returns them as structured records.
+
+It is invoked fire-and-forget from ``SlotFlowLongTermMemoryMiddleware.aafter_agent`` so it never
+blocks the user-visible run (the answer is already streamed; thinking-mode latency is hidden).
+The model call passes ``config={"callbacks": []}`` so its tokens are NOT captured by the parent
+``astream_events`` stream — same rule as the clarify-gate triage.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from app.harness.memory.models import MEMORY_KINDS, MemoryKind
+
+
+_EXTRACT_SYSTEM = (
+    "You extract DURABLE long-term facts about the USER from one finished conversation turn. "
+    "Save ONLY stable, reusable facts that will matter in FUTURE, unrelated conversations:\n"
+    "- preference: how the user wants answers/tools/workflow (language, style, format, do/don't)\n"
+    "- profile: stable identity — name, role, profession, field of study, background\n"
+    "- topic: an ongoing project / goal / current focus the user is working on\n"
+    "- fact: another durable personal fact (e.g. birthday, location)\n"
+    "Do NOT save: the one-off question itself, transient task details, your own answer, "
+    "uploaded-file events, or anything only relevant to this single turn. "
+    "When in doubt, prefer to save a clearly durable fact rather than miss it, but return an "
+    "EMPTY array if the turn contains nothing durable. Each `content` must be a concise, "
+    "standalone sentence understandable without the conversation. "
+    "Respond with ONLY a compact JSON array, no prose, no markdown fences:\n"
+    '[{"kind": "preference|profile|topic|fact", "content": "<concise standalone fact>"}]'
+)
+
+
+class SlotFlowMemoryExtractor:
+    """Pull durable user facts from a finished turn via the chat model."""
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    @property
+    def available(self) -> bool:
+        return self._model is not None and hasattr(self._model, "ainvoke")
+
+    async def aextract(self, conversation: str) -> list[dict[str, str]]:
+        if not self.available or not conversation.strip():
+            return []
+        try:
+            response = await self._model.ainvoke(
+                [
+                    SystemMessage(content=_EXTRACT_SYSTEM),
+                    HumanMessage(content=conversation[:6000]),
+                ],
+                config={"callbacks": []},
+            )
+        except Exception:  # noqa: BLE001 - background best-effort; never raise
+            return []
+        return parse_extracted_facts(_message_text(getattr(response, "content", "")))
+
+
+def parse_extracted_facts(text: str) -> list[dict[str, str]]:
+    """Parse the first JSON array of {kind, content} objects out of a model response."""
+
+    if not text:
+        return []
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    try:
+        loaded = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+
+    facts: list[dict[str, str]] = []
+    for item in loaded:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        kind = _coerce_kind(item.get("kind"))
+        facts.append({"kind": kind, "content": content.strip()})
+    return facts
+
+
+def _coerce_kind(value: Any) -> MemoryKind:
+    if isinstance(value, str) and value in MEMORY_KINDS:
+        return value  # type: ignore[return-value]
+    return "fact"
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return ""

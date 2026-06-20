@@ -147,6 +147,8 @@ def build_system_prompt(
     orchestration_lines: list[str] = [
         "Operating procedure for non-trivial tasks — work through it; do NOT jump straight to a one-shot answer:",
         "- If something blocking is ambiguous or needs the user's choice, call ask_clarification FIRST (the interactive picker), instead of guessing or writing plain-text questions.",
+        "- If you ALREADY asked for clarification earlier in this conversation and the user repeats the request or replies without choosing, do NOT ask again and do NOT debate options in your reply. Pick the single most reasonable interpretation (use long-term memory if relevant), state it in ONE short sentence (e.g. '我先按 X 来做'), and go straight to the work.",
+        "- Keep the final answer clean: never include meta-commentary about your own indecision, apologies for confusion, or 'let me think about whether to ask'. Decide, state the assumption in one line, deliver.",
         "- For a specialized, domain, or expert task, call skill_match before doing the work to find a relevant Skill.",
     ]
     if features.plan_enabled:

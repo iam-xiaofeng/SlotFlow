@@ -150,11 +150,15 @@ def _should_run_preflight(text: str) -> bool:
 def _format_preflight(result: dict[str, Any]) -> str:
     return (
         f"{SKILLS_PREFLIGHT_BLOCK_START}\n"
-        "Backend preflight already checked installed Skills first and only searched "
-        "installable Skills when no local match was found.\n"
-        "If installed_matches is non-empty, use those installed Skills for this run. "
-        "Install a Skill only when a concrete package_url and skill_name are available "
-        "and relevant.\n"
+        "SlotFlow ran a Skills preflight for this specialized request (installed Skills first, "
+        "then installable ones). Treat this as a STRONG hint to PREFER a Skill over answering "
+        "from general knowledge:\n"
+        "- If installed_matches is non-empty: USE those installed Skill(s) for this run.\n"
+        "- If installed_matches is empty but an installable candidate looks relevant: install "
+        "the best match with skill_install (its package_url + skill_name), or run find-skills / "
+        "search_skill_repos (prefer high-star GitHub repos) to confirm, BEFORE doing the work.\n"
+        "- Only skip Skills when none are genuinely relevant — say so briefly and proceed with "
+        "your best tools.\n"
         f"{json.dumps(result, ensure_ascii=False)}\n"
         f"{SKILLS_PREFLIGHT_BLOCK_END}"
     )

@@ -10,7 +10,6 @@ LangGraph v3 typed projections
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +19,7 @@ from app.chat.agent_adapter import (
     AgentEvent,
     LangGraphEventAgentAdapter,
     build_agent_input,
-    clarification_event_from_snapshot,
+    clarification_event_from_interrupt,
     collect_agent_events,
     extract_message_delta,
     extract_message_delta_parts,
@@ -303,7 +302,7 @@ def test_normalize_values_snapshot_keeps_thread_and_run_identity() -> None:
     assert snapshot["messages"] == [{"role": "assistant", "content": "完成"}]
 
 
-def test_clarification_tool_message_becomes_requested_event() -> None:
+def test_clarification_interrupt_becomes_requested_event() -> None:
     payload = {
         "type": "clarification",
         "id": "clarification:call_1",
@@ -313,20 +312,8 @@ def test_clarification_tool_message_becomes_requested_event() -> None:
         "options": [{"id": "A", "label": "BTC"}],
         "source": "slotflow_clarification",
     }
-    snapshot = normalize_values_snapshot(
-        item={
-            "messages": [
-                {
-                    "role": "tool",
-                    "name": "ask_clarification",
-                    "content": json.dumps(payload, ensure_ascii=False),
-                }
-            ]
-        },
-        bundle=_bundle(),
-    )
 
-    event = clarification_event_from_snapshot(snapshot)
+    event = clarification_event_from_interrupt(payload, bundle=_bundle())
 
     assert event == AgentEvent(
         event="clarification.requested",
@@ -336,6 +323,78 @@ def test_clarification_tool_message_becomes_requested_event() -> None:
             "run_id": "run_test",
         },
     )
+
+
+def test_clarification_interrupt_ignores_non_clarification_value() -> None:
+    # An interrupt value that is not a clarification payload yields no event (defensive).
+    assert clarification_event_from_interrupt({"type": "other"}, bundle=_bundle()) is None
+    assert clarification_event_from_interrupt(None, bundle=_bundle()) is None
+
+
+@pytest.mark.asyncio
+async def test_adapter_surfaces_clarification_then_resume_does_not_re_pop() -> None:
+    """End-to-end through the real adapter: turn 1 asks (interrupt) → turn 2 (the answer)
+    resumes the SAME thread, produces the final answer, and emits NO clarification.requested.
+
+    This is the regression guard for the reported bug — an answered clarification must never
+    re-pop on the next turn. The adapter resumes from the pending interrupt and surfaces a
+    clarification ONLY when one is freshly pending, never re-derived from history.
+    """
+
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.harness.tools.builtins import ask_clarification_tool
+
+    class _ToolAwareFake(FakeMessagesListChatModel):
+        def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+            return self
+
+    model = _ToolAwareFake(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "ask_clarification",
+                        "args": {"question": "你想分析哪个币种？", "clarification_type": "ambiguous_requirement", "options": ["BTC", "ETH"]},
+                        "id": "call_clarify",
+                    }
+                ],
+            ),
+            AIMessage(content="好的，我来分析 BTC 的近期走势。"),
+        ]
+    )
+    graph = create_agent(model=model, tools=[ask_clarification_tool], checkpointer=InMemorySaver())
+    adapter = LangGraphEventAgentAdapter(graph)
+
+    ask_bundle = build_run_config(
+        thread_id="thread_clar", run_id="run_ask", request=ChatStreamRequest(message="分析一下")
+    )
+    ans_bundle = build_run_config(
+        thread_id="thread_clar", run_id="run_ans", request=ChatStreamRequest(message="BTC")
+    )
+
+    turn1 = await collect_agent_events(
+        adapter.stream_events(request=ChatStreamRequest(message="分析一下"), bundle=ask_bundle)
+    )
+    assert "clarification.requested" in [e.event for e in turn1]
+    clar = next(e for e in turn1 if e.event == "clarification.requested")
+    assert clar.data["question"] == "你想分析哪个币种？"
+
+    turn2 = await collect_agent_events(
+        adapter.stream_events(request=ChatStreamRequest(message="BTC"), bundle=ans_bundle)
+    )
+    # The answer turn must NOT re-pop the clarification, and must produce the real answer.
+    assert "clarification.requested" not in [e.event for e in turn2]
+    answer = "".join(
+        e.data.get("delta", "") for e in turn2 if e.event == "message.delta" and e.data.get("channel") == "content"
+    )
+    snapshot = next((e for e in turn2 if e.event == "state.snapshot"), None)
+    final = snapshot.data["messages"][-1]["content"] if snapshot else ""
+    assert "BTC" in (answer + final)
 
 
 def test_todos_in_values_snapshot_become_todo_updated_event() -> None:

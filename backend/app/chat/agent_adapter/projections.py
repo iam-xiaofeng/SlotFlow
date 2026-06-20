@@ -265,25 +265,23 @@ def normalize_values_snapshot(*, item: Any, bundle: RunConfigBundle) -> dict[str
     }
 
 
-def clarification_event_from_snapshot(snapshot: dict[str, Any]) -> AgentEvent | None:
-    """Extract the latest structured clarification request from a values snapshot."""
+def clarification_event_from_interrupt(
+    value: Any, *, bundle: RunConfigBundle
+) -> AgentEvent | None:
+    """Turn a pending LangGraph ``interrupt`` value into a clarification.requested event.
 
-    messages = snapshot.get("messages")
-    if not isinstance(messages, list):
+    The clarification payload is the interrupt's value (built by ``build_clarification_payload``).
+    Because this is derived from a PENDING interrupt — not scanned out of message history — an
+    already-answered clarification (which leaves no pending interrupt) is never re-surfaced. This
+    is the root-cause fix for the "answered clarification pops up again" bug.
+    """
+
+    payload = parse_clarification_payload(value)
+    if payload is None:
         return None
-
-    for message in reversed(messages):
-        if not isinstance(message, dict):
-            continue
-        if message.get("role") != "tool" or message.get("name") != "ask_clarification":
-            continue
-        payload = parse_clarification_payload(message.get("content"))
-        if payload is None:
-            return None
-        payload.setdefault("thread_id", snapshot.get("thread_id"))
-        payload.setdefault("run_id", snapshot.get("run_id"))
-        return AgentEvent(event="clarification.requested", data=payload)
-    return None
+    payload.setdefault("thread_id", bundle.context.thread_id)
+    payload.setdefault("run_id", bundle.context.run_id)
+    return AgentEvent(event="clarification.requested", data=payload)
 
 
 def todo_event_from_snapshot(snapshot: dict[str, Any]) -> AgentEvent | None:
@@ -325,7 +323,7 @@ def normalize_todos(value: Any) -> list[dict[str, str]]:
 
 
 def parse_clarification_payload(content: Any) -> dict[str, Any] | None:
-    """Parse the JSON ToolMessage produced by SlotFlowClarificationMiddleware."""
+    """Parse a clarification payload (an interrupt value built by build_clarification_payload)."""
 
     if isinstance(content, dict):
         payload = content

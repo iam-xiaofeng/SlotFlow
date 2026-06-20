@@ -13,6 +13,7 @@ from app.chat.run_config import build_run_config
 from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
+from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.subagents import (
     SlotFlowSubagentConfig,
     SlotFlowSubagentProfile,
@@ -212,7 +213,10 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
     graph = build_slotflow_harness_graph(
         model=model,
         run_context=bundle.context,
-        harness_config=SlotFlowHarnessConfig(system_prompt="你是测试 subagent 的助手。"),
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="你是测试 subagent 的助手。",
+            middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
+        ),
     )
 
     result = await graph.ainvoke(
