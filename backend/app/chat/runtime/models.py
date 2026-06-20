@@ -210,7 +210,9 @@ def build_openai_compatible_model_kwargs(
         "base_url": base_url,
         "streaming": True,
         "timeout": 30,
-        "max_retries": 0,
+        # Long multi-step (ultra) runs make many provider calls; a single transient
+        # APIConnectionError / 429 / 5xx must NOT kill the whole run. Retry with backoff.
+        "max_retries": 2,
     }
     if provider == "deepseek":
         # DeepSeek v4 keeps thinking ON by default, so the off state must be sent
@@ -261,7 +263,8 @@ def create_anthropic_chat_model(
         "api_key": api_key,
         "streaming": True,
         "timeout": 30,
-        "max_retries": 0,
+        # Retry transient APIConnectionError / 429 / 5xx so a blip doesn't kill long runs.
+        "max_retries": 2,
     }
     if run_context and run_context.thinking_enabled:
         # Extended thinking emits "thinking" content blocks; max_tokens must exceed the

@@ -108,6 +108,15 @@ clarification 机制存在时挂载。只作用于**一次用户回合的首个 
 - **修复**：澄清短路改走 `before_model` + `jump_to=end`（直接结束，无第二次 model 调用）；合成的
   AIMessage 兜底带 `reasoning_content=""` 以防被回传时校验失败。
 
+### 坑 4：长 run 中途「Connection error」直接失败（前端实测发现）
+- **现象**：ultra 长任务（多次 web_fetch + thinking，跑数分钟）前端报「Connection error」。
+- **定位**：「Connection error.」正是 `openai.APIConnectionError` 的消息体。我们的 SSE 层处理是
+  对的（异常被 `iter_business_events` 转成干净的 `run.error`），问题在**模型客户端零重试**——
+  `runtime/models.py` 里 OpenAI 兼容 / Anthropic 客户端都是 `max_retries=0`，对 provider 的任何
+  一次瞬时连接抖动/429/5xx 立刻整轮失败。
+- **修复**：两个客户端 `max_retries: 0 → 2`（OpenAI SDK 自带指数退避，覆盖
+  APIConnectionError/APITimeoutError/429/5xx）。长 run 容错显著提升。
+
 > 另外踩到的两个**测试方法**坑（非 app bug，记录以免再犯）：
 > - in-process 探针自己解析 `.env` 时没有去掉值两边的引号 → 误以为 `SLOTFLOW_MCP_CONFIG_JSON`
 >   非法。真实 dotenv / `make dev` 会去引号。
