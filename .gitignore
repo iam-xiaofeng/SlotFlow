@@ -12,3 +12,6 @@ coverage/
 .env
 .env.local
 backend/.slotflow/
+
+# local throwaway harness probes / live-API scratch scripts (never upload)
+scratch/
