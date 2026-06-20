@@ -6,6 +6,10 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 > behavior, architecture, conventions, or commands, reflect it here so AGENTS.md stays an
 > accurate map of the repo. Keeping it current is part of "done", not an afterthought.
 
+> **See also `HARNESS_NOTES.md`** — the harness engineering log (agent-behavior problems,
+> what was tried, live-API test results, current state). Read it for the *why* behind the
+> clarify-gate and the known behavioral gaps (subagent / skill-discovery / proactive memory).
+
 ## What SlotFlow is
 
 A local-first, extensible AI agent workspace: a FastAPI + LangGraph backend driving a
