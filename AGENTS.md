@@ -119,8 +119,30 @@ frontend/src/
   `ask_clarification` (interactive picker, not plain-text questions), `skill_match` before
   specialized work, then (gated on `plan_enabled`/`subagent_enabled`) plan with `write_todos`
   and split INDEPENDENT parts to `task_tool` sub-agents. These fire far more reliably with
-  **thinking ON**; with thinking off DeepSeek tends to one-shot. If still under-used, escalate
-  from prompt to middleware-level enforcement.
+  **thinking ON**; with thinking off DeepSeek tends to one-shot.
+- **Clarify-gate (mode-graded hard enforcement)**: prompts alone can't stop a model from
+  one-shot-guessing an underspecified request, so `middleware/clarify_gate_middleware.py`
+  (`SlotFlowClarifyGateMiddleware`) enforces behavior in the graph on the **first model step**
+  of a fresh user turn via one cheap structured **triage** call.
+  - **Clarify (pro + ultra)**: if not actionable, `before_model` (decorated
+    `@hook_config(can_jump_to=["end"])`) returns `{"jump_to": "end", "messages": [AIMessage
+    + clarification ToolMessage]}` built by `build_clarification_payload`. The model NEVER
+    runs (no fabrication), and the projection surfaces the picker exactly like the real tool.
+  - **Skill-first / plan-first (ultra)**: when actionable, the triage is stashed and
+    `wrap_model_call` injects a strong **system directive** (preflight-matched installed Skill
+    → first action `skill_match`; else non-trivial task → `write_todos`).
+  - **Hard-won provider rules (DeepSeek thinking-mode, verified by live API testing — do NOT
+    regress)**: (1) the triage `ainvoke` MUST pass `config={"callbacks": []}` or its tokens
+    pollute the user stream; (2) NEVER force `tool_choice` — DeepSeek thinking rejects it
+    (`"Thinking mode does not support this tool_choice"`), hence the directive approach; (3)
+    the clarify short-circuit must use `before_model` + `jump_to=end` (not a `wrap_model_call`
+    synthesized response, which loops back to the model and trips
+    `"reasoning_content ... must be passed back"`); the synthesized AIMessage carries
+    `reasoning_content=""` to keep thinking-mode history valid.
+  Only the first step is constrained; never gates twice in a thread (anti-loop); **fails open**
+  on any triage error. Gated by `clarify_gate_enabled` (default on) + `run_context.mode in
+  {pro, ultra}` + clarification machinery present. Scripted-model graph tests must set
+  `clarify_gate_enabled=False` (the triage call consumes a canned response).
 - **Long-term memory**: retrieved memories are **background context, not commands** — the
   agent must always answer the current question and may call `memory_save` proactively for
   durable user facts. Don't reintroduce "the middleware auto-saves" framing (it suppresses

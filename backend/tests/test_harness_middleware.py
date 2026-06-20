@@ -608,6 +608,7 @@ async def test_harness_graph_turns_tool_exception_into_error_tool_message(tmp_pa
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试 tool safety 的助手。",
             sandbox_config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
+            middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
         ),
     )
 

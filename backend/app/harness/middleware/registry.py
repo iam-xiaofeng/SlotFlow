@@ -17,6 +17,9 @@ from app.harness.middleware.builtins import SlotFlowRuntimeSummaryMiddleware
 from app.harness.middleware.clarification_middleware import (
     SlotFlowClarificationMiddleware,
 )
+from app.harness.middleware.clarify_gate_middleware import (
+    SlotFlowClarifyGateMiddleware,
+)
 from app.harness.middleware.config import SlotFlowMiddlewareConfig
 from app.harness.middleware.dangling_tool_call_middleware import (
     SlotFlowDanglingToolCallMiddleware,
@@ -96,6 +99,18 @@ def build_harness_middleware(
 
     if tools_enabled and resolved.clarification_enabled:
         middleware.append(SlotFlowClarificationMiddleware())
+
+    # Clarify-gate forces clarification (pro+ultra) / skill-first + plan-first (ultra) on the
+    # first model step. It relies on the clarification middleware to surface its synthesized
+    # ask_clarification, so it only engages when that machinery is present.
+    if (
+        tools_enabled
+        and resolved.clarify_gate_enabled
+        and resolved.clarification_enabled
+        and run_context is not None
+        and run_context.mode in ("pro", "ultra")
+    ):
+        middleware.append(SlotFlowClarifyGateMiddleware(model=model))
 
     if tools_enabled and resolved.todo_enabled and features.plan_enabled:
         middleware.append(SlotFlowTodoMiddleware())

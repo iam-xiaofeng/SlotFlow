@@ -18,6 +18,7 @@ from app.chat.run_config import build_run_config
 from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import features_from_run_context
+from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.tools import ask_clarification_tool, slotflow_context_tool
 from app.harness.tools.registry import build_harness_tools
@@ -289,7 +290,10 @@ async def test_harness_graph_can_execute_builtin_tool_call() -> None:
     graph = build_slotflow_harness_graph(
         model=model,
         run_context=bundle.context,
-        harness_config=SlotFlowHarnessConfig(system_prompt="你是测试 harness 的助手。"),
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="你是测试 harness 的助手。",
+            middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
+        ),
     )
 
     result = await graph.ainvoke(
