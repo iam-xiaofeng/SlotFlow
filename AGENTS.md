@@ -132,6 +132,9 @@ frontend/src/
     `@hook_config(can_jump_to=["end"])`) returns `{"jump_to": "end", "messages": [AIMessage
     + clarification ToolMessage]}` built by `build_clarification_payload`. The model NEVER
     runs (no fabrication), and the projection surfaces the picker exactly like the real tool.
+    **Every** clarification (gate- or model-initiated) gets a free-text `其他（自己输入）` option
+    appended by `build_clarification_payload` as the LAST option — the frontend renders any
+    其他/other/specify option as an input box, so the user can always answer in their own words.
   - **Skill-first / plan-first / delegate (ultra)**: when actionable, the triage is stashed and
     `wrap_model_call` injects a strong **system directive** assembling the applicable
     requirements: specialized task (or skills-preflight ran) → first `skill_match`, else

@@ -82,7 +82,7 @@ def build_clarification_payload(
     args = _tool_args(tool_call)
     question = _clean_text(args.get("question")) or "请补充需要确认的信息。"
     context = _clean_text(args.get("context"))
-    options = _normalize_options(args.get("options"))
+    options = _append_freeform_option(_normalize_options(args.get("options")))
     clarification_type = _clean_text(args.get("clarification_type")) or "missing_info"
     if clarification_type not in _ALLOWED_TYPES:
         clarification_type = "missing_info"
@@ -159,6 +159,23 @@ def _normalize_options(raw: Any) -> list[dict[str, str]]:
         option_id = chr(ord("A") + len(options))
         options.append({"id": option_id, "label": label})
     return options
+
+
+_FREEFORM_TERMS = ("其他", "请说明", "other", "specify")
+
+
+def _append_freeform_option(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Always offer a free-text escape as the LAST option.
+
+    The user must be able to answer in their own words when none of the guessed options fit;
+    the frontend renders any option whose label contains 其他/other/specify as a text input.
+    """
+
+    for option in options:
+        if any(term in option.get("label", "").lower() for term in _FREEFORM_TERMS):
+            return options
+    option_id = chr(ord("A") + len(options))
+    return [*options, {"id": option_id, "label": "其他（自己输入）"}]
 
 
 def _clean_text(value: Any) -> str:

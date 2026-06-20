@@ -82,7 +82,9 @@ async def test_pro_underspecified_request_ends_with_clarification() -> None:
     assert payload["type"] == "clarification"
     assert payload["source"] == "slotflow_clarification"  # projection requires this exact source
     assert payload["question"] == "导出成什么格式？"
-    assert [opt["label"] for opt in payload["options"]] == ["CSV", "Excel", "Markdown"]
+    labels = [opt["label"] for opt in payload["options"]]
+    assert labels[:3] == ["CSV", "Excel", "Markdown"]
+    assert "其他" in labels[-1]  # free-text escape always appended last
 
 
 @pytest.mark.asyncio

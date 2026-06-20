@@ -299,7 +299,19 @@ def test_clarification_payload_normalizes_dict_options() -> None:
     assert payload["options"] == [
         {"id": "A", "label": "先做后端"},
         {"id": "B", "label": "先做前端"},
+        {"id": "C", "label": "其他（自己输入）"},  # free-text escape always appended last
     ]
+
+
+def test_clarification_payload_does_not_duplicate_existing_freeform_option() -> None:
+    payload = build_clarification_payload(
+        {
+            "name": "ask_clarification",
+            "args": {"question": "选一个", "options": ["方案甲", "其他（请说明）"]},
+        }
+    )
+    labels = [opt["label"] for opt in payload["options"]]
+    assert labels == ["方案甲", "其他（请说明）"]  # model already provided a freeform option
 
 
 def test_todo_middleware_exposes_write_todos_tool_and_prompt() -> None:
