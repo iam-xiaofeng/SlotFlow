@@ -124,6 +124,7 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         "web_search",
         "skill_match",
         "search_skill_repos",
+        "write_todos",  # plan_enabled (ultra) exposes the todo tool
     } <= set(names)
 
 

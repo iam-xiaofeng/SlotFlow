@@ -75,6 +75,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "artifact_write",
         "web_search",
         "skill_match",
+        "write_todos",  # pro mode is plan_enabled -> write_todos exposed
     } <= set(tool_names)
     assert len(tool_names) == len(set(tool_names)), f"duplicate tool names: {tool_names}"
     assert captured["checkpointer"] is checkpointer
