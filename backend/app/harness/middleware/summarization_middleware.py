@@ -1,20 +1,14 @@
-"""SlotFlow wrapper around LangChain conversation summarization."""
+"""SlotFlow wrapper around LangChain conversation summarization.
+
+Thin delegate to ``app.harness.steps.summarization``.
+"""
 
 from __future__ import annotations
 
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
 
-
-SLOTFLOW_SUMMARY_PROMPT = """Summarize the earlier SlotFlow conversation for the next model call.
-
-Keep only durable context: user intent, decisions, created or modified files, tool results,
-open questions, and concrete next steps. Preserve exact paths, identifiers, and user
-preferences. Omit small talk.
-
-Messages:
-{messages}
-"""
+from app.harness.steps.summarization import SLOTFLOW_SUMMARY_PROMPT
 
 
 class SlotFlowSummarizationMiddleware(SummarizationMiddleware):

@@ -1,4 +1,4 @@
-"""First SlotFlow-owned LangChain agent middleware."""
+"""First SlotFlow-owned LangChain agent middleware (now a thin delegate to steps)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from langgraph.runtime import Runtime
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.state import SlotFlowAgentState
+from app.harness.steps.runtime_summary import runtime_summary_update
 
 
 class SlotFlowRuntimeSummaryMiddleware(AgentMiddleware[SlotFlowAgentState, RunContext]):
@@ -26,21 +27,4 @@ class SlotFlowRuntimeSummaryMiddleware(AgentMiddleware[SlotFlowAgentState, RunCo
         context = runtime.context
         if context is None:
             return None
-
-        existing = dict(state.get("slotflow") or {})
-        existing["runtime"] = {
-            "thread_id": context.thread_id,
-            "run_id": context.run_id,
-            "model_name": context.model_name,
-            "mode": context.mode,
-            "agent_name": context.agent_name,
-            "thinking_enabled": self._features.thinking_enabled,
-            "plan_enabled": self._features.plan_enabled,
-            "subagent_enabled": self._features.subagent_enabled,
-            "files_count": len(context.files),
-            "uploaded_files": [
-                uploaded_file.model_dump(mode="json")
-                for uploaded_file in context.uploaded_files
-            ],
-        }
-        return {"slotflow": existing}
+        return runtime_summary_update(state=state, context=context, features=self._features)
