@@ -47,16 +47,16 @@ def test_features_from_run_context_keeps_harness_input_narrow() -> None:
 
 
 def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
-    """builder 负责组装 graph 边界参数，chat/runtime 不再直接调用 create_agent。"""
+    """builder 负责组装 graph 边界参数（node+edge 版本，委托 build_slotflow_graph）。"""
 
     captured: dict[str, Any] = {}
     fake_graph = object()
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         captured.update(kwargs)
         return fake_graph
 
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     model = ToolAwareFakeListChatModel(responses=["ok"])
     checkpointer = object()
@@ -70,7 +70,6 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     assert graph is fake_graph
     assert captured["model"] is model
     tool_names = [tool.name for tool in captured["tools"]]
-    # The builder passes the harness tool registry to the graph (key tools, no duplicates).
     assert {
         "ask_clarification",
         "artifact_write",
@@ -78,23 +77,11 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "skill_match",
     } <= set(tool_names)
     assert len(tool_names) == len(set(tool_names)), f"duplicate tool names: {tool_names}"
-    assert [item.name for item in captured["middleware"]] == [
-        "SlotFlowDanglingToolCallMiddleware",
-        "SlotFlowToolSafetyMiddleware",
-        "SlotFlowSummarizationMiddleware",
-        "SlotFlowSkillsPreflightMiddleware",
-        "SlotFlowUploadsMiddleware",
-        "SlotFlowClarifyGateMiddleware",
-        "SlotFlowTodoMiddleware",
-        "SlotFlowArtifactDiscoveryMiddleware",
-        "SlotFlowRuntimeSummaryMiddleware",
-    ]
     assert captured["checkpointer"] is checkpointer
     assert "base prompt" in captured["system_prompt"]
     assert "thinking_enabled=True" in captured["system_prompt"]
     assert "plan_enabled=True" in captured["system_prompt"]
     assert "subagent_enabled=False" in captured["system_prompt"]
-    # Assert the prompt teaches these tools by NAME (robust to wording changes).
     assert "skill_match" in captured["system_prompt"]
     assert "Backend preflight" not in captured["system_prompt"]
     assert "ask_clarification" in captured["system_prompt"]
@@ -106,11 +93,11 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
 
     captured: dict[str, Any] = {}
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     builder_module.build_slotflow_harness_graph(
         model=FakeListChatModel(responses=["ok"]),
@@ -119,15 +106,8 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
     )
 
     assert captured["tools"] == []
-    assert [item.name for item in captured["middleware"]] == [
-        "SlotFlowDanglingToolCallMiddleware",
-        "SlotFlowToolSafetyMiddleware",
-        "SlotFlowSummarizationMiddleware",
-        "SlotFlowSkillsPreflightMiddleware",
-        "SlotFlowUploadsMiddleware",
-        "SlotFlowArtifactDiscoveryMiddleware",
-        "SlotFlowRuntimeSummaryMiddleware",
-    ]
+    # node+edge graph: behavior toggles live in config_flags, no middleware list
+    assert captured["config_flags"].clarify_gate_enabled is True
 
 
 def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkeypatch) -> None:
@@ -135,11 +115,11 @@ def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkey
 
     captured: dict[str, Any] = {}
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     request = ChatStreamRequest(message="分析文件", files=["file_abc123abc123"])
     run_context = build_run_config(
@@ -163,17 +143,6 @@ def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkey
         harness_config=SlotFlowHarnessConfig(system_prompt="base prompt"),
     )
 
-    assert [item.name for item in captured["middleware"]] == [
-        "SlotFlowDanglingToolCallMiddleware",
-        "SlotFlowToolSafetyMiddleware",
-        "SlotFlowSummarizationMiddleware",
-        "SlotFlowSkillsPreflightMiddleware",
-        "SlotFlowUploadsMiddleware",
-        "SlotFlowClarifyGateMiddleware",
-        "SlotFlowTodoMiddleware",
-        "SlotFlowArtifactDiscoveryMiddleware",
-        "SlotFlowRuntimeSummaryMiddleware",
-    ]
     assert "<slotflow-uploaded-files>" not in captured["system_prompt"]
     assert "path=uploads/run_harness/report.md" not in captured["system_prompt"]
     assert "call workspace_read(path)" in captured["system_prompt"]
@@ -195,11 +164,11 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
 
     captured: dict[str, Any] = {}
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     builder_module.build_slotflow_harness_graph(
         model=ToolAwareFakeListChatModel(responses=["ok"]),
@@ -227,11 +196,11 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
 
     captured: dict[str, Any] = {}
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     builder_module.build_slotflow_harness_graph(
         model=ToolAwareFakeListChatModel(responses=["ok"]),
@@ -252,7 +221,17 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
         ),
     )
 
-    assert captured["middleware"] == []
+    # all behavior toggles disabled via config_flags
+    flags = captured["config_flags"]
+    assert not flags.runtime_summary_enabled
+    assert not flags.dangling_tool_call_enabled
+    assert not flags.tool_safety_enabled
+    assert not flags.artifact_discovery_enabled
+    assert not flags.summarization_enabled
+    assert not flags.skills_preflight_enabled
+    assert not flags.clarify_gate_enabled
+    assert not flags.uploads_enabled
+    assert not flags.todo_enabled
 
 
 def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None:

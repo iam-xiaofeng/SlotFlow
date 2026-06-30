@@ -232,11 +232,11 @@ def test_harness_builder_passes_sandbox_config_to_tool_registry(
         captured_tools_kwargs.update(kwargs)
         return []
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         return object()
 
     monkeypatch.setattr(builder_module, "build_harness_tools", fake_build_harness_tools)
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     builder_module.build_slotflow_harness_graph(
         model=ToolAwareFakeListChatModel(responses=["ok"]),

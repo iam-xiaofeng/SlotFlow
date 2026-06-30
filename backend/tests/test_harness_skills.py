@@ -103,11 +103,11 @@ def test_harness_builder_injects_enabled_skills_into_system_prompt(
     _write_skill(tmp_path, "alpha", description="Alpha skill")
     captured: dict[str, Any] = {}
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     builder_module.build_slotflow_harness_graph(
         model=FakeListChatModel(responses=["ok"]),

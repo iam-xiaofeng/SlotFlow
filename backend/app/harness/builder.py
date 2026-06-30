@@ -8,20 +8,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.chat.models import RunContext
 from app.harness.config import SlotFlowHarnessConfig
+from app.harness.graph import build_slotflow_graph
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
-from app.harness.middleware import build_harness_middleware
 from app.harness.skills import build_skills_prompt, load_enabled_skills
-from app.harness.state import SlotFlowAgentState
 from app.harness.tools import build_harness_tools
 from app.harness.utils import model_supports_tools
 
 if TYPE_CHECKING:
-    from langchain.agents.middleware import AgentMiddleware
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import BaseTool
     from langgraph.types import Checkpointer
@@ -34,12 +31,13 @@ def build_slotflow_harness_graph(
     harness_config: SlotFlowHarnessConfig,
     checkpointer: Checkpointer | None = None,
     tools: list[BaseTool] | None = None,
-    middleware: list[AgentMiddleware] | None = None,
+    middleware: "list | None" = None,
 ):
-    """创建 SlotFlow 本地 harness graph。
+    """创建 SlotFlow 本地 harness graph（node + edge 版本）。
 
-    模块 10 只落下边界，不急着引入真实 tools/skills/MCP/middleware。后续模块会逐步把
-    `tools` 和 `middleware` 从外部测试替身替换成 harness 内部 registry 的输出。
+    重构后改为 LangGraph 原生 `StateGraph`（见 `app.harness.graph`）。中间件逻辑已抽成
+    `app/harness/steps/*` 纯函数，由节点直接调用，顺序由边显式保证。`middleware` 参数
+    保留只为向后兼容签名，新 graph 不再使用 `AgentMiddleware`。
     """
 
     features = features_from_run_context(run_context)
@@ -58,29 +56,21 @@ def build_slotflow_harness_graph(
         subagent_config=harness_config.subagent_config,
     )
     selected_tools = built_tools if tools_supported else []
-
-    selected_middleware = build_harness_middleware(
-        features=features,
-        model=model,
-        run_context=run_context,
-        config=harness_config.middleware_config,
-        memory_store=harness_config.memory_store,
-        sandbox_config=harness_config.sandbox_config,
-        skills_root=harness_config.skills_root,
-        skills_config_store=harness_config.skills_config_store,
-        extra_middleware=middleware,
-        tools_enabled=tools_supported,
-    )
-
-    return _create_agent_graph(
+    return build_slotflow_graph(
         model=model,
         tools=selected_tools,
-        middleware=selected_middleware,
         system_prompt=build_system_prompt(
             harness_config=harness_config,
             features=features,
             run_context=run_context,
         ),
+        run_context=run_context,
+        features=features,
+        sandbox_config=harness_config.sandbox_config,
+        memory_store=harness_config.memory_store,
+        skills_root=harness_config.skills_root,
+        skills_config_store=harness_config.skills_config_store,
+        config_flags=harness_config.middleware_config,
         checkpointer=checkpointer,
     )
 
@@ -195,24 +185,3 @@ def build_mcp_status_prompt(mcp_config) -> list[str]:
         ]
     )
     return sections
-
-
-def _create_agent_graph(
-    *,
-    model: str | BaseChatModel,
-    tools: list[BaseTool],
-    middleware: list[AgentMiddleware],
-    system_prompt: str,
-    checkpointer: Checkpointer | None,
-):
-    """薄封装 LangChain `create_agent`，方便模块测试 monkeypatch 边界参数。"""
-
-    return create_agent(
-        model=model,
-        tools=tools,
-        middleware=middleware,
-        system_prompt=system_prompt,
-        state_schema=SlotFlowAgentState,
-        context_schema=RunContext,
-        checkpointer=checkpointer,
-    )
