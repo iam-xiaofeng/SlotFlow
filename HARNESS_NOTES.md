@@ -497,3 +497,13 @@ throwaway 探针 `/tmp/live_probe.py`（已删、未提交）跑四项：
 ToolNode 的 `_arun_one` 会 `await self._awrap_tool_call(...)` → 把协程当 awaitable await 出
 `"ToolMessage object can't be awaited"`（工具实际成功但 await 报错）。offline fake-model 测试不触发
 真实工具执行路径未暴露；改为 `async def` 后 live 通过。这正印证「live 探针不可省」（§5 同源教训）。
+
+### 13.7 迭代 6 补记（2026-06-30 续）：思考流原生 projection 死锁教训
+尝试用 langgraph v3 `AsyncChatModelStream.reasoning`/`.text` 原生 typed projection 直接顺序
+消费、替代手写队列交错，**实测死锁真实图**。根因：v3 projection channel 是**单消费者**
+（`StreamChannel.__aiter__` 只能调一次，第二次 raise）+ **caller-driven pump**
+（`_arequest_more` 驱动共享 graph pump，单 flight）。顺序 drain `.reasoning` 再 `.text` 时，
+pump 被 reasoning 独占，text 数据到了也推不进，死锁。现有「并发 pump 两个 channel 进 queue
+再交错输出」是绕开单消费者限制的**必要**做法，非冗余兼容代码。结论：保留现状；思考块延迟感
+是 v3 单消费者约束下的必要缓冲代价，不能用「换原生 API」简单消除。todo 丢失根因与子代理
+统一见 docs/refactor-plan.md §13。

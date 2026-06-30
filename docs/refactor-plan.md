@@ -387,3 +387,48 @@ git checkout -b refactor/langgraph-node-edge-graph
 - 主 agent 在 merge 前也不用一直拖着三个任务的中间过程；
 - 代价是 merge 多一次「读 N 个结果」的输入，问题越大这点越可忽略。
 依赖型任务（B 需要 A 的产出）仍走串行的 `tools` 路径，不扇出。
+
+---
+
+## 13. 迭代 6（2026-06-30 续）：todo 恢复 + 思考流调研 + 子代理统一 + 清理
+
+### 13.1 todo 功能丢失（用户反馈，已修）
+**根因**：node+edge 迁移时 `write_todos` 工具丢失。create_agent 时代它靠
+`SlotFlowTodoMiddleware` 继承官方 `TodoListMiddleware`、经 `.tools` 属性被 `create_agent`
+拾起；迁移后 `build_harness_tools` 从未把它加进去 → 模型无 `write_todos` 可调 → 无 todo。
+**修法**（改用 langgraph 原生，不留 middleware 兼容）：
+- `harness/steps/todo.py` 直接复用官方 `write_todos` 工具（返回
+  `Command(update={"todos","messages":[ToolMessage]})`，ToolNode 原生支持，state 已有 `todos`）；
+  抽 `SLOTFLOW_TODO_SYSTEM_PROMPT` + `todo_reminder_update` + 新增 `todo_parallel_call_guard`
+  （官方 `after_model` 禁止并行 `write_todos` 的等价物）为纯函数。
+- `harness/tools/registry.py`：`plan_enabled` 时把 `write_todos_tool` 加入工具面。
+- `harness/graph.py`：`pre_model` 注入 todo system prompt + reminder；`post_model` 加
+  `todo_parallel_call_guard`（与 subagent cap 并存，cap 结果优先）。
+验证：276 passed；ultra 有 `write_todos`、flash 无（plan gating 正确）。
+
+### 13.2 思考流延迟调研（已回退，保留现状 + 记录）
+用户反馈思考块延迟显示。调研 langgraph v3：`AsyncChatModelStream` 原生提供 `.reasoning` /
+`.text` typed projection（async iterable of deltas）。尝试改用原生 projection 顺序消费、
+移除 create_agent 时代的手写 `asyncio.Queue` 交错 pump。
+**结果**：实测死锁真实图。根因——v3 projection channel 是**单消费者** + **caller-driven pump**
+（`StreamChannel.__aiter__` 只能调用一次；`_arequest_more` 驱动共享 graph pump）。顺序消费
+`.reasoning` 再 `.text` 时，graph pump 被 reasoning projection 独占，text 的数据到了也无法
+推进，死锁。手写 queue 并发 pump 两个 channel 再交错输出，正是绕开单消费者限制的必要做法。
+**结论**：保留现有队列交错方案；延迟感来自交错缓冲，是 v3 单消费者约束下的必要代价，
+不是能简单用「原生 API」消除的。已回退改动，276 passed 恢复。教训记入 HARNESS_NOTES §13.7。
+
+### 13.3 子代理统一（移除最后一个 create_agent）
+`subagents/tools.py::SubagentTaskRunner` 原内部起 `create_agent` 子图，是重构后后端最后一个
+`create_agent` 调用点。改为 `build_slotflow_graph`（node+edge），子代理图用精简配置
+（关 clarify_gate/summarization/memory/skills_preflight/uploads/todo/artifact/runtime_summary，
+只留 dangling+tool_safety），与主图同一组装入口。`build_slotflow_graph` import 延迟到 `arun`
+内部，避免 graph↔subagents↔tools registry 循环导入。验证：子代理 task_tool 端到端测试通过。
+
+### 13.4 清理
+- `builder.py` 删除未使用的 `middleware` 参数（重构后无人传，`AgentMiddleware` 已删）。
+- 后端不再有任何 `create_agent` / `AgentMiddleware` 调用（grep 确认仅剩文档/注释历史引用）。
+- 补 `write_todos` 工具面断言到 `test_harness_tools` / `test_harness_builder`，防回归。
+
+### 13.5 验证
+`ruff check app tests` 通过；`pytest -q -k "not live"` **276 passed**。live 验证待用户在前端
+确认 todo 与思考流表现（思考流延迟非本次可消，见 §13.2）。
