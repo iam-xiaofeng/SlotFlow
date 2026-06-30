@@ -36,7 +36,7 @@ from app.harness.steps.skills_preflight import (
     skills_preflight_update,
 )
 from app.harness.steps.subagent_limit import cap_subagent_calls
-from app.harness.steps.todo import todo_reminder_update
+from app.harness.steps.todo import todo_parallel_call_guard, todo_reminder_update, write_todos_tool
 from app.harness.steps.tool_safety import build_error_tool_message, tool_call_name
 from app.harness.steps.uploads import uploads_update
 
@@ -203,6 +203,40 @@ def test_todo_reminder_reminds_when_todos_leave_context() -> None:
     assert isinstance(reminder, HumanMessage)
     assert reminder.name == "slotflow_todo_reminder"
     assert "[in_progress] 生成报告" in str(reminder.content)
+
+
+def test_write_todos_tool_is_registered_with_command_return() -> None:
+    assert write_todos_tool.name == "write_todos"
+    # The official tool returns a Command updating todos + a ToolMessage. InjectedToolCallId
+    # requires a full model ToolCall shape (as ToolNode provides in the graph).
+    tool_call = {
+        "name": "write_todos",
+        "args": {"todos": [{"content": "step", "status": "in_progress"}]},
+        "id": "c1",
+        "type": "tool_call",
+    }
+    cmd = write_todos_tool.invoke(tool_call)
+    assert cmd.update["todos"] == [{"content": "step", "status": "in_progress"}]
+    assert cmd.update["messages"][0].tool_call_id == "c1"
+
+
+def test_todo_parallel_call_guard_rejects_multiple_calls() -> None:
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "write_todos", "args": {"todos": []}, "id": "a", "type": "tool_call"},
+            {"name": "write_todos", "args": {"todos": []}, "id": "b", "type": "tool_call"},
+        ],
+    )
+    update = todo_parallel_call_guard(state={"messages": [HumanMessage("go"), msg]})
+    assert update is not None
+    assert len(update["messages"]) == 2
+    assert all(m.status == "error" for m in update["messages"])
+
+
+def test_todo_parallel_call_guard_allows_single_call() -> None:
+    msg = AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "a", "type": "tool_call"}])
+    assert todo_parallel_call_guard(state={"messages": [HumanMessage("go"), msg]}) is None
 
 
 # --- subagent limit --------------------------------------------------------

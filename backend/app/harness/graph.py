@@ -58,7 +58,7 @@ from app.harness.steps.skills_preflight import (
 )
 from app.harness.steps.subagent_limit import cap_subagent_calls
 from app.harness.steps.summarization import build_summarization_middleware
-from app.harness.steps.todo import todo_reminder_update
+from app.harness.steps.todo import SLOTFLOW_TODO_SYSTEM_PROMPT, todo_parallel_call_guard, todo_reminder_update
 from app.harness.steps.tool_safety import build_error_tool_message, tool_call_name
 from app.harness.steps.uploads import uploads_update
 
@@ -239,7 +239,7 @@ def make_pre_model_node(inputs: _GraphInputs):
         messages = list(state.get("messages") or [])
         updates: dict[str, Any] = {}
 
-        # todo reminder (before_model)
+        # todo reminder + system prompt (before_model / wrap_model_call parity)
         if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
             reminder = todo_reminder_update(state=state)
             if reminder is not None:
@@ -251,17 +251,23 @@ def make_pre_model_node(inputs: _GraphInputs):
             updates["llm_input_messages"] = repaired
             messages = repaired
 
-        # long-term memory system prompt injection (wrap_model_call)
+        # Compose the final system prompt for this step: base + todo section + memory section.
+        system_sections: list[str] = [inputs.system_prompt]
+        if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
+            system_sections.append(SLOTFLOW_TODO_SYSTEM_PROMPT)
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             memories = state.get("retrieved_memories") or []
             if memories:
-                base_system = SystemMessage(content=inputs.system_prompt)
+                base_system = SystemMessage(content="\n\n".join(system_sections))
                 enriched = append_memory_system_message(
                     base_system,
                     memories=memories,
                     tools_enabled=bool(inputs.tools),
                 )
-                updates["system_prompt"] = enriched.content
+                system_sections = [enriched.content]
+        composed = "\n\n".join(part for part in system_sections if part)
+        if composed and composed != inputs.system_prompt:
+            updates["system_prompt"] = composed
         return updates
 
     return pre_model
@@ -357,12 +363,21 @@ def make_post_model_node(inputs: _GraphInputs):
         state: SlotFlowAgentState,
         runtime: Runtime[RunContext],
     ) -> dict[str, Any]:
-        if not (flags.subagent_limit_enabled and inputs.features.subagent_enabled and inputs.tools):
-            return {}
-        return cap_subagent_calls(
-            state=state,
-            max_concurrent=flags.subagent_max_concurrent,
-        ) or {}
+        updates: dict[str, Any] = {}
+        if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
+            guard = todo_parallel_call_guard(state=state)
+            if guard is not None:
+                updates.update(guard)
+        if flags.subagent_limit_enabled and inputs.features.subagent_enabled and inputs.tools:
+            capped = cap_subagent_calls(
+                state=state,
+                max_concurrent=flags.subagent_max_concurrent,
+            )
+            if capped is not None:
+                # If the subagent cap trimmed the AIMessage, the parallel-call guard above
+                # (computed on the pre-trim message) is stale; prefer the cap result.
+                updates = capped
+        return updates
 
     return post_model
 

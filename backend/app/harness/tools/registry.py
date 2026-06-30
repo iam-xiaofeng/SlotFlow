@@ -15,6 +15,7 @@ from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore
 from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
 from app.harness.tools.builtins import ask_clarification_tool
+from app.harness.tools.todo import write_todos_tool
 from app.harness.tools.customization import build_customization_tools
 from app.harness.tools.network import build_network_tools
 from app.harness.tools.workspace import build_workspace_tools
@@ -70,10 +71,12 @@ def build_harness_tools(
             *mcp_tools,
         ],
     )
+    todo_tools = [write_todos_tool] if features.plan_enabled else []
     return dedupe_by_name(
         [
             *(extra_tools or []),
             ask_clarification_tool,
+            *todo_tools,
             *workspace_tools,
             *network_tools,
             *customization_tools,
