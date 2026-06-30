@@ -479,4 +479,21 @@ state schema（`harness/state.py::SlotFlowAgentState`）新增节点间显式通
 
 ### 13.6 离线验收
 `uv run ruff check app tests` 通过；`uv run pytest -q -k "not live"` **273 passed**（测试净减 1，因合并了
-重复的 async memory 注入用例；中间件单测迁移到 steps 测试后用例更聚焦）。live 验证（阶段 F）待跑。
+重复的 async memory 注入用例；中间件单测迁移到 steps 测试后用例更聚焦）。
+
+### 13.7 live 验证（阶段 F，真实 `deepseek-v4-pro` thinking，生产 `build_agent_adapter`）
+throwaway 探针 `/tmp/live_probe.py`（已删、未提交）跑四项：
+- **clarify**（pro「帮我做个表格」）：✅ 触发 `clarification.requested`，问题「您想制作什么内容的
+  表格？」+ 4 个最佳猜测选项 + 末尾自由输入，模型不脑补（`run.prepared→state.snapshot→
+  clarification.requested→run.finished`，无 message.delta）。
+- **memory**（pro「请记住：我叫张伟…控制工程研究生」）：✅ 流式完整回答（数百条 message.delta），
+  无报错、无 re-pop。
+- **todo**（ultra「实现计算器四则运算+测试」）：gate 先判定欠规约 → 触发澄清（带计算器形态选项），
+  符合「先问再做」设计；这是 gate 的正确行为，非回归。
+- **subagent**（ultra「三公司对比」）：模型判断为简单事实问题，自述用 web_search 直接答，未触发
+  task_tool——与 §6 记录的 subagent 自主委派仍是软行为一致（roadmap #2 主图并行分支后续做）。
+
+**live 探针抓到一个真 bug 并已修**：`_slotflow_async_tool_safety_wrapper` 原为「返回协程的同步函数」，
+ToolNode 的 `_arun_one` 会 `await self._awrap_tool_call(...)` → 把协程当 awaitable await 出
+`"ToolMessage object can't be awaited"`（工具实际成功但 await 报错）。offline fake-model 测试不触发
+真实工具执行路径未暴露；改为 `async def` 后 live 通过。这正印证「live 探针不可省」（§5 同源教训）。
