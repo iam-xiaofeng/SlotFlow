@@ -31,13 +31,11 @@ def build_slotflow_harness_graph(
     harness_config: SlotFlowHarnessConfig,
     checkpointer: Checkpointer | None = None,
     tools: list[BaseTool] | None = None,
-    middleware: "list | None" = None,
 ):
     """创建 SlotFlow 本地 harness graph（node + edge 版本）。
 
     重构后改为 LangGraph 原生 `StateGraph`（见 `app.harness.graph`）。中间件逻辑已抽成
-    `app/harness/steps/*` 纯函数，由节点直接调用，顺序由边显式保证。`middleware` 参数
-    保留只为向后兼容签名，新 graph 不再使用 `AgentMiddleware`。
+    `app/harness/steps/*` 纯函数，由节点直接调用，顺序由边显式保证。
     """
 
     features = features_from_run_context(run_context)

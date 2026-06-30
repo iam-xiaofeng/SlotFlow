@@ -7,13 +7,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool, tool
 
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
+from app.harness.middleware import SlotFlowMiddlewareConfig
+from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.subagents.config import SlotFlowSubagentConfig, SlotFlowSubagentProfile
 from app.harness.utils import message_role, model_supports_tools
 
@@ -115,15 +116,42 @@ class SubagentTaskRunner:
             )
 
         try:
-            graph = create_agent(
+            from app.harness.graph import build_slotflow_graph
+
+            sub_tools = usable_tools_for_model(
                 model=self._model,
-                tools=usable_tools_for_model(
-                    model=self._model,
-                    tools=self._environment_tools,
-                ),
+                tools=self._environment_tools,
+            )
+            sub_features = SlotFlowHarnessFeatures(
+                thinking_enabled=self._run_context.thinking_enabled,
+                plan_enabled=False,
+                subagent_enabled=False,
+            )
+            graph = build_slotflow_graph(
+                model=self._model,
+                tools=sub_tools,
                 system_prompt=build_subagent_system_prompt(
                     profile=profile,
                     run_context=self._run_context,
+                ),
+                run_context=self._run_context,
+                features=sub_features,
+                sandbox_config=SlotFlowSandboxConfig(),
+                memory_store=None,
+                skills_root=None,
+                skills_config_store=None,
+                config_flags=SlotFlowMiddlewareConfig(
+                    runtime_summary_enabled=False,
+                    dangling_tool_call_enabled=True,
+                    tool_safety_enabled=True,
+                    artifact_discovery_enabled=False,
+                    summarization_enabled=False,
+                    long_term_memory_enabled=False,
+                    skills_preflight_enabled=False,
+                    clarify_gate_enabled=False,
+                    uploads_enabled=False,
+                    todo_enabled=False,
+                    subagent_limit_enabled=False,
                 ),
             )
             result = await graph.ainvoke(
