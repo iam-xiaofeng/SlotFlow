@@ -17,7 +17,8 @@ dev:
 	@(cd frontend && pnpm dev) & \
 	(cd backend && uv run uvicorn app.main:app --env-file ./.env --reload)
 
-# Stop common local development server processes.
+# Stop local development servers by port (avoids pkill -f matching this recipe's
+# own shell, which was killing make itself).
 kill:
-	@pkill -f "pnpm dev" || true
-	@pkill -f "uvicorn" || true
+	@fuser -k 3000/tcp 2>/dev/null || true
+	@fuser -k 8000/tcp 2>/dev/null || true
