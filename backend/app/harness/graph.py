@@ -459,7 +459,7 @@ def _slotflow_tool_safety_wrapper(
         )
 
 
-def _slotflow_async_tool_safety_wrapper(
+async def _slotflow_async_tool_safety_wrapper(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[Any]],
 ) -> Any:
@@ -469,19 +469,15 @@ def _slotflow_async_tool_safety_wrapper(
             error_type="unknown_tool",
             message=f"tool is not registered: {tool_call_name(request.tool_call)!r}",
         )
-
-    async def _run():
-        try:
-            return await handler(request)
-        except Exception as exc:  # noqa: BLE001
-            return build_error_tool_message(
-                request.tool_call,
-                error_type="tool_execution_error",
-                message=str(exc),
-                exception_type=exc.__class__.__name__,
-            )
-
-    return _run()
+    try:
+        return await handler(request)
+    except Exception as exc:  # noqa: BLE001
+        return build_error_tool_message(
+            request.tool_call,
+            error_type="tool_execution_error",
+            message=str(exc),
+            exception_type=exc.__class__.__name__,
+        )
 
 
 def make_tools_node(tools: list[BaseTool]) -> ToolNode:
