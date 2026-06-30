@@ -105,7 +105,7 @@ def build_system_prompt(
             "",
             "<slotflow-long-term-memory-status>",
             f"enabled={harness_config.memory_store is not None}",
-            "When enabled, long-term memory instructions and tools are owned by SlotFlowLongTermMemoryMiddleware.",
+            "When enabled, long-term memory retrieval/injection/save is handled by the prepare/pre_model/finalize graph nodes.",
             "</slotflow-long-term-memory-status>",
         ]
     )

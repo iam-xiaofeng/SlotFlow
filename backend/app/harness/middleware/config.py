@@ -1,4 +1,9 @@
-"""SlotFlow harness middleware configuration."""
+"""SlotFlow harness graph behavior switches.
+
+重构后（node + edge graph）这些 flag 不再挑选 middleware，而是由 ``app.harness.graph``
+的各节点决定是否执行对应 step（见 ``app.harness/steps/*``）。名字保留为
+``SlotFlowMiddlewareConfig`` 以维持导入路径与 env 开关兼容。
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class SlotFlowMiddlewareConfig:
-    """Feature switches for SlotFlow-owned agent middleware."""
+    """Feature switches for the SlotFlow harness graph nodes."""
 
     runtime_summary_enabled: bool = True
     dangling_tool_call_enabled: bool = True

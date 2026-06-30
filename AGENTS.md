@@ -9,6 +9,8 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 > **See also `HARNESS_NOTES.md`** — the harness engineering log (agent-behavior problems,
 > what was tried, live-API test results, current state). Read it for the *why* behind the
 > clarify-gate and the known behavioral gaps (subagent / skill-discovery / proactive memory).
+> **2026-06-30**: the harness is now a LangGraph native `StateGraph` (node + edge), not
+> `create_agent` + middleware. See `HARNESS_NOTES.md` §13 and `docs/refactor-plan.md`.
 
 > **⚠️ Rule: fix root causes, not symptoms.** Treating a bug as a surface problem — patching
 > the visible symptom without tracing *why* it happens — does not make the problem smaller.
@@ -26,7 +28,7 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 > [`HARNESS_NOTES.md`](HARNESS_NOTES.md).** The "harness" is everything that shapes or constrains
 > the model: model selection, the clarify gate + `ask_clarification`, tool binding/dispatch,
 > thinking-mode handling, skills discovery/matching, MCP search, sub-agent delegation, memory
-> extraction, and the middleware chain. `HARNESS_NOTES.md` must let a reader starting from zero
+> extraction, and the graph node chain. `HARNESS_NOTES.md` must let a reader starting from zero
 > understand the **whole agent chain end to end** — for each piece: *why it is designed this way*,
 > *what problems were hit*, *what caused them*, *how they were solved*, and *the real result of
 > driving the current design through a live API* (e.g. prompts run via Claude Code / Codex against
@@ -60,12 +62,37 @@ streaming.
      `thinking_enabled`, plan/subagent flags, files.
 3. **`chat/runtime/adapter.py` (RuntimeBackedAgentAdapter)** builds the chat model via
    `runtime/models.create_chat_model` (routed by `RunContext.model_provider`) and assembles
-   the graph via `harness/builder.build_slotflow_harness_graph` — LangChain's prebuilt
-   `create_agent` + SlotFlow middleware + the tool registry (`harness/tools/registry`).
+   the graph via `harness/builder.build_slotflow_harness_graph` → `harness/graph.build_slotflow_graph`,
+   a **LangGraph native `StateGraph` (explicit node + edge)** plus the tool registry
+   (`harness/tools/registry`). The graph no longer uses LangChain `create_agent` or
+   `AgentMiddleware`; each former middleware's logic lives in `harness/steps/*` as a stateless
+   pure function called by a node, with order fixed by edges (see topology below).
 4. The graph streams with the **LangGraph v3 projection protocol**; each item is normalized
    by **`chat/agent_adapter/projections.py`** into a SlotFlow `AgentEvent` (`message.delta`
    with channel `reasoning`/`content`, `state.snapshot`, `tool.delta`,
    `clarification.requested`, `todo.updated`, `run.*`).
+
+**Graph topology (node + edge):**
+
+```
+START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model → route
+                                                                                                    ├─ tools → pre_model   (ReAct loop; ask_clarification interrupts here)
+                                                                                                    └─ finalize → END
+```
+
+- `prepare` (once/turn, all `before_agent`): runtime summary, uploads, skills preflight,
+  long-term-memory retrieval, artifact baseline.
+- `triage_gate` (first step only, pro/ultra): triage → `interrupt()` clarification; resume
+  injects the answer verbatim as a `HumanMessage`.
+- `pre_model` (every step): todo reminder, dangling-tool-call repair, long-term-memory
+  system-prompt injection.
+- `SlotFlowSummarizationMiddleware` (own node so the projection layer filters its internal
+  summary stream by node name): compresses history when token threshold exceeded.
+- `agent`: `model.bind_tools(tools)` call; reads `llm_input_messages` + `system_prompt`.
+- `post_model`: sub-agent concurrency cap on `task_tool`.
+- `route`: `tools_condition` → `tools` (ToolNode + SlotFlow tool-safety wrapper) or `finalize`.
+- `finalize` (once/turn, all `after_agent`): artifact new-entries, long-term-memory explicit
+  save + background LLM extraction.
 5. **`chat/sse.py`** encodes events as SSE; the frontend consumes them
    (`lib/chat-stream.ts` + `hooks/use-chat-stream*`) and renders the message, reasoning,
    todos, clarification picker, and workspace files.
@@ -82,8 +109,10 @@ backend/app/
   chat/runtime/         per-run assembly: env · config · models · checkpointer · adapter
   chat/agent_adapter/   LangGraph v3 projection -> SlotFlow AgentEvent
                         (events · projections · streaming)
-  harness/              the agent graph: builder, tools, skills, mcp, memory, sandbox,
-                        middleware, subagents
+  harness/              the agent graph: builder, graph (node+edge), steps (pure node
+                        logic), tools, skills, mcp, memory, sandbox, subagents
+  harness/middleware/   graph behavior switches only (SlotFlowMiddlewareConfig); no
+                        AgentMiddleware classes (deleted in node+edge refactor)
   {uploads,workspace,skills,mcp,memory}/  FastAPI route modules
   dependencies.py       shared app.state getters; clock.py: utc_now
 backend/tests/          offline test suite (no network); test_live_deepseek.py is opt-in
@@ -160,11 +189,11 @@ frontend/src/
   same way — no separate `SlotFlowClarificationMiddleware` anymore (it was deleted):
   - **Voluntary (the model asks)**: `tools/builtins.py::ask_clarification_tool` calls
     `interrupt(build_clarification_payload(...))` and returns the resume value as its result.
-  - **Forced gate (pro + ultra)**: `middleware/clarify_gate_middleware.py`
-    (`SlotFlowClarifyGateMiddleware`) runs one cheap structured **triage** on the **first model
-    step** of a fresh user turn; if not actionable, `abefore_model` calls `interrupt(payload)` and,
+  - **Forced gate (pro + ultra)**: the `triage_gate` graph node (logic in
+    `harness/steps/clarify_gate.py`) runs one cheap structured **triage** on the **first model
+    step** of a fresh user turn; if not actionable, it calls `interrupt(payload)` and,
     on resume, injects the user's answer **verbatim** as a `HumanMessage` so the model proceeds.
-    Prompts alone can't stop a model from one-shot-guessing, so this moves the decision into the graph.
+    Prompts alone't stop a model from one-shot-guessing, so this moves the decision into the graph.
   - The user's answer arrives via `Command(resume=<answer>)` and **is** the tool result / user
     message — no "rewrite the answered tool message" step. `build_clarification_payload` (now in
     `app/harness/clarification.py`) always appends a free-text `其他（自己输入）` option LAST; the
@@ -186,32 +215,34 @@ frontend/src/
     `interrupt()`/resume over any synthesized-response-then-continue scheme — `interrupt` pauses at
     tool execution with the model's REAL tool call (real `reasoning_content`), sidestepping the
     `"reasoning_content ... must be passed back"` trap that killed the old `wrap_model_call` path.
-  - The gate's `abefore_model` MUST `except GraphBubbleUp: raise` BEFORE its fail-open
-    `except Exception` (an interrupt is raised as a `GraphInterrupt`, an `Exception` subclass —
-    swallowing it would defeat the pause). On resume the hook replays, so triage runs once more
-    (cheap, benign). Only the first step is constrained; never gates twice in a thread (anti-loop).
+  - The `triage_gate` node MUST let `interrupt()`'s `GraphBubbleUp`/`GraphInterrupt` (an
+    `Exception` subclass) propagate — never swallow it in a fail-open `except Exception`, or the
+    pause is defeated. On resume LangGraph replays the node, so triage runs once more (cheap,
+    benign). Only the first step is constrained; never gates twice in a thread (anti-loop).
     Gated by `clarify_gate_enabled` (default on) + `run_context.mode in {pro, ultra}`. Scripted-model
     graph tests set `clarify_gate_enabled=False`. Live-validated against `deepseek-v4-pro`:
     underspecified requests clarify, the answer resumes the run, and the clarification does not re-pop.
 - **Long-term memory (cross-conversation, proactive)**: memory is **global, not thread-scoped** —
   `store.search_memories` ranks across ALL threads (`thread_id` is only a relevance bonus), so a
-  fact learned in one conversation is retrievable in any other. `long_term_memory.py`:
-  `before_agent`/`wrap_model_call` retrieve and inject relevant memories as **background context,
-  not commands** (the agent must still answer the current question). Saving has three paths:
+  fact learned in one conversation is retrievable in any other. Logic lives in
+  `harness/steps/long_term_memory.py`, called from graph nodes: `prepare` retrieves and `pre_model`
+  injects relevant memories as **background context, not commands** (the agent must still answer the
+  current question). Saving has three paths:
   (1) explicit `memory_save` tool — the model is nudged to call it proactively for durable facts;
-  (2) an explicit `请记住X` synchronous fast-path in `after_agent`; (3) **proactive background
-  extraction** — `aafter_agent` fires `memory/extractor.py` (`SlotFlowMemoryExtractor`)
-  fire-and-forget on the server loop, which asks the model to pull durable preferences/profile/
-  topic facts from the finished turn and saves them via `store.add_memory` (which dedups by
-  `source_run_id` and `kind+content`). This replaced the old brittle Chinese-regex extraction.
-  The extractor reuses the conversation model with `config={"callbacks": []}`; latency is hidden
-  because it does not block the run. Gated by `proactive_memory_extraction_enabled` (default on);
-  scripted-model graph tests set it `False`. Don't reintroduce "the middleware auto-saves" framing
-  in the prompt (it suppresses the model's own `memory_save`).
-- **Sub-agent concurrency cap**: `middleware/subagent_limit_middleware.py`
-  (`SlotFlowSubagentLimitMiddleware`, `after_model`) truncates excess parallel `task_tool` calls
-  on a single model step down to `subagent_max_concurrent` (default 3), a graph-level guard that
-  preserves non-`task_tool` calls and the message's `reasoning_content`. Registered when
+  (2) an explicit `请记住X` synchronous fast-path in `finalize` (`explicit_save_update`); (3)
+  **proactive background extraction** — `finalize` fires `memory/extractor.py`
+  (`SlotFlowMemoryExtractor`) fire-and-forget on the server loop, which asks the model to pull
+  durable preferences/profile/topic facts from the finished turn and saves them via
+  `store.add_memory` (which dedups by `source_run_id` and `kind+content`). This replaced the old
+  brittle Chinese-regex extraction. The extractor reuses the conversation model with
+  `config={"callbacks": []}`; latency is hidden because it does not block the run. Gated by
+  `proactive_memory_extraction_enabled` (default on); scripted-model graph tests set it `False`.
+  Don't reintroduce "the auto-saves" framing in the prompt (it suppresses the model's own
+  `memory_save`).
+- **Sub-agent concurrency cap**: the `post_model` graph node (logic in
+  `harness/steps/subagent_limit.py::cap_subagent_calls`) truncates excess parallel `task_tool`
+  calls on a single model step down to `subagent_max_concurrent` (default 3), a graph-level guard
+  that preserves non-`task_tool` calls and the message's `reasoning_content`. Active when
   `subagent_limit_enabled` + `features.subagent_enabled`.
 - **Skill discovery (cross-tool, cached)**: `skill_match` → `find-skills` → `search_skill_repos`.
   Skills use the open **SKILL.md** standard shared by Claude Code, OpenAI Codex (`.agents/skills`)
@@ -221,27 +252,41 @@ frontend/src/
   (`match_installed_skills` in `tools/customization.py`) is memoized with a short TTL so the skills
   preflight and a later `skill_match` in the same turn don't re-scan disk; `skill_install` calls
   `invalidate_skill_match_cache()`.
-- **Don't replace `create_agent`**: the harness intentionally builds on LangChain's
-  prebuilt agent; provider quirks are handled in the model subclass + projection layer.
+- **Node + edge graph (2026-06-30 refactor)**: the harness now uses a LangGraph native
+  `StateGraph` (`harness/graph.py`) instead of LangChain `create_agent` + `AgentMiddleware`.
+  Each former middleware is a stateless function in `harness/steps/*` called by a named node;
+  order is fixed by edges. Provider quirks are still handled in the model subclass + projection
+  layer. `AgentMiddleware` classes and the middleware registry were deleted; only
+  `SlotFlowMiddlewareConfig` (behavior switches consumed by nodes) remains.
 
 ## Roadmap (next steps)
 
 The 2026-06 DeerFlow-alignment pass (clarify slim-down, proactive memory, sub-agent cap, skill
-cache — see `HARNESS_NOTES.md` §11) is done and live-validated. Known follow-ups, roughly ordered:
+cache — see `HARNESS_NOTES.md` §11) is done and live-validated. The 2026-06-30 node+edge refactor
+(`create_agent`+middleware → LangGraph `StateGraph`) is done (see `HARNESS_NOTES.md` §13). Known
+follow-ups, roughly ordered:
 
-1. **Memory dedup / near-duplicates** — the background extractor and the model's own `memory_save`
+1. **Memory rewrite to mem0** — replace the hand-written `harness/memory/store.py` layer with
+   mem0 OSS local-first (vector_store=local sqlite-vec/qdrant, embedder=OpenAI-compatible embedding
+   API reusing existing relay, llm=conversation model). Keep `LongTermMemory` step shape; swap the
+   store calls to `add/search/get_all`. This is a standalone post-refactor phase (not mixed into the
+   graph migration). See `docs/refactor-plan.md` §10.
+2. **Main-graph parallel sub-agents (`Send`+`merge`)** — the current `post_model` cap guards
+   `task_tool` delegation; upgrade to real main-graph parallel branches (route → `Send(subagent)×N`
+   → `merge` → `pre_model`) for independent tasks (better token economy via context isolation).
+3. **Memory dedup / near-duplicates** — the background extractor and the model's own `memory_save`
    can both fire in one turn and store near-duplicate facts (observed: a Chinese preference saved
    twice with different wording). `store.add_memory` only dedups on exact `kind+content`. Make
    background extraction skip when `memory_save` already fired this turn (current `run_id` match in
    `memory_save_tool_used_for_run` is too strict), and/or add a light semantic merge.
-2. **Memory normalization bloat** — `store.py::canonicalize_memory_content` still carries
+4. **Memory normalization bloat** — `store.py::canonicalize_memory_content` still carries
    hand-written Chinese regex with hardcoded values ("控制工程"/"研究生"). LLM-extracted content is
    already clean; this can be simplified once the extractor is the primary path.
-3. **Sub-agent live test** — the concurrency cap is unit-tested only; add an end-to-end live check
+5. **Sub-agent live test** — the concurrency cap is unit-tested only; add an end-to-end live check
    that real parallel `task_tool` delegation is capped and synthesized correctly.
-4. **MCP context bloat** — consider DeerFlow's `tool_search` deferred-schema pattern (inject tool
+6. **MCP context bloat** — consider DeerFlow's `tool_search` deferred-schema pattern (inject tool
    names, load full schemas on demand) when many MCP tools are configured.
-5. **Ship it** — the harness-redesign branch is unpushed; open a PR (required check: `Verify`).
+7. **Ship it** — the refactor branch is unpushed; open a PR (required check: `Verify`).
 
 ## Build / verify
 

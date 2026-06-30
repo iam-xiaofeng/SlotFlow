@@ -391,3 +391,92 @@ HumanMessage 不会被 messages 投影流式输出**——所以那段是**真�
 `test_agent_adapter.py`(adapter 两回合:答后不 re-pop)、`test_clarify_gate_middleware.py`(门 interrupt 端到端)、
 `test_harness_middleware.py`/`test_harness_builder.py`/`test_tool_registry.py`(去掉已删中间件/工具)。
 
+
+---
+
+## 13. 迭代 5(2026-06-30):`create_agent`+middleware → LangGraph node+edge graph
+
+> 本节所有论断均对照当前代码核实(文件:模块),离线 `pytest -q -k "not live"` **273 passed**、
+> `ruff check app tests` 通过。live 验证待阶段 F。给从 0 接手的人:读 §12 + 本节即可理解当前 harness。
+
+### 13.0 TL;DR
+- 把 LangChain `create_agent` 单 ReAct 循环 + 11 个 `AgentMiddleware` 整体迁移到 LangGraph 原生
+  `StateGraph`（显式 node + edge）。`harness/builder.py` 不再调 `create_agent`，改调
+  `harness/graph.py::build_slotflow_graph`。`AgentMiddleware` 子类与 `build_harness_middleware` 注册表
+  全部删除；只保留 `SlotFlowMiddlewareConfig`（行为开关，被图节点消费）。
+- 每个原中间件的可复用逻辑抽成 `harness/steps/*` 无状态纯函数，由具名节点直接调用，顺序由边显式
+  保证（不再依赖 registry append 顺序）。
+- HITL、记忆、子代理上限、reasoning 投影等不变量全部沿用 §12.6；SSE 事件契约与前端零改动。
+
+### 13.1 为什么迁（根因，非跟风）
+- §11 已确认 DeerFlow 也是 `create_agent`+middleware，「照 DeerFlow 改成图」是伪命题。但 SlotFlow 自己
+  的诉求是：**链路严格按规定的路径运行 + 可可视化 + HITL/多 agent 协作有更清晰的扩展位**。middleware
+  的 hook 桶 + registry append 顺序让流程藏在隐式约定里；`interrupt()` 靠 `abefore_model` 里
+  `except GraphBubbleUp: raise` 在 fail-open 之前这种易错顺序。节点化后这些变成显式拓扑与线性节点。
+
+### 13.2 目标拓扑（代码核实：`harness/graph.py::build_slotflow_graph`）
+```
+START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model → route
+                                                                                              ├─ tools → pre_model
+                                                                                              └─ finalize → END
+```
+节点职责（对应 steps 模块）：
+- `prepare`（每回合一次）：`runtime_summary` / `uploads` / `skills_preflight` / 记忆检索(`long_term_memory.retrieve_memories`) / 产物基线(`artifact_discovery.artifact_baseline`)。
+- `triage_gate`（仅首步，pro/ultra）：`clarify_gate.run_triage` → 不可做则 `clarify_via_interrupt`（`interrupt`+答案 `HumanMessage`）。
+- `pre_model`（每步）：`todo_reminder_update` / `repair_dangling_tool_calls` / 记忆 system 注入(`append_memory_system_message`)。
+- `SlotFlowSummarizationMiddleware`（独立节点，名字固定）：复用官方 `SummarizationMiddleware.abefore_model` 的 `RemoveMessage`+`lc_source` 逻辑。
+- `agent`：`model.bind_tools(tools)` 调用，读 `state.llm_input_messages` + `state.system_prompt`。
+- `post_model`：`subagent_limit.cap_subagent_calls` 截断超额 `task_tool`。
+- `route`：官方 `tools_condition` → `tools` / `finalize`。
+- `tools`：官方 `ToolNode` + SlotFlow `tool_safety` wrapper（`wrap_tool_call`/`awrap_tool_call` 注入，error ToolMessage 格式不变）。
+- `finalize`（每回合一次）：`artifact_finalize_update` / `explicit_save_update` / `maybe_schedule_extraction`（后台 LLM 抽取）。
+
+state schema（`harness/state.py::SlotFlowAgentState`）新增节点间显式通道：
+`llm_input_messages` / `system_prompt` / `retrieved_memories` / `artifacts_baseline`（替代隐式临时键）。
+`messages`/`slotflow`/`todos` 不变。
+
+### 13.3 关键设计点与踩坑（代码核实）
+1. **summarization 必须是独立节点（根因级修复，非补丁）**：若把 summarization 埋在 `pre_model` 节点内，
+   其内部 summary model call 会以 `pre_model` 节点名 stream；投影层 `is_summarization_node_name` 匹配
+   `"SummarizationMiddleware"` 子串，识别不到 → 摘要文本泄漏进 `message.delta`（与 §12.3 模型回显同源：
+   内部小调用与主链路共享事件流）。给 summarization 一个节点名固定为 `SlotFlowSummarizationMiddleware`
+   的独立节点，投影层按节点名过滤其内部 stream，`context.compressing` 仍正常触发。**这是把根因（节点
+   归属）修对，而不是在投影层加更多特判。**
+2. **复用官方实现，不重写**：`ToolNode` / `tools_condition` / `SummarizationMiddleware`（含
+   `RemoveMessage`+`lc_source` 标签）直接复用；`Send` 留给后续主图并行分支。
+3. **agent 节点用 `RunnableCallable(func, afunc)` 包装**：`add_node` 不接受 `(sync, async)` tuple；
+   `RunnableCallable` 同时承载两态。节点 `config` 参数须类型为 `RunnableConfig | None`（`from __future__
+   import annotations` 会字符串化注解，触发 LangGraph 表层 UserWarning，行为无影响）。
+4. **HITL 两条路径不变**：自愿工具 `ask_clarification` 在 `tools` 节点 `interrupt`；强制门在 `triage_gate`
+   节点 `interrupt`。resume 检测仍由 `streaming.py:: _pending_interrupt` 读 `graph.aget_state().interrupts`，
+   前端零改动。澄清事件仍只来自 pending interrupt（re-popup 根因修复保留）。
+5. **`triage_gate` / `finalize` 只在首步/末步有效**：靠拓扑天然保证（`triage_gate` 内还判 fresh user turn +
+  已澄清防循环；`finalize` 不在循环边上）。`prepare`/`finalize` 每回合一次 likewise 由拓扑保证。
+
+### 13.4 测试形态迁移
+- 中间件单测整体迁移到 `tests/test_harness_steps.py`（19 用例覆盖全部 steps 纯函数）。
+- `test_harness_middleware.py` → `test_harness_graph_integration.py`（只留两个 graph 级集成测试）。
+- `test_clarify_gate_middleware.py` → `test_clarify_gate.py`（steps + `build_slotflow_harness_graph` 端到端
+  interrupt/resume，monkeypatch `run_triage` 强制 non-actionable）。
+- `test_subagent_limit_middleware.py` → `test_subagent_limit.py`（`cap_subagent_calls` step）。
+- `test_harness_memory.py` 中间件单测改为 `explicit_save_update`/`append_memory_system_message`/
+  `retrieve_memories`/`aextract_and_save`/`build_memory_tools` 等 steps 测试。
+- `test_agent_adapter.py` 的 summarization 过滤测试改为 node graph（3 条 response：turn1 回答、summary 文本、
+  turn2 最终回答），验证 `context.compressing` 触发且 summary 不泄漏、最终答复正常流出。
+- `test_harness_builder/skills/sandbox` 改为 monkeypatch `build_slotflow_graph` 并断言 `config_flags`
+  （node+edge 行为开关）而非 middleware 名称列表。
+
+### 13.5 更新后的不变量（勿回归，§12.6 仍有效，本节补充）
+- 不强制 `tool_choice`；内部小调用 `config={"callbacks": []}`；模型客户端 `max_retries>=2`。
+- **summarization 必须是节点名含 `SlotFlowSummarizationMiddleware` 的独立节点**，不能内联进 `pre_model`
+  （否则摘要 stream 泄漏）。投影层 `is_summarization_node_name` 靠节点名过滤。
+- **`interrupt()` 必须在节点函数体内直接调用**，不能被 `except Exception` 吞掉（`GraphInterrupt` 是
+  `Exception` 子类）。`triage_gate` 节点沿用「让 `GraphBubbleUp` 先抛」的写法。
+- 澄清事件只能来自 pending interrupt；门注入答案用用户原话 `HumanMessage`，不加元包装。
+- state 节点间通道（`llm_input_messages`/`system_prompt`/`retrieved_memories`/`artifacts_baseline`）显式
+  声明在 `SlotFlowAgentState`，不要再用 `__`-前缀临时键塞 state。
+- 记忆层本次**未改**（仍 `harness/memory/store.py` 手写层）；mem0 重写是后续独立阶段（roadmap #1）。
+
+### 13.6 离线验收
+`uv run ruff check app tests` 通过；`uv run pytest -q -k "not live"` **273 passed**（测试净减 1，因合并了
+重复的 async memory 注入用例；中间件单测迁移到 steps 测试后用例更聚焦）。live 验证（阶段 F）待跑。
