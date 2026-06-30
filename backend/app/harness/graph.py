@@ -221,7 +221,7 @@ def make_triage_gate_node(inputs: _GraphInputs):
 
 def make_pre_model_node(inputs: _GraphInputs):
     flags = inputs.config_flags
-    summarization_mw = (
+    (
         build_summarization_middleware(
             inputs.model,
             trigger_tokens=flags.summarization_trigger_tokens,
@@ -251,18 +251,6 @@ def make_pre_model_node(inputs: _GraphInputs):
             updates["llm_input_messages"] = repaired
             messages = repaired
 
-        # summarization (wrap_model_call) -> uses official SummarizationMiddleware logic
-        if summarization_mw is not None:
-            summary_update = summarization_mw.before_model(
-                {"messages": messages},
-                runtime,
-            )
-            if summary_update is not None:
-                summarized = summary_update.get("messages")
-                if summarized is not None:
-                    updates["llm_input_messages"] = summarized
-                    messages = summarized
-
         # long-term memory system prompt injection (wrap_model_call)
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             memories = state.get("retrieved_memories") or []
@@ -277,6 +265,48 @@ def make_pre_model_node(inputs: _GraphInputs):
         return updates
 
     return pre_model
+
+
+
+# ---------------------------------------------------------------------------
+# summarization node: own node so the projection layer filters its stream
+# ---------------------------------------------------------------------------
+
+SUMMARIZATION_NODE_NAME = "SlotFlowSummarizationMiddleware"
+
+
+def make_summarization_node(inputs: _GraphInputs):
+    flags = inputs.config_flags
+    summarization_mw = (
+        build_summarization_middleware(
+            inputs.model,
+            trigger_tokens=flags.summarization_trigger_tokens,
+            keep_messages=flags.summarization_keep_messages,
+            trim_tokens_to_summarize=flags.summarization_trim_tokens,
+        )
+        if flags.summarization_enabled
+        else None
+    )
+
+    async def summarize(
+        state: SlotFlowAgentState,
+        runtime: Runtime[RunContext],
+    ) -> dict[str, Any]:
+        if summarization_mw is None:
+            return {}
+        messages = list(state.get("llm_input_messages") or state.get("messages") or [])
+        summary_update = await summarization_mw.abefore_model(
+            {"messages": messages},
+            runtime,
+        )
+        if summary_update is None:
+            return {}
+        summarized = summary_update.get("messages")
+        if summarized is None:
+            return {}
+        return {"messages": summarized, "llm_input_messages": summarized}
+
+    return summarize
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +531,7 @@ def build_slotflow_graph(
     graph.add_node("prepare", make_prepare_node(inputs))
     graph.add_node("triage_gate", make_triage_gate_node(inputs))
     graph.add_node("pre_model", make_pre_model_node(inputs))
+    graph.add_node(SUMMARIZATION_NODE_NAME, make_summarization_node(inputs))
     agent_async, agent_sync = make_agent_node(inputs)
     graph.add_node("agent", RunnableCallable(agent_sync, agent_async, name="agent"))
     graph.add_node("post_model", make_post_model_node(inputs))
@@ -510,7 +541,8 @@ def build_slotflow_graph(
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "triage_gate")
     graph.add_edge("triage_gate", "pre_model")
-    graph.add_edge("pre_model", "agent")
+    graph.add_edge("pre_model", SUMMARIZATION_NODE_NAME)
+    graph.add_edge(SUMMARIZATION_NODE_NAME, "agent")
     graph.add_edge("agent", "post_model")
     graph.add_conditional_edges(
         "post_model",

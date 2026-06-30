@@ -6,10 +6,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.runtime import Runtime
 
 from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
@@ -18,12 +16,15 @@ from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.memory import SlotFlowMemoryStore
 from app.harness.memory.extractor import SlotFlowMemoryExtractor, parse_extracted_facts
-from app.harness.middleware import SlotFlowLongTermMemoryMiddleware
-from app.harness.middleware.config import SlotFlowMiddlewareConfig
-from app.harness.middleware.long_term_memory import (
+from app.harness.middleware import SlotFlowMiddlewareConfig
+from app.harness.steps.long_term_memory import (
+    append_memory_system_message,
     build_extraction_conversation,
     build_turn_memory_content,
+    explicit_save_update,
+    retrieve_memories,
 )
+from app.harness.tools.memory import build_memory_tools
 from app.main import create_app
 
 
@@ -98,18 +99,16 @@ def test_memory_store_touches_existing_kind_content_instead_of_adding(tmp_path: 
     assert [item.id for item in store.list_memories(limit=10)] == [first.id]
 
 
-def test_memory_middleware_saves_latest_turn(tmp_path: Path) -> None:
+def test_explicit_save_update_saves_latest_turn(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
-    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
 
-    update = middleware.after_agent(
-        {
-            "messages": [
-                HumanMessage(content="记住我喜欢中文"),
-                AIMessage(content="我会记住。"),
-            ]
-        },
-        Runtime(context=_context()),
+    update = explicit_save_update(
+        messages=[
+            HumanMessage(content="记住我喜欢中文"),
+            AIMessage(content="我会记住。"),
+        ],
+        context=_context(),
+        memory_store=store,
     )
 
     saved = update["slotflow"]["long_term_memory_saved"]
@@ -119,34 +118,20 @@ def test_memory_middleware_saves_latest_turn(tmp_path: Path) -> None:
     assert store.list_memories(thread_id="thread_memory")[0].id == saved["id"]
 
 
-def test_memory_middleware_skips_auto_save_after_memory_save_tool(tmp_path: Path) -> None:
+def test_explicit_save_update_skips_after_memory_save_tool(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     context = _context()
-    tools = {
-        item.name: item
-        for item in SlotFlowLongTermMemoryMiddleware(
-            memory_store=store,
-            run_context=context,
-        ).tools
-    }
-    tool_result = tools["memory_save"].invoke(
-        {"content": "我喜欢中文", "kind": "preference"}
-    )
-    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
+    tools = {item.name: item for item in build_memory_tools(memory_store=store, run_context=context)}
+    tool_result = tools["memory_save"].invoke({"content": "我喜欢中文", "kind": "preference"})
 
-    update = middleware.after_agent(
-        {
-            "messages": [
-                HumanMessage(content="记住我喜欢中文"),
-                ToolMessage(
-                    content=tool_result,
-                    name="memory_save",
-                    tool_call_id="call_memory_save",
-                ),
-                AIMessage(content="已记住。"),
-            ]
-        },
-        Runtime(context=context),
+    update = explicit_save_update(
+        messages=[
+            HumanMessage(content="记住我喜欢中文"),
+            ToolMessage(content=tool_result, name="memory_save", tool_call_id="call_memory_save"),
+            AIMessage(content="已记住。"),
+        ],
+        context=context,
+        memory_store=store,
     )
 
     assert update is None
@@ -155,85 +140,44 @@ def test_memory_middleware_skips_auto_save_after_memory_save_tool(tmp_path: Path
     assert records[0].content == "用户的偏好是：喜欢中文。"
 
 
-def test_memory_middleware_injects_relevant_memories_into_model_request(tmp_path: Path) -> None:
+def test_append_memory_system_message_injects_relevant_memories(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     store.add_memory(
         thread_id="other_thread",
         source_run_id="run_old",
         content="用户喜欢简洁回答",
     )
-    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
-    captured: dict[str, ModelRequest] = {}
-    base_request = ModelRequest(
-        model=FakeListChatModel(responses=["ok"]),
+    memories = retrieve_memories(
         messages=[HumanMessage(content="请简洁解释 MCP")],
-        system_message=SystemMessage(content="base system"),
-        runtime=Runtime(context=_context()),
+        context=_context(),
+        memory_store=store,
+    )
+    system_message = append_memory_system_message(
+        SystemMessage(content="base system"),
+        memories=memories,
     )
 
-    def handler(request: ModelRequest) -> ModelResponse:
-        captured["request"] = request
-        return ModelResponse(result=[AIMessage(content="ok")])
-
-    middleware.wrap_model_call(base_request, handler)
-
-    system_content = captured["request"].system_message.content
+    system_content = system_message.content
     assert "base system" in system_content
     assert "<slotflow-long-term-memory>" in system_content
     assert "用户记录：用户喜欢简洁回答。" in system_content
 
 
-def test_memory_middleware_injects_capability_prompt_without_matches(tmp_path: Path) -> None:
+def test_append_memory_system_message_injects_capability_prompt_without_matches(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
-    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
-    captured: dict[str, ModelRequest] = {}
-    base_request = ModelRequest(
-        model=FakeListChatModel(responses=["ok"]),
+    memories = retrieve_memories(
         messages=[HumanMessage(content="你有没有长期记忆？")],
-        system_message=SystemMessage(content="base system"),
-        runtime=Runtime(context=_context()),
+        context=_context(),
+        memory_store=store,
+    )
+    system_message = append_memory_system_message(
+        SystemMessage(content="base system"),
+        memories=memories,
     )
 
-    def handler(request: ModelRequest) -> ModelResponse:
-        captured["request"] = request
-        return ModelResponse(result=[AIMessage(content="ok")])
-
-    middleware.wrap_model_call(base_request, handler)
-
-    system_content = captured["request"].system_message.content
+    system_content = system_message.content
     assert "SlotFlow 本地长期记忆已启用" in system_content
     assert "本轮没有检索到相关长期记忆" in system_content
-
-
-@pytest.mark.asyncio
-async def test_memory_middleware_injects_relevant_memories_in_async_model_request(
-    tmp_path: Path,
-) -> None:
-    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
-    store.add_memory(
-        thread_id="other_thread",
-        source_run_id="run_old",
-        content="用户喜欢简洁回答",
-    )
-    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store)
-    captured: dict[str, ModelRequest] = {}
-    base_request = ModelRequest(
-        model=FakeListChatModel(responses=["ok"]),
-        messages=[HumanMessage(content="请简洁解释 MCP")],
-        system_message=SystemMessage(content="base system"),
-        runtime=Runtime(context=_context()),
-    )
-
-    async def handler(request: ModelRequest) -> ModelResponse:
-        captured["request"] = request
-        return ModelResponse(result=[AIMessage(content="ok")])
-
-    await middleware.awrap_model_call(base_request, handler)
-
-    system_content = captured["request"].system_message.content
-    assert "base system" in system_content
-    assert "<slotflow-long-term-memory>" in system_content
-    assert "用户记录：用户喜欢简洁回答。" in system_content
 
 
 def test_build_turn_memory_content_ignores_generic_turns() -> None:
@@ -314,16 +258,21 @@ async def test_memory_extractor_reads_facts_from_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_middleware_background_extraction_saves_facts(tmp_path: Path) -> None:
+async def test_background_extraction_saves_facts(tmp_path: Path) -> None:
+    from app.harness.memory.extractor import SlotFlowMemoryExtractor
+    from app.harness.steps.long_term_memory import aextract_and_save
+
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     model = FakeListChatModel(
         responses=['[{"kind": "profile", "content": "用户是控制工程硕士"}]']
     )
-    middleware = SlotFlowLongTermMemoryMiddleware(memory_store=store, model=model)
+    extractor = SlotFlowMemoryExtractor(model)
 
-    await middleware._aextract_and_save(
-        "User: 我是控制工程硕士\nAssistant: 了解",
-        _context(),
+    await aextract_and_save(
+        conversation="User: 我是控制工程硕士\nAssistant: 了解",
+        context=_context(),
+        extractor=extractor,
+        memory_store=store,
     )
 
     records = store.list_memories(thread_id="thread_memory")
@@ -332,15 +281,9 @@ async def test_memory_middleware_background_extraction_saves_facts(tmp_path: Pat
     assert records[0].metadata["extraction"] == "llm"
 
 
-def test_memory_middleware_tools_save_and_list_memories(tmp_path: Path) -> None:
+def test_memory_tools_save_and_list_memories(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
-    tools = {
-        item.name: item
-        for item in SlotFlowLongTermMemoryMiddleware(
-            memory_store=store,
-            run_context=_context(),
-        ).tools
-    }
+    tools = {item.name: item for item in build_memory_tools(memory_store=store, run_context=_context())}
 
     save_result = tools["memory_save"].invoke({"content": "用户喜欢中文回答"})
     list_result = tools["memory_list"].invoke({"query": "中文", "limit": 5})
@@ -349,14 +292,10 @@ def test_memory_middleware_tools_save_and_list_memories(tmp_path: Path) -> None:
     assert "用户记录：用户喜欢中文回答。" in list_result
 
 
-def test_memory_middleware_can_disable_tools(tmp_path: Path) -> None:
+def test_build_memory_tools_returns_four_tools(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
-    middleware = SlotFlowLongTermMemoryMiddleware(
-        memory_store=store,
-        tools_enabled=False,
-    )
-
-    assert middleware.tools == []
+    tools = build_memory_tools(memory_store=store, run_context=_context())
+    assert [t.name for t in tools] == ["memory_list", "memory_save", "memory_update", "memory_delete"]
 
 
 def test_memory_api_create_update_and_delete(tmp_path: Path) -> None:

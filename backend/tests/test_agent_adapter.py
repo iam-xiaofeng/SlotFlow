@@ -648,23 +648,44 @@ async def test_langgraph_event_adapter_drains_summarization_substream_without_le
 
 @pytest.mark.asyncio
 async def test_langgraph_event_adapter_filters_real_summarization_middleware_stream() -> None:
-    from langchain.agents import create_agent
-    from langchain_core.language_models.fake_chat_models import FakeListChatModel
     from langgraph.checkpoint.memory import InMemorySaver
 
-    from app.harness.middleware import SlotFlowSummarizationMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from app.harness.builder import build_slotflow_harness_graph
+    from app.harness.config import SlotFlowHarnessConfig
+    from app.harness.middleware import SlotFlowMiddlewareConfig
+    from app.chat.run_config import build_run_config
 
-    graph = create_agent(
-        model=FakeListChatModel(responses=["旧回答", "最终答复"]),
-        tools=[],
-        middleware=[
-            SlotFlowSummarizationMiddleware(
-                model=FakeListChatModel(responses=["Summary for next model call"]),
-                trigger_tokens=1,
-                keep_messages=1,
-                trim_tokens_to_summarize=100,
-            )
-        ],
+    class _ToolAware(FakeMessagesListChatModel):
+        def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+            return self
+
+    # The summarization node reuses the chat model for its internal summary call (advancing
+    # the cursor once), so we provide: turn-1 answer, turn-2 summary text (filtered by node
+    # name), turn-2 final answer.
+    chat_model = _ToolAware(
+        responses=[
+            AIMessage(content="旧回答"),
+            AIMessage(content="Summary for next model call"),
+            AIMessage(content="最终答复"),
+        ]
+    )
+    request = ChatStreamRequest(message="旧上下文", mode="flash")
+    bundle = build_run_config(thread_id="tsum", run_id="r1", request=request)
+    graph = build_slotflow_harness_graph(
+        model=chat_model,
+        run_context=bundle.context,
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="你是测试助手。",
+            middleware_config=SlotFlowMiddlewareConfig(
+                clarify_gate_enabled=False,
+                summarization_enabled=True,
+                summarization_trigger_tokens=1,
+                summarization_keep_messages=1,
+                summarization_trim_tokens=100,
+            ),
+        ),
         checkpointer=InMemorySaver(),
     )
     adapter = LangGraphEventAgentAdapter(graph)
@@ -672,27 +693,27 @@ async def test_langgraph_event_adapter_filters_real_summarization_middleware_str
     await collect_agent_events(
         adapter.stream_events(
             request=ChatStreamRequest(message="旧上下文"),
-            bundle=_bundle(ChatStreamRequest(message="旧上下文")),
+            bundle=bundle,
         )
     )
+    # Resume on the same thread so turn-2 sees turn-1 history and triggers summarization.
     events = await collect_agent_events(
         adapter.stream_events(
             request=ChatStreamRequest(message="继续"),
-            bundle=_bundle(ChatStreamRequest(message="继续")),
+            bundle=build_run_config(thread_id="tsum", run_id="r2", request=ChatStreamRequest(message="继续")),
         )
     )
 
     assert "context.compressing" in [event.event for event in events]
-    assert "Summary for next model call" not in "".join(
+    # The summary node's internal model stream is filtered by node name; only the agent
+    # node's final answer should surface as message.delta.
+    deltas = "".join(
         str(event.data.get("delta", ""))
         for event in events
         if event.event == "message.delta"
     )
-    assert "最终答复" == "".join(
-        str(event.data.get("delta", ""))
-        for event in events
-        if event.event == "message.delta"
-    )
+    assert "Summary for next model call" not in deltas
+    assert deltas == "最终答复"
 
 
 @pytest.mark.asyncio
