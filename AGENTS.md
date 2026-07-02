@@ -145,15 +145,24 @@ frontend/src/
   example GPT names that return 502/unsupported) do not appear in the selector; set
   `CUSTOM_VALIDATE_MODELS=false` only when that probe is too expensive or incompatible.
 - **Reasoning streaming (fragile — guard it)**: providers disagree on how reasoning is
-  emitted (DeepSeek `reasoning_content` → bridged to a `{"type":"reasoning"}` block;
-  OpenAI `reasoning`; Anthropic `thinking`). DeepSeek **and** the `custom` relay use the
-  reasoning-bridging `ChatDeepSeek` subclass (`runtime/models.py`) so `delta.reasoning_content`
-  reaches the v3 channel; `custom` sends NO provider-specific thinking flags (unknown relay
+  emitted, and the projection layer absorbs **all three** shapes: DeepSeek
+  `delta.reasoning_content` → bridged to a `{"type":"reasoning","reasoning": ...}` block;
+  OpenAI official reasoning models (gpt-5 / o-series) auto-use the **Responses API**
+  (`reasoning_effort` only — langchain-openai selects it), emitting reasoning as a
+  `{"type":"reasoning","summary":[{"type":"summary_text","text": ...}]}` block (NOT a flat
+  string) under the default `responses/v1` output_version; Anthropic `thinking`. DeepSeek
+  **and** the `custom` relay use the reasoning-bridging `ChatDeepSeek` subclass
+  (`runtime/models.py`) so `delta.reasoning_content` reaches the v3 channel; the **official
+  OpenAI** provider uses plain `ChatOpenAI` + `reasoning_effort` (no bridge, no manual
+  `use_responses_api`). `custom` sends NO provider-specific thinking flags (unknown relay
   protocol — toggle control is best-effort). The single normalization entry is
   `agent_adapter/projections.py::projection_item_to_agent_event` /
-  `extract_message_delta_parts`. **Before changing this layer, keep
+  `extract_message_delta_parts`, with `extract_reasoning_from_content_block` flattening
+  the OpenAI Responses `summary[]` list (the 2026-07-02 fix — previously that shape was
+  silently dropped, so gpt-5 thinking was invisible). **Before changing this layer, keep
   `tests/test_provider_reasoning_contract.py` green** — it pins that every provider's chunk
-  normalizes to the right single channel with no crossing.
+  (including OpenAI Responses summary blocks) normalizes to the right single channel with no
+  crossing. See `HARNESS_NOTES.md` §17.
 - **Thinking toggle**: `RunContext.thinking_enabled` (flash mode = off). DeepSeek-V4 thinks
   by default, so OFF must send `extra_body={"thinking":{"type":"disabled"}}` explicitly
   (`runtime/models.py`). Anthropic thinking / OpenAI o-series reasoning are enabled only

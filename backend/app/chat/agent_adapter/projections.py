@@ -195,8 +195,9 @@ def extract_standard_reasoning_text(item: Any) -> str:
 
 
 def extract_reasoning_from_content_block(item: Any) -> str:
-    # Reasoning content blocks differ by provider: DeepSeek/OpenAI use "reasoning",
-    # Anthropic extended thinking uses "thinking".
+    # Reasoning content blocks differ by provider: DeepSeek/OpenAI-compatible use a
+    # {"type": "reasoning", "reasoning": "..."} block (our ChatDeepSeek bridge emits
+    # this shape); Anthropic extended thinking uses {"type": "thinking", "thinking": ...}.
     if not isinstance(item, dict) or item.get("type") not in ("reasoning", "thinking"):
         return ""
 
@@ -204,6 +205,24 @@ def extract_reasoning_from_content_block(item: Any) -> str:
         value = item.get(key)
         if isinstance(value, str) and value:
             return value
+
+    # OpenAI Responses API emits reasoning as a *summary* of sub-blocks, not a flat
+    # string: {"type": "reasoning", "summary": [{"type": "summary_text", "text": ...}],
+    # "id": ...}. langchain-openai keeps this shape verbatim in message.content when
+    # output_version is the default "responses/v1" (it only flattens to
+    # additional_kwargs["reasoning"] under the legacy "v0" output_version, which we do
+    # not set). Flatten the summary text so gpt-5 / o-series thinking reaches the
+    # reasoning channel instead of being silently dropped.
+    summary = item.get("summary")
+    if isinstance(summary, list):
+        parts: list[str] = []
+        for sub_block in summary:
+            if isinstance(sub_block, dict):
+                text = sub_block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
     return ""
 
 
