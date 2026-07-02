@@ -228,6 +228,48 @@ def test_install_skill_groups_dependency_skills(
     ).is_file()
 
 
+def test_delete_parent_skill_removes_installed_dependency_skills(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    client, runtime_config = _client(tmp_path)
+
+    def fake_run(args, *, cwd, check, capture_output, text, timeout):
+        _ = check, capture_output, text, timeout
+        root = Path(cwd) / ".agents" / "skills"
+        primary_dir = root / "research-helper"
+        child_dir = root / "chart-helper"
+        primary_dir.mkdir(parents=True)
+        child_dir.mkdir(parents=True)
+        (primary_dir / "SKILL.md").write_text(
+            "---\nname: research-helper\ndescription: Research helper\n---\n\n# Research\n",
+            encoding="utf-8",
+        )
+        (child_dir / "SKILL.md").write_text(
+            "---\nname: chart-helper\ndescription: Chart helper\n---\n\n# Chart\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run)
+
+    client.post(
+        "/api/skills/install",
+        json={
+            "package_url": "https://github.com/example/skills",
+            "skill_name": "research-helper",
+        },
+    )
+
+    delete_response = client.delete("/api/skills/research-helper")
+
+    assert delete_response.status_code == 204
+    assert not (runtime_config.skills_root / "research-helper").exists()
+    listed_names = {skill["name"] for skill in client.get("/api/skills").json()}
+    assert "research-helper" not in listed_names
+    assert "chart-helper" not in listed_names
+
+
 def test_list_skills_groups_legacy_same_package_dependencies(tmp_path: Path) -> None:
     client, runtime_config = _client(tmp_path)
     for name in ["earnings-preview", "company-valuation"]:
@@ -248,6 +290,32 @@ def test_list_skills_groups_legacy_same_package_dependencies(tmp_path: Path) -> 
     child = next(skill for skill in listed if skill["name"] == "company-valuation")
 
     assert child["parent"] == "earnings-preview"
+
+
+def test_delete_parent_skill_removes_legacy_same_package_children(tmp_path: Path) -> None:
+    client, runtime_config = _client(tmp_path)
+    for name in ["earnings-preview", "company-valuation"]:
+        skill_dir = runtime_config.skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+        runtime_config.skills_config_store.mark_skill(
+            name,
+            enabled=True,
+            source="skills.sh",
+            package_url="https://github.com/example/finance-skills",
+        )
+
+    delete_response = client.delete("/api/skills/earnings-preview")
+
+    assert delete_response.status_code == 204
+    assert not (runtime_config.skills_root / "earnings-preview").exists()
+    assert not (runtime_config.skills_root / "company-valuation").exists()
+    listed_names = {skill["name"] for skill in client.get("/api/skills").json()}
+    assert "earnings-preview" not in listed_names
+    assert "company-valuation" not in listed_names
 
 
 def test_skill_pin_and_reorder_routes(tmp_path: Path) -> None:
