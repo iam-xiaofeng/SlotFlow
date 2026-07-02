@@ -752,6 +752,16 @@ export function resolveChatStreamUrl(path: string): string {
   return joinBaseUrl(resolveChatStreamBaseUrl(), path);
 }
 
+export function resolveTerminalWebSocketUrl(): string {
+  const httpUrl = resolveChatStreamUrl("/api/terminal/ws");
+  if (typeof window === "undefined") {
+    return httpUrl;
+  }
+  const url = new URL(httpUrl, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
 function resolveChatStreamBaseUrl(): string {
   const configuredBaseUrl =
     process.env.NEXT_PUBLIC_SLOTFLOW_STREAM_BASE_URL ??

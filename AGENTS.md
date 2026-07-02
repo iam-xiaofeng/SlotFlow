@@ -203,6 +203,13 @@ frontend/src/
   Legacy files under `artifacts/` that are not namespaced to a known thread are surfaced as
   `未归类产物`, so older outputs remain findable. Read/preview (`/artifacts/read`,
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
+  The same right panel also has a **终端** view backed by `terminal/routes.py` at
+  `/api/terminal/ws`: it is a user-operated host PTY for manual setup/debugging, not an agent
+  tool and not part of model tool schemas. The frontend renders PTY output with `@xterm/xterm`
+  rather than a plain text div, because real shells emit ANSI/OSC control sequences for prompts,
+  colors, bracketed paste, and titles. Once the user opens the terminal view, the WebSocket and
+  xterm instance stay connected while switching back to files or closing/reopening the right
+  panel; it closes only when the page/component unmounts or the connection dies.
 - **Code execution sandbox**: untrusted code, generated scripts, package experiments, and Skill
   helper scripts run through `sandbox_exec`, not on the host. Host shell/code execution tools named
   like `bash`, `shell`, `python_repl`, `run_command`, etc. are filtered out of extra/MCP tool lists

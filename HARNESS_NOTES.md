@@ -1675,3 +1675,43 @@ Docker 镜像本身已经由 Docker daemon 按 image tag/layer 全局缓存；`d
 - `tests/test_harness_sandbox.py::test_sandbox_config_defaults_support_dependency_installation` 覆盖默认 idle timeout 为 600 秒。
 - `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_starts_only_on_first_exec` 覆盖执行后返回 idle timeout 并安排 timer。
 - `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_closes_after_idle_timeout` 覆盖 idle timer 触发后 `docker rm -f`，下一次执行重新 `docker run` 打开容器。
+
+
+---
+
+## 31. 迭代 23（2026-07-02）：右侧工作区用户终端
+
+### 31.0 症状
+
+Docker Engine 安装这类宿主机 setup 任务需要用户可见、可操作的终端。让 agent 暴露任意宿主机 bash 不符合沙箱边界；但只让 agent 输出命令又让用户需要切到外部终端，交互割裂。
+
+### 31.1 根因
+
+SlotFlow 之前只有 agent 工具和产物预览：
+
+- agent 工具层必须继续禁止宿主机 shell/code execution，只允许 `sandbox_exec` 和受控的 `docker_engine_setup`；
+- 右侧工作区面板只能预览产物/上传文件，没有人类手动执行宿主机命令的位置。
+
+因此正确边界不是把 terminal 变成 model tool，而是提供一个**用户操作的 host PTY**，只由前端按钮打开，agent 不可调用。
+
+### 31.2 修法
+
+1. 新增 `backend/app/terminal/routes.py`：`/api/terminal/ws` WebSocket 打开一个 PTY shell，发送 `ready` / `output` / `exit` JSON 文本事件，接收 `input` / `resize` JSON 文本事件。
+2. `main.py` 注册 terminal router。`SLOTFLOW_TERMINAL_CWD` 可指定终端 cwd，`SLOTFLOW_TERMINAL_SHELL` 可指定 shell；默认 cwd 是后端进程 cwd，默认 shell 是 `$SHELL` / bash / sh。
+3. `frontend/src/lib/chat-stream.ts::resolveTerminalWebSocketUrl` 把现有 API base URL 转成 ws/wss URL，local browser 默认直连 `127.0.0.1:8000`。
+4. `workspace-panel.tsx` 增加“文件 / 终端”切换。终端连接状态提升到 `WorkspacePanel` 生命周期：第一次点击“终端”才建立 WebSocket，之后切回文件或关闭/重开右侧面板都不主动断开；只有页面/component unmount、连接错误或用户点重连时才关闭旧连接。
+5. 终端输出用 `@xterm/xterm` + `@xterm/addon-fit` 渲染。根因是 PTY shell 会输出 ANSI/OSC 控制序列（颜色、标题、bracketed paste、光标控制），普通 `<div>` 只能把这些字节当文本显示，所以会出现 `]3008...`、`[?2004h` 这类“乱码”。这里不能加硬清洗，否则会破坏真实终端行为；正确边界是用终端模拟器解释控制序列，并在清空时调用 xterm buffer clear/reset，而不是清 React 文本状态。
+
+### 31.3 不变量
+
+- 这个终端是 human-operated UI，不加入 agent tool registry，不出现在模型 tool schema，不绕过 `sandbox_exec` 的模型执行边界。
+- 用户终端可以执行宿主机命令，因此 UI 文案必须把它标成 Host terminal，避免和 Docker sandbox 混淆。
+- 终端连接打开后保持常开；切回文件视图、关闭面板只是隐藏 UI，不关闭 WebSocket。
+- 前端不要用普通文本节点显示 PTY 字节流，也不要硬过滤 `installed_matches` 式地清洗局部尾巴；真实终端输出必须交给 xterm 解释。
+- 生产部署如果前端不直连后端，需要反向代理支持 `/api/terminal/ws` WebSocket upgrade。
+
+### 31.4 验证
+
+- `tests/test_terminal.py::test_terminal_helpers_resolve_cwd_and_shell_command` 覆盖 cwd/shell helper。
+- `tests/test_terminal.py::test_terminal_input_message_writes_to_fd` 覆盖 input 消息写入 fd。
+- `tests/test_terminal.py::test_terminal_websocket_sends_ready_event` 覆盖 FastAPI WebSocket ready 事件。

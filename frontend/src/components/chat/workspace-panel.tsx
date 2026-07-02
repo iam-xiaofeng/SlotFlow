@@ -8,6 +8,8 @@ import {
   useRef,
   useState,
 } from "react";
+import type { FitAddon as XTermFitAddon } from "@xterm/addon-fit";
+import type { Terminal as XTermInstance } from "@xterm/xterm";
 import {
   ChevronDown,
   Code2,
@@ -19,6 +21,9 @@ import {
   LoaderCircle,
   PanelRightClose,
   RefreshCw,
+  Square,
+  Terminal,
+  Trash2,
   Upload,
   WandSparkles,
 } from "lucide-react";
@@ -38,6 +43,7 @@ import {
   listThreadWorkspaces,
   readArtifact,
   resolveArtifactRawUrl,
+  resolveTerminalWebSocketUrl,
 } from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +57,8 @@ import { entryName, formatFileSize } from "./chat-format";
 const minPanelWidth = 560;
 const maxPanelWidth = 1100;
 const panelWidthVariable = "--slotflow-artifact-panel-width";
+
+type WorkspacePanelMode = "files" | "terminal";
 
 type WorkspacePanelProps = {
   open: boolean;
@@ -82,6 +90,9 @@ export function WorkspacePanel({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [viewMode, setViewMode] = useState<ArtifactViewMode>("preview");
+  const [panelMode, setPanelMode] = useState<WorkspacePanelMode>("files");
+  const [terminalEnabled, setTerminalEnabled] = useState(false);
+  const terminal = useTerminalSession(terminalEnabled);
 
   const visibleWidth = Math.max(width, minPanelWidth);
 
@@ -180,17 +191,19 @@ export function WorkspacePanel({
     window.addEventListener("pointerup", stop);
   }
 
-  if (!open) {
-    return null;
-  }
-
-  const canSwitchView = preview ? getArtifactPreviewType(preview).canSwitchView : false;
-  const rawUrl = preview ? resolveArtifactRawUrl(preview.path) : "";
-  const downloadUrl = preview ? resolveArtifactRawUrl(preview.path, { download: true }) : "";
+  const canSwitchView =
+    panelMode === "files" && preview ? getArtifactPreviewType(preview).canSwitchView : false;
+  const rawUrl = panelMode === "files" && preview ? resolveArtifactRawUrl(preview.path) : "";
+  const downloadUrl =
+    panelMode === "files" && preview ? resolveArtifactRawUrl(preview.path, { download: true }) : "";
 
   return (
     <aside
-      className="relative flex h-full min-w-0 shrink-0 flex-col bg-background py-4 pl-0 pr-4"
+      aria-hidden={!open}
+      className={cn(
+        "relative h-full min-w-0 shrink-0 flex-col bg-background py-4 pl-0 pr-4",
+        open ? "flex" : "hidden",
+      )}
       style={{ width: `var(${panelWidthVariable}, ${visibleWidth}px)` }}
     >
       <div
@@ -206,21 +219,28 @@ export function WorkspacePanel({
       <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-background shadow-lg">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-muted/40 px-2">
-            <WorkspaceFileSelector
-              threads={threads}
-              isLoading={isLoadingThreads}
-              error={error}
-              selectedPath={selectedPath}
-              previewPath={preview?.path ?? null}
-              onRefresh={() => void refresh()}
-              onSelectFile={(threadId, file) => {
-                if (onOpenFile) {
-                  onOpenFile(threadId, file);
-                  return;
-                }
-                void selectFile(file.path);
-              }}
-            />
+            {panelMode === "files" ? (
+              <WorkspaceFileSelector
+                threads={threads}
+                isLoading={isLoadingThreads}
+                error={error}
+                selectedPath={selectedPath}
+                previewPath={preview?.path ?? null}
+                onRefresh={() => void refresh()}
+                onSelectFile={(threadId, file) => {
+                  if (onOpenFile) {
+                    onOpenFile(threadId, file);
+                    return;
+                  }
+                  void selectFile(file.path);
+                }}
+              />
+            ) : (
+              <div className="flex min-w-0 flex-1 items-center gap-2 px-2 text-sm font-medium">
+                <Terminal className="size-4 shrink-0 text-muted-foreground" />
+                <span className="truncate">终端</span>
+              </div>
+            )}
             {canSwitchView ? (
               <div className="flex shrink-0 items-center rounded-lg border bg-background p-0.5">
                 <Button
@@ -247,6 +267,33 @@ export function WorkspacePanel({
                 </Button>
               </div>
             ) : null}
+            <div className="flex shrink-0 items-center rounded-lg border bg-background p-0.5">
+              <Button
+                type="button"
+                variant={panelMode === "files" ? "secondary" : "ghost"}
+                size="icon-xs"
+                title="文件"
+                className="size-7 rounded-md"
+                onClick={() => setPanelMode("files")}
+              >
+                <FileText className="size-4" />
+                <span className="sr-only">文件</span>
+              </Button>
+              <Button
+                type="button"
+                variant={panelMode === "terminal" ? "secondary" : "ghost"}
+                size="icon-xs"
+                title="终端"
+                className="size-7 rounded-md"
+                onClick={() => {
+                  setTerminalEnabled(true);
+                  setPanelMode("terminal");
+                }}
+              >
+                <Terminal className="size-4" />
+                <span className="sr-only">终端</span>
+              </Button>
+            </div>
             <Button
               type="button"
               variant="ghost"
@@ -285,16 +332,307 @@ export function WorkspacePanel({
               <span className="sr-only">关闭工作区面板</span>
             </Button>
           </div>
-          <ArtifactStage
-            preview={preview}
-            previewError={previewError}
-            isLoadingPreview={isLoadingPreview}
-            viewMode={viewMode}
-          />
+          <div className={cn("min-h-0 flex-1", panelMode !== "terminal" && "hidden")}>
+            <TerminalView active={open && panelMode === "terminal"} terminal={terminal} />
+          </div>
+          <div className={cn("min-h-0 flex-1", panelMode !== "files" && "hidden")}>
+            <ArtifactStage
+              preview={preview}
+              previewError={previewError}
+              isLoadingPreview={isLoadingPreview}
+              viewMode={viewMode}
+            />
+          </div>
         </div>
       </div>
     </aside>
   );
+}
+
+type TerminalStatus = "idle" | "connecting" | "connected" | "closed" | "error";
+
+type TerminalSession = {
+  status: TerminalStatus;
+  cwd: string;
+  clearOutput: () => void;
+  reconnect: () => void;
+  sendInput: (data: string) => void;
+  attachTerminal: (element: HTMLDivElement) => void;
+  fitTerminal: () => void;
+};
+
+function useTerminalSession(enabled: boolean): TerminalSession {
+  const socketRef = useRef<WebSocket | null>(null);
+  const terminalRef = useRef<XTermInstance | null>(null);
+  const fitAddonRef = useRef<XTermFitAddon | null>(null);
+  const pendingOutputRef = useRef<string[]>([]);
+  const [status, setStatus] = useState<TerminalStatus>("idle");
+  const [cwd, setCwd] = useState<string>("");
+  const [reconnectToken, setReconnectToken] = useState(0);
+
+  const sendResize = useCallback(() => {
+    const socket = socketRef.current;
+    const terminal = terminalRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !terminal) {
+      return;
+    }
+    socket.send(
+      JSON.stringify({
+        type: "resize",
+        rows: terminal.rows,
+        columns: terminal.cols,
+      }),
+    );
+  }, []);
+
+  const sendInput = useCallback((data: string) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify({ type: "input", data }));
+  }, []);
+
+  const writeOutput = useCallback((chunk: string) => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      pendingOutputRef.current.push(chunk);
+      return;
+    }
+    terminal.write(chunk);
+  }, []);
+
+  const clearOutput = useCallback(() => {
+    pendingOutputRef.current = [];
+    terminalRef.current?.clear();
+  }, []);
+
+  const reconnect = useCallback(() => {
+    socketRef.current?.close();
+    socketRef.current = null;
+    terminalRef.current?.reset();
+    pendingOutputRef.current = [];
+    setReconnectToken((current) => current + 1);
+  }, []);
+
+  const fitTerminal = useCallback(() => {
+    const fitAddon = fitAddonRef.current;
+    if (!fitAddon) {
+      return;
+    }
+    try {
+      fitAddon.fit();
+      sendResize();
+    } catch {
+      // xterm cannot measure while hidden; the next visible fit will recover.
+    }
+  }, [sendResize]);
+
+  const attachTerminal = useCallback(
+    (element: HTMLDivElement) => {
+      if (terminalRef.current) {
+        fitTerminal();
+        terminalRef.current.focus();
+        return;
+      }
+
+      void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]).then(
+        ([xtermModule, fitModule]) => {
+          if (terminalRef.current || !element.isConnected) {
+            return;
+          }
+
+          const terminal = new xtermModule.Terminal({
+            cursorBlink: true,
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
+            fontSize: 12,
+            scrollback: 10000,
+            theme: {
+              background: "#0b1020",
+              foreground: "#e2e8f0",
+              cursor: "#38bdf8",
+              selectionBackground: "#334155",
+            },
+          });
+          const fitAddon = new fitModule.FitAddon();
+          terminal.loadAddon(fitAddon);
+          terminal.onData(sendInput);
+          terminal.open(element);
+          terminalRef.current = terminal;
+          fitAddonRef.current = fitAddon;
+
+          const pendingOutput = pendingOutputRef.current.join("");
+          pendingOutputRef.current = [];
+          if (pendingOutput) {
+            terminal.write(pendingOutput);
+          }
+          fitTerminal();
+          terminal.focus();
+        },
+      );
+    },
+    [fitTerminal, sendInput],
+  );
+
+  useEffect(() => {
+    if (!enabled || socketRef.current) {
+      return;
+    }
+    const socket = new WebSocket(resolveTerminalWebSocketUrl());
+    socketRef.current = socket;
+    setStatus("connecting");
+
+    socket.addEventListener("open", () => setStatus("connected"));
+    socket.addEventListener("message", (event) => {
+      const payload = parseTerminalPayload(event.data);
+      if (!payload) {
+        return;
+      }
+      if (payload.type === "ready") {
+        const nextCwd = stringValue(payload.cwd);
+        setCwd(nextCwd);
+        writeOutput(`Connected to ${stringValue(payload.shell) || "shell"} at ${nextCwd}\r\n`);
+        return;
+      }
+      if (payload.type === "output" && typeof payload.data === "string") {
+        writeOutput(payload.data);
+        return;
+      }
+      if (payload.type === "exit") {
+        setStatus("closed");
+        writeOutput(
+          `\r\n[terminal exited${typeof payload.exit_code === "number" ? `: ${payload.exit_code}` : ""}]\r\n`,
+        );
+      }
+    });
+    socket.addEventListener("error", () => setStatus("error"));
+    socket.addEventListener("close", () => {
+      setStatus((current) => (current === "error" ? "error" : "closed"));
+    });
+    socket.addEventListener("open", sendResize);
+
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
+  }, [enabled, reconnectToken, sendResize, writeOutput]);
+
+  useEffect(() => {
+    return () => {
+      terminalRef.current?.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, []);
+
+  return {
+    status,
+    cwd,
+    clearOutput,
+    reconnect,
+    sendInput,
+    attachTerminal,
+    fitTerminal,
+  };
+}
+
+function TerminalView({ active, terminal }: { active: boolean; terminal: TerminalSession }) {
+  const terminalElementRef = useRef<HTMLDivElement | null>(null);
+  const { status, cwd, clearOutput, reconnect, sendInput, attachTerminal, fitTerminal } = terminal;
+
+  useEffect(() => {
+    const element = terminalElementRef.current;
+    if (!element) {
+      return;
+    }
+    attachTerminal(element);
+  }, [attachTerminal]);
+
+  useEffect(() => {
+    if (!active) {
+      return;
+    }
+    fitTerminal();
+    const handleResize = () => fitTerminal();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [active, fitTerminal]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-[#0b1020] text-slate-100">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/10 bg-black/20 px-3 text-xs text-slate-300">
+        <span
+          className={cn(
+            "size-2 rounded-full",
+            status === "connected" && "bg-emerald-400",
+            status === "connecting" && "bg-amber-400",
+            status === "closed" && "bg-slate-500",
+            status === "error" && "bg-red-400",
+            status === "idle" && "bg-slate-500",
+          )}
+        />
+        <span className="font-medium">Host terminal</span>
+        <span className="min-w-0 flex-1 truncate" title={cwd || undefined}>
+          {cwd || (status === "idle" ? "未连接" : "连接中…")}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          title="发送 Ctrl+C"
+          className="size-7 text-slate-300 hover:bg-white/10 hover:text-white"
+          disabled={status !== "connected"}
+          onClick={() => sendInput("\u0003")}
+        >
+          <Square className="size-3" />
+          <span className="sr-only">发送 Ctrl+C</span>
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          title="清空终端"
+          className="size-7 text-slate-300 hover:bg-white/10 hover:text-white"
+          onClick={clearOutput}
+        >
+          <Trash2 className="size-3.5" />
+          <span className="sr-only">清空终端</span>
+        </Button>
+      </div>
+      <div
+        ref={terminalElementRef}
+        className="min-h-0 flex-1 overflow-hidden px-2 py-2"
+        onClick={() => terminalElementRef.current?.focus()}
+      />
+      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-t border-white/10 bg-black/25 px-3 text-xs text-slate-400">
+        <span>点击终端区域后直接输入；这是用户手动 Host terminal，不是 agent 工具。</span>
+        {status === "closed" || status === "error" ? (
+          <Button type="button" size="sm" variant="secondary" onClick={reconnect}>
+            重连
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function parseTerminalPayload(data: unknown): Record<string, unknown> | null {
+  if (typeof data !== "string") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(data);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function WorkspaceFileSelector({

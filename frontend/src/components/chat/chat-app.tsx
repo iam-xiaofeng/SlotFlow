@@ -1008,17 +1008,15 @@ export function ChatApp() {
             )}
           </section>
 
-          {isArtifactPanelOpen ? (
-            <WorkspacePanel
-              open={isArtifactPanelOpen}
-              selectedPath={selectedArtifactPath}
-              width={artifactPanelWidth}
-              refreshKey={workspaceRefreshKey}
-              onClose={() => setIsArtifactPanelOpen(false)}
-              onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
-              onWidthChange={setArtifactPanelWidth}
-            />
-          ) : null}
+          <WorkspacePanel
+            open={isArtifactPanelOpen}
+            selectedPath={selectedArtifactPath}
+            width={artifactPanelWidth}
+            refreshKey={workspaceRefreshKey}
+            onClose={() => setIsArtifactPanelOpen(false)}
+            onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
+            onWidthChange={setArtifactPanelWidth}
+          />
         </div>
       </SidebarInset>
     </SidebarProvider>
