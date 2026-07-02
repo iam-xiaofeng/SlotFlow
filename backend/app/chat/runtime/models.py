@@ -11,7 +11,7 @@ import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
-from app.chat.model_catalog import PROVIDER_DEFAULT_BASE_URLS
+from app.chat.model_catalog import PROVIDER_DEFAULT_BASE_URLS, RELAY_USER_AGENT
 from app.chat.models import ModelProvider, RunContext
 
 if TYPE_CHECKING:
@@ -214,6 +214,17 @@ def build_openai_compatible_model_kwargs(
         # APIConnectionError / 429 / 5xx must NOT kill the whole run. Retry with backoff.
         "max_retries": 2,
     }
+    if provider == "custom":
+        # Third-party OpenAI-compatible relays commonly sit behind a Cloudflare WAF that
+        # blocks the OpenAI SDK's fingerprint UA (`AsyncOpenAI/Python <ver>` -> HTTP 403
+        # "Your request was blocked."). Both ChatDeepSeek (used here for reasoning
+        # bridging) and plain ChatOpenAI build on the same `openai.AsyncOpenAI` client,
+        # which injects that UA by default, so *every* custom-relay model would 403
+        # without this override. Override via `default_headers` so the live chat path uses
+        # the SAME neutral UA the discovery probe uses — "shows in selector" == "usable".
+        # See `model_catalog.RELAY_USER_AGENT` / `relay_request_headers` for the discovery
+        # side and HARNESS_NOTES.md for the live verification.
+        kwargs["default_headers"] = {"User-Agent": RELAY_USER_AGENT}
     if provider == "deepseek":
         # DeepSeek v4 keeps thinking ON by default, so the off state must be sent
         # explicitly — omitting the flag is NOT "no thinking".

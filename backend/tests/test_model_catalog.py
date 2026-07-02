@@ -106,6 +106,62 @@ def test_fetch_url_and_headers_match_provider() -> None:
     assert model_catalog.provider_headers(openai_env)["Authorization"] == "Bearer ok"
 
 
+def test_relay_request_headers_adds_neutral_user_agent_for_custom_only() -> None:
+    """custom 中转站的发现/探针请求必须带中性 User-Agent（与 runtime 同一 UA）。
+
+    根因（live-verified 2026-06-30）：第三方中转站 Cloudflare WAF 按 OpenAI SDK 指纹 UA
+    `AsyncOpenAI/Python <ver>` 拦截（403 "Your request was blocked."）。发现探针与 runtime 必须
+    用同一个中性 UA，否则会出现"选择器里能显示但实际调用 403"。DeepSeek/OpenAI/Anthropic 官方
+    端点不得加 UA（默认 UA 不被 WAF 拦截，且 Anthropic 用 x-api-key 不用 Bearer）。
+    """
+
+    custom_env = model_catalog.ProviderEnv(
+        provider="custom", api_key="ck", base_url="https://relay.local/v1"
+    )
+    deepseek_env = model_catalog.ProviderEnv(
+        provider="deepseek", api_key="dk", base_url="https://api.deepseek.com"
+    )
+    openai_env = model_catalog.ProviderEnv(
+        provider="openai", api_key="ok", base_url="https://api.openai.com/v1"
+    )
+    anthropic_env = model_catalog.ProviderEnv(
+        provider="anthropic", api_key="ak", base_url="https://api.anthropic.com/v1"
+    )
+
+    # custom：带中性 UA 且非 OpenAI SDK 指纹
+    custom_headers = model_catalog.relay_request_headers(custom_env, content_json=True)
+    assert custom_headers["User-Agent"] == model_catalog.RELAY_USER_AGENT
+    assert "AsyncOpenAI" not in custom_headers["User-Agent"]
+    assert custom_headers["Authorization"] == "Bearer ck"
+    assert custom_headers["Content-Type"] == "application/json"
+
+    # deepseek/openai 官方端点：不加 UA（用 SDK 默认）
+    assert "User-Agent" not in model_catalog.relay_request_headers(deepseek_env)
+    assert "User-Agent" not in model_catalog.relay_request_headers(openai_env)
+
+    # anthropic：保留 x-api-key / anthropic-version，不加 Bearer 也不加 UA
+    anthropic_headers = model_catalog.relay_request_headers(anthropic_env)
+    assert anthropic_headers["x-api-key"] == "ak"
+    assert anthropic_headers["anthropic-version"] == "2023-06-01"
+    assert "Authorization" not in anthropic_headers
+    assert "User-Agent" not in anthropic_headers
+
+
+def test_relay_user_agent_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SLOTFLOW_RELAY_USER_AGENT 可覆盖默认中性 UA（应对中转站更挑剔的 WAF 规则）。"""
+
+    import importlib
+
+    # Reload 读取一次 env 得到覆盖值。必须在 monkeypatch 还原 env *之前* 把模块
+    # 常量恢复回默认值，否则污染后续导入 RELAY_USER_AGENT 的测试（reload 只重跑
+    # model_catalog 本体，不会更新 models.py 里已绑定的副本，两边值不一致即断言失败）。
+    monkeypatch.setenv("SLOTFLOW_RELAY_USER_AGENT", "my-relay-client/2.0")
+    assert importlib.reload(model_catalog).RELAY_USER_AGENT == "my-relay-client/2.0"
+    monkeypatch.delenv("SLOTFLOW_RELAY_USER_AGENT", raising=False)
+    importlib.reload(model_catalog)  # restore default before monkeypatch finalizes
+    assert model_catalog.RELAY_USER_AGENT == "SlotFlow/1.0"
+
+
 def test_parse_model_ids_filters_non_chat_models() -> None:
     """从 /models 响应里过滤掉非对话模型（embedding/whisper 等）并按产家收敛。"""
 

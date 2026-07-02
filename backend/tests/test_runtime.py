@@ -247,6 +247,54 @@ def test_custom_provider_kwargs_send_no_deepseek_thinking_flags() -> None:
     assert kwargs["base_url"] == "http://relay.local/v1"
 
 
+def test_custom_provider_kwargs_override_relay_user_agent() -> None:
+    """custom 中转站：注入中性 User-Agent，覆盖 OpenAI SDK 的 `AsyncOpenAI/Python` 指纹 UA。
+
+    根因（live-verified 2026-06-30 against https://metapi.lilililwan.xyz/v1）：很多第三方
+    中转站前置 Cloudflare WAF 按 OpenAI SDK 的 `User-Agent: AsyncOpenAI/Python <ver>` 指纹拦截
+    （HTTP 403 "Your request was blocked."），导致非 deepseek 系列模型"能显示但用不了"——
+    因为发现探针用裸 httpx（中性 UA）能过，而真正跑对话的 OpenAI SDK 客户端用被拦 UA。
+    ChatDeepSeek 与 ChatOpenAI 共用同一 `openai.AsyncOpenAI` 客户端，都会注入该 UA，故必须在此覆盖。
+    中转站是黑名单（任何非 OpenAI 指纹的 UA 都放行），不是白名单。
+    """
+
+    from app.chat.model_catalog import RELAY_USER_AGENT
+
+    context = _bundle(
+        request=ChatStreamRequest(
+            message="x", model_name="glm-5.2", mode="pro", provider="custom"
+        )
+    ).context
+    custom_kwargs = build_openai_compatible_model_kwargs(
+        model_name="glm-5.2",
+        api_key="key",
+        base_url="http://relay.local/v1",
+        provider="custom",
+        run_context=context,
+    )
+    assert custom_kwargs["default_headers"] == {"User-Agent": RELAY_USER_AGENT}
+    # 中转站 UA 必须是中性、非 OpenAI SDK 指纹：
+    assert "AsyncOpenAI" not in RELAY_USER_AGENT
+
+    # DeepSeek / OpenAI 官方端点不得改 UA（默认 SDK UA 没有被 WAF 拦截）：
+    deepseek_kwargs = build_openai_compatible_model_kwargs(
+        model_name="deepseek-v4-pro",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        provider="deepseek",
+        run_context=context,
+    )
+    assert "default_headers" not in deepseek_kwargs
+    openai_kwargs = build_openai_compatible_model_kwargs(
+        model_name="o3",
+        api_key="key",
+        base_url=None,
+        provider="openai",
+        run_context=context,
+    )
+    assert "default_headers" not in openai_kwargs
+
+
 def test_resolve_model_provider_prefers_carried_provenance() -> None:
     """携带的来源 provider 覆盖 id 前缀推断；缺失时才回退到推断。"""
 
