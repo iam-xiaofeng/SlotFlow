@@ -77,6 +77,7 @@ streaming.
 ```
 START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model → route
                                                                                                     ├─ tools → pre_model   (ReAct loop; ask_clarification interrupts here)
+                                                                                                    ├─ pre_model           (todo enforcement retry)
                                                                                                     └─ finalize → END
 ```
 
@@ -84,13 +85,15 @@ START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddlew
   long-term-memory retrieval, artifact baseline.
 - `triage_gate` (first step only, pro/ultra): triage → `interrupt()` clarification; resume
   injects the answer verbatim as a `HumanMessage`.
-- `pre_model` (every step): todo reminder, dangling-tool-call repair, long-term-memory
+- `pre_model` (every step): dynamic todo-state reminder, dangling-tool-call repair, long-term-memory
   system-prompt injection.
 - `SlotFlowSummarizationMiddleware` (own node so the projection layer filters its internal
   summary stream by node name): compresses history when token threshold exceeded.
 - `agent`: `model.bind_tools(tools)` call; reads `llm_input_messages` + `system_prompt`.
-- `post_model`: sub-agent concurrency cap on `task_tool`.
-- `route`: `tools_condition` → `tools` (ToolNode + SlotFlow tool-safety wrapper) or `finalize`.
+- `post_model`: todo parallel-call guard + dynamic todo enforcement, then sub-agent concurrency
+  cap on `task_tool`.
+- `route`: todo enforcer → `pre_model`; otherwise `tools_condition` → `tools` (ToolNode +
+  SlotFlow tool-safety wrapper) or `finalize`.
 - `finalize` (once/turn, all `after_agent`): artifact new-entries, long-term-memory explicit
   save + background LLM extraction.
 5. **`chat/sse.py`** encodes events as SSE; the frontend consumes them
@@ -113,6 +116,7 @@ backend/app/
                         logic), tools, skills, mcp, memory, sandbox, subagents
   harness/middleware/   graph behavior switches only (SlotFlowMiddlewareConfig); no
                         AgentMiddleware classes (deleted in node+edge refactor)
+  harness/sandbox/      workspace boundary + lazy Docker code-execution sandbox
   {uploads,workspace,skills,mcp,memory}/  FastAPI route modules
   dependencies.py       shared app.state getters; clock.py: utc_now
 backend/tests/          offline test suite (no network); test_live_deepseek.py is opt-in
@@ -163,6 +167,16 @@ frontend/src/
   `tests/test_provider_reasoning_contract.py` green** — it pins that every provider's chunk
   (including OpenAI Responses summary blocks) normalizes to the right single channel with no
   crossing. See `HARNESS_NOTES.md` §17.
+- **Streaming merge contract**: `message.delta` is the live user-visible stream; final
+  `state.snapshot` is a reconciliation source, not permission to erase already-streamed text.
+  Both `chat/routes.py::select_assistant_content` and
+  `hooks/use-chat-stream-helpers.ts::mergeAssistantContent` keep the longer/prefix-compatible
+  content so a shorter snapshot cannot make the answer visibly shrink at run end. Reasoning uses
+  the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`.
+- **Chat scroll behavior**: `frontend/src/components/chat/message-list.tsx` scrolls to the latest
+  assistant message when output first appears, then auto-follows streaming output only while the
+  user stays near the bottom. If the user scrolls upward during generation, auto-follow stops and
+  the completed answer must not force-scroll back to the bottom.
 - **Thinking toggle**: `RunContext.thinking_enabled` (flash mode = off). DeepSeek-V4 thinks
   by default, so OFF must send `extra_body={"thinking":{"type":"disabled"}}` explicitly
   (`runtime/models.py`). Anthropic thinking / OpenAI o-series reasoning are enabled only
@@ -187,11 +201,43 @@ frontend/src/
   Legacy files under `artifacts/` that are not namespaced to a known thread are surfaced as
   `未归类产物`, so older outputs remain findable. Read/preview (`/artifacts/read`,
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
+- **Code execution sandbox**: untrusted code, generated scripts, package experiments, and Skill
+  helper scripts run through `sandbox_exec`, not on the host. The implementation is
+  `harness/sandbox/docker.py::LazyDockerSandbox` + `harness/tools/sandbox.py`; it is lazy, so Docker
+  is not touched until the tool is actually called. The container uses bind mounts instead of copy
+  in/out: `/workspace/uploads` is read-only user uploads, `/workspace/artifacts` is read-write for
+  the current thread's generated artifacts, `/workspace/work` is read-write scratch under
+  `.sandbox/<thread>`, and `/workspace/skills` is read-only installed Skills when configured.
+  Outputs that should appear in the UI must be written under `/workspace/artifacts`; they are
+  already on the host because of the bind mount. Env knobs: `SLOTFLOW_CODE_EXECUTION_ENABLED`,
+  `SLOTFLOW_DOCKER_SANDBOX_IMAGE`, `SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS`,
+  `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED`.
+- **Todo tool availability and enforcement**: `write_todos` is registered in every mode, including
+  Flash, so explicit todo requests can drive the real visual panel instead of prose simulation.
+  Todo planning is no longer a static system-prompt constraint: `harness/steps/todo.py` keeps the
+  tool schema strict (`{content,status}` while accepting legacy `text`) and `harness/graph.py` runs
+  `todo_enforcement_update` from `post_model`. If a Pro/Ultra task looks todo-worthy and the model
+  answered without creating todos, or if active todos are incomplete and the model tries to answer
+  without updating them, the node appends a named control message and routes back to `pre_model`.
+  The initial-todo heuristic strips leading `<slotflow-...>` injected context blocks before judging
+  complexity, so skills/uploads preflight text cannot turn a simple user request into a todo loop.
+  `chat/agent_adapter/streaming.py` emits `todo.updated` for every values snapshot containing
+  todos, even when the list is unchanged; the frontend still signature-dedupes UI updates to avoid
+  flicker.
 - **Agent operating procedure (prompt)**: `harness/builder.py` injects
-  `<slotflow-operating-procedure>` for non-trivial tasks: clarify first via
+  `current_utc_date` in `<slotflow-runtime>`, `<slotflow-freshness-policy>`,
+  `<slotflow-long-term-memory-status>`, and `<slotflow-operating-procedure>`. Freshness policy tells
+  the model to ground time-sensitive answers on the current date and use `web_search`/`web_fetch` or
+  other authoritative sources instead of training data alone; stable definitions/basic math/local
+  workspace code can still be answered without web search, and material source conflicts must be
+  disclosed. Memory policy tells the model to decide at task start whether injected memories are
+  enough or `memory_list` is needed, then after work decide whether `memory_save`/`memory_update`/
+  `memory_delete` is warranted for durable preferences/profile/project context. For non-trivial
+  tasks: clarify first via
   `ask_clarification` (interactive picker, not plain-text questions), `skill_match` before
-  specialized work, then (gated on `plan_enabled`/`subagent_enabled`) plan with `write_todos`
-  and split INDEPENDENT parts to `task_tool` sub-agents. These fire far more reliably with
+  specialized work, then (gated on `subagent_enabled`) split INDEPENDENT parts to `task_tool`
+  sub-agents. Todo creation/update is enforced by the graph's `post_model` node instead of this
+  prompt. These fire far more reliably with
   **thinking ON**; with thinking off DeepSeek tends to one-shot.
 - **HITL clarification = LangGraph native `interrupt()`/resume** (rewired 2026-06-21, see
   `HARNESS_NOTES.md` §12). There are two clarification entry points, both pausing the graph the
@@ -203,10 +249,16 @@ frontend/src/
     step** of a fresh user turn; if not actionable, it calls `interrupt(payload)` and,
     on resume, injects the user's answer **verbatim** as a `HumanMessage` so the model proceeds.
     Prompts alone't stop a model from one-shot-guessing, so this moves the decision into the graph.
+    To protect first-token latency, `should_skip_triage_model_call` bypasses this extra triage
+    LLM call for long, already-detailed requests, explicit "don't ask / just do it" wording, and
+    ordinary short messages that are not clearly underspecified creation/output tasks; short
+    underspecified prompts such as "做个表格" still go through the gate.
   - The user's answer arrives via `Command(resume=<answer>)` and **is** the tool result / user
     message — no "rewrite the answered tool message" step. `build_clarification_payload` (now in
     `app/harness/clarification.py`) always appends a free-text `其他（自己输入）` option LAST; the
-    frontend renders any 其他/other/specify option as an input box.
+    frontend renders any 其他/other/specify option as an input box. When the user clicks a fixed
+    option, the frontend resumes with the option label only (metadata keeps the option id), avoiding
+    a visible "我选择 A：..." prefix being fed back as ordinary answer text.
   - **Resume detection is server-side and provider-agnostic**: `agent_adapter/streaming.py` checks
     `graph.aget_state(config).interrupts` at turn start — if one is pending, the incoming user
     message is treated as the resume value; otherwise a normal turn starts. So the **frontend keeps
@@ -269,12 +321,36 @@ frontend/src/
   (`match_installed_skills` in `tools/customization.py`) is memoized with a short TTL so the skills
   preflight and a later `skill_match` in the same turn don't re-scan disk; `skill_install` calls
   `invalidate_skill_match_cache()`.
+- **Skill management UI/API**: multi-skill installs group dependency skills under a parent via
+  `SkillRecord.parent`. Deleting a parent skill from `/api/skills/{name}` must delete the whole
+  skill tree: the parent directory, any nested `dependencies/*` child directories, legacy
+  same-package child directories that are still top-level, their config entries, runtime enabled
+  names, and the scan cache. Otherwise `load_enabled_skills` will rediscover orphaned child
+  directories and the Skills panel will show sub-skills after the parent was removed.
 - **Node + edge graph (2026-06-30 refactor)**: the harness now uses a LangGraph native
   `StateGraph` (`harness/graph.py`) instead of LangChain `create_agent` + `AgentMiddleware`.
   Each former middleware is a stateless function in `harness/steps/*` called by a named node;
   order is fixed by edges. Provider quirks are still handled in the model subclass + projection
   layer. `AgentMiddleware` classes and the middleware registry were deleted; only
   `SlotFlowMiddlewareConfig` (behavior switches consumed by nodes) remains.
+- **Interaction UI invariants**: `write_todos` updates surface in one place only: the collapsible
+  `ComposerTodoPanel` above the chat composer. Do not add a second inline todo panel inside the
+  message list; duplicate panels make the single source of truth look inconsistent. The composer
+  panel expands on every distinct todo-list update and stays visible after the run finishes;
+  collapsing it at completion makes users think no visual todo panel was used. `state.snapshot`
+  todos are also consumed as a frontend fallback in case an intermediate `todo.updated` event is
+  missed. Backend streaming emits `todo.updated` for every values snapshot with todos; frontend
+  signature dedupe prevents repeated identical events from flickering the panel. Todo items normalize
+  to the public `{content, status}` shape; accept legacy/model-emitted
+  `{text, status}` only at the tool/projection/frontend parsing boundaries so the panel never shows
+  status icons without labels. The Skills/MCP/Memory
+  directory uses native `overflow-y-auto` containers (including sub-skill lists) because Base UI
+  `ScrollArea` did not reliably wheel-scroll inside the centered dialog. The chat composer should
+  not show non-functional placeholder affordances: the lower-left `+` is a direct attachment button,
+  there is no voice-input button, and the empty-state prompt chips are removed until they have real
+  behavior. The Skills directory includes a hardcoded "推荐 Skills" section in
+  `directory-modal.tsx`; recommended cards call the existing `/api/skills/install` flow directly
+  with `{package_url, skill_name}` instead of sending hidden chat prompts.
 
 ## Roadmap (next steps)
 

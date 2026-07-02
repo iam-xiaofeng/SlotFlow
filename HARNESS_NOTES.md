@@ -418,16 +418,17 @@ HumanMessage 不会被 messages 投影流式输出**——所以那段是**真�
 ```
 START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model → route
                                                                                               ├─ tools → pre_model
+                                                                                              ├─ pre_model（todo enforcement retry）
                                                                                               └─ finalize → END
 ```
 节点职责（对应 steps 模块）：
 - `prepare`（每回合一次）：`runtime_summary` / `uploads` / `skills_preflight` / 记忆检索(`long_term_memory.retrieve_memories`) / 产物基线(`artifact_discovery.artifact_baseline`)。
 - `triage_gate`（仅首步，pro/ultra）：`clarify_gate.run_triage` → 不可做则 `clarify_via_interrupt`（`interrupt`+答案 `HumanMessage`）。
-- `pre_model`（每步）：`todo_reminder_update` / `repair_dangling_tool_calls` / 记忆 system 注入(`append_memory_system_message`)。
+- `pre_model`（每步）：动态 `todo_reminder_update` / `repair_dangling_tool_calls` / 记忆 system 注入(`append_memory_system_message`)。
 - `SlotFlowSummarizationMiddleware`（独立节点，名字固定）：复用官方 `SummarizationMiddleware.abefore_model` 的 `RemoveMessage`+`lc_source` 逻辑。
 - `agent`：`model.bind_tools(tools)` 调用，读 `state.llm_input_messages` + `state.system_prompt`。
-- `post_model`：`subagent_limit.cap_subagent_calls` 截断超额 `task_tool`。
-- `route`：官方 `tools_condition` → `tools` / `finalize`。
+- `post_model`：`todo_parallel_call_guard` + `todo_enforcement_update`，再由 `subagent_limit.cap_subagent_calls` 截断超额 `task_tool`。
+- `route`：todo enforcer 控制消息 → `pre_model`；否则官方 `tools_condition` → `tools` / `finalize`。
 - `tools`：官方 `ToolNode` + SlotFlow `tool_safety` wrapper（`wrap_tool_call`/`awrap_tool_call` 注入，error ToolMessage 格式不变）。
 - `finalize`（每回合一次）：`artifact_finalize_update` / `explicit_save_update` / `maybe_schedule_extraction`（后台 LLM 抽取）。
 
@@ -562,12 +563,14 @@ completion。然后用 curl 逐变量对照（同一 relay、同一 key、同一
 ### 15.1 问题诊断结果
 
 #### Todo 功能状态 ✅
-经过全面检查，todo 功能的后端和前端实现都是完整的：
-- 后端：`write_todos_tool` 正确注册（仅在 `plan_enabled=True` 时，即 `pro/ultra` 模式）
-- SSE 事件：`todo.updated` 事件从 `values` projection 的 snapshot 中提取，带 signature 去重
-- 前端：`ComposerTodoPanel` 组件正常渲染，包含展开/折叠、进度显示等功能
+当时的全面检查不完整，后续 §20-§24 已推翻其中几条结论：
+- 后端：`write_todos_tool` 现在在所有模式注册，模式不再决定工具是否存在。
+- SSE 事件：`todo.updated` 仍从 `values` projection 的 snapshot 中提取，但 §24 起后端不再按 signature 去重；
+  每个带 todos 的 values snapshot 都会输出一次，前端负责 UI 级签名去重。
+- 前端：`ComposerTodoPanel` 是唯一 todo 面板，包含展开/折叠、进度显示等功能。
 
-**注意**：如果用户报告"todo 不显示"，可能原因是使用了 `flash` 模式（该模式下 `plan_enabled=false`）。
+**注意**：不能再把"todo 不显示"默认归因于 Flash；Flash 也有 `write_todos` 工具。应检查工具注册、后置
+enforcer、SSE `todo.updated`、前端签名/revision 和真实 checkpoint payload。
 
 #### 前端冗余问题 ⚠️
 **问题**：`frontend/src/hooks/use-chat-stream.ts` 中存在两个 todo 更新路径：
@@ -586,7 +589,9 @@ if (streamEvent.event === "state.snapshot") {
 }
 ```
 
-**修复**：移除 `state.snapshot` 中的 todos 处理（L446-449），只保留 `todo.updated` 专用事件。后端已在 `streaming.py:162-171` 中通过 signature 去重，前端不需要两次处理。
+**当时修复**：移除 `state.snapshot` 中的 todos 处理（L446-449），只保留 `todo.updated` 专用事件。当时后端在
+`streaming.py` 中通过 signature 去重；§24 已取消后端去重，改为每个带 todos 的 values snapshot 都输出
+`todo.updated`，前端继续负责 UI 级签名去重。
 
 #### 前端 todo 解析过度验证 ⚠️
 **问题**：`frontend/src/hooks/use-chat-stream-helpers.ts:132-157` 的 `parseTodos` 函数做了完整的类型检查和验证：
@@ -970,171 +975,482 @@ provider 在目录里是 missing、无任何模型可选；glm/kimi/gpt 只存�
 
 ---
 
-## 17. 迭代 9（2026-07-02 续）：思考流适配 OpenAI Responses API ——「只围着 DeepSeek 转」的真实盲区
+## 17. 迭代 10（2026-07-02）：交互链路修正 —— todo 可见性、首字延迟、snapshot 擦字、HITL 回显、目录滚动
 
-### 17.0 起因
-用户反馈「思考的部分好像完全是按 DeepSeek 来的，不知道适配 ChatGPT 不，按理应该适配，DeepSeek
-应该会适配 ChatGPT 的思考吐出模式，但代码好像都围绕 DeepSeek」。要求改成 ChatGPT 优先并验证。
+### 17.0 触发症状
 
-### 17.1 诊断（代码核实，非记忆）
-思考流不是「只围着 DeepSeek 转」，但有一个真实盲区，正好卡在 OpenAI 官方 provider（ChatGPT /
-gpt-5 / o-series）路径上，三 provider 各走各路：
+用户实测反馈五类交互问题：
 
-1. **DeepSeek / `custom` 中转站**：`create_openai_compatible_chat_model` 在 `provider in
-   ("deepseek","custom")` 时用 `_SlotFlowChatDeepSeek` 桥接子类（`runtime/models.py:146`），
-   把 `delta.reasoning_content` → `{"type":"reasoning","reasoning": ...}` content block。
-   `projections.py::extract_reasoning_from_content_block` 读 `reasoning` 字符串 key → 正确进
-   reasoning 通道。
-2. **OpenAI 官方 provider**：用标准 `ChatOpenAI`。gpt-5 / o-series 这些推理模型在注入
-   `reasoning_effort` 后由 langchain-openai 自动走 **Responses API**（`_use_responses_api` 见
-   `langchain_openai/chat_models/base.py:1680`），reasoning 以 **`{"type":"reasoning","summary":
-   [{"type":"summary_text","text": ...}], "id": ...}`** 的形态进 `message.content`。
-   langchain-openai 只在 `output_version=="v0"`（我们没设，默认 `responses/v1`）时才把 reasoning
-   块拍平进 `additional_kwargs["reasoning"]`；默认形态下它原样留在 `message.content`。
-3. **Anthropic**：`{"type":"thinking","thinking": ...}` block，已适配。
+1. 模型声称调用了 `write_todos`，但前端全程看不到 todo。
+2. DeepSeek 官方 thinking 首字很快，SlotFlow 首字明显慢。
+3. 正文流式期间已经出现很多字，结束后又被精简，前面很多内容消失。
+4. thinking 期间有时正文先输出，随后 HITL；用户选项会以“我选择 A：...”形态被重复进正文。
+5. Skills / MCP / Memory 目录和 Skills 子项列表内容多时不能滚动。
 
-盲区在第 2 条：`extract_reasoning_from_content_block` 只读 `reasoning/thinking/text/content`
-这几个**字符串** key，**不读 `summary` 列表** → Responses API 的 reasoning block 被 projection
-直接丢弃（实测 `projection_item_to_agent_event` 对该形态返回 `None`）。结果：gpt-5 的思考流在前端
-**完全看不到**，只剩正文；DeepSeek 路径是好的，无需动。
+### 17.1 代码核实到的根因
 
-### 17.1b 压缩结论：`message.reasoning` typed channel 为何不能「直接用」
+- **todo 可见性当时不是后端事件缺失**：`agent_adapter/streaming.py::iter_projection_agent_events`
+  已从 `values` projection 提取 `todo.updated`（§24 起不再后端 signature 去重）；`use-chat-stream.ts` 也处理
+  `todo.updated`。问题在 UI 位置：`ComposerTodoPanel` 位于输入框上方，流式时用户视线通常在最新
+  assistant 消息附近；输入框靠下或被内容推离注意区域时，用户会认为“没显示”。
+- **首字慢的决定性阻塞之一是强制澄清门**：`graph.py::make_triage_gate_node` 在 pro/ultra 的新用户回合
+  先调用 `run_triage(...)`，这会在主模型产生任何 token 之前多跑一次 LLM。这个设计能拦住“做个表格”这类
+  欠规约请求，但对已经很长、信息完整、甚至明确说“不要问，直接做”的请求仍然先 triage，直接损害首字延迟。
+  另一个已在工作树中的延迟点是 skills preflight：`skills_preflight.py::default_find_skills` 原来会走
+  installable-skill 网络搜索；本次保持它的 `local_only=True`，让网络搜索只由模型显式调用 `skill_match` 时发生。
+- **正文消失是 snapshot 覆盖 live stream**：后端 `chat/routes.py` 在 `run.finished` 时优先用
+  `snapshot_message_content` 落库；前端 `use-chat-stream.ts` 收到 `state.snapshot` 时也用
+  `latestAssistantContent(...)` 直接 `replaceAssistantContent(...)`。当 LangGraph snapshot 只保留更短的最终
+  AIMessage，或者比 `message.delta` 滞后时，已经流给用户看的长正文会被短 snapshot 覆盖。
+- **HITL 回显污染来自前端 resume 文本**：`chat-app.tsx::handleSelectClarification` 删除澄清卡片后，把
+  `我选择 ${option.id}：${option.label}` 当普通用户消息发送。后端 resume detection 本来只需要
+  `request.message` 作为 `Command(resume=<answer>)`，所以这个中文前缀会进入 graph，模型也更容易在正文里复述。
+- **目录滚动是布局约束问题**：`directory-modal.tsx` 的居中弹窗固定高度且外层 `overflow-hidden`，内容列缺少
+  `min-h-0`，滚动容器在 flex/grid 子项里可能拿不到可收缩高度；Skills 子 Skill 列表也需要自己的 max-height
+  + overflow 容器。
+- **OpenAI Responses reasoning summary 必须保留**：`test_provider_reasoning_contract.py` 已把
+  `{"type":"reasoning","summary":[{"type":"summary_text","text": ...}]}` 固定为 reasoning 通道输入；当前
+  `projections.py::extract_reasoning_from_content_block` 必须 flatten `summary[].text`，否则 gpt-5/o-series
+  thinking 会静默丢失。
 
-LangGraph v3 的 `messages` projection 上确有 `.reasoning` / `.text` 两个 typed channel，但它们
-不是凭空有的——靠 langchain-core `chat_model_stream.py` 把 `content-block-delta`（`delta.type ==
-"reasoning-delta"`）累积而成；而 `reasoning-delta` 又由 `_compat_bridge._to_content_delta` 从
-`content_blocks` 里 `type=="reasoning"` 的 block 提取，提取/发不发的字段写死成
-`block.get("reasoning")`（扁平字符串，`_compat_bridge.py:128` / `_should_emit_delta:283`）。**整条
-typed 链只认 `reasoning` 扁平字符串字段，不认 `summary` 列表。** 决定性实测（喂真实形态进 core）：
+### 17.2 修法
 
-- OpenAI Responses `{"type":"reasoning","summary":[{...,"text":"先分析"}]}` → `_should_emit_delta=False`、
-  `reasoning-delta.reasoning=""` → `.reasoning` channel 收不到，静默丢失。
-- DeepSeek bridge `{"type":"reasoning","reasoning":"..."}` → `True`，进 channel。
-- Anthropic `{"type":"thinking",...}` → core 包成 `non_standard`，`_should_emit_delta=False`。
+1. **todo 面板保持单一展示位**：`write_todos` 的用户可见状态只进入输入框上方的
+   `ComposerTodoPanel`。不要在 `MessageList` 里再加 inline 面板；这会产生两个视觉面板，让用户以为存在两套
+   状态，并且和“输入框上方可折叠面板”这个交互预期冲突。实时性应通过 `todo.updated` → `todos` state →
+   `ComposerTodoPanel` 的链路解决，而不是靠复制一个就近展示位。
+2. **snapshot 只做合并，不擦 live stream**：
+   - 前端新增 `mergeAssistantContent(current, incoming)`，`state.snapshot` 到达时只采用更长或前缀兼容的内容；
+     较短且不兼容的 snapshot 不再覆盖已流式展示的正文。
+   - 后端新增 `select_assistant_content(...)`，落库也按同一规则选择更完整内容，避免刷新后又回到短 snapshot。
+   - reasoning 仍沿用既有 `mergeReasoningContent` / `select_assistant_reasoning_content` 长内容优先规则。
+3. **HITL fixed-option resume 精简**：`handleSelectClarification` 现在发送 `option.label` 作为
+   `request.message`；`option_id` / `option_label` 留在 metadata。后端仍按原协议把普通消息视为
+   `Command(resume=...)`，但不会再把“我选择 A：”前缀喂给模型。
+4. **首字延迟快路径**：`clarify_gate.py::should_skip_triage_model_call` 默认跳过普通短消息的 triage LLM；
+   只有短且明显像欠规约产出任务的请求（例如“做个表格”）才在主模型前跑 triage。详细请求（≥120 字）、
+   显式包含“不要问/无需确认/直接做/no clarification/don't ask/just do”等直接执行标记的请求也跳过 triage。
+5. **目录滚动**：`directory-modal.tsx` 的内容列加 `min-h-0`，主体滚动区使用原生
+   `overflow-y-auto overscroll-contain [scrollbar-gutter:stable]`；子 Skill 列表也加独立滚动容器。
+6. **Responses reasoning summary 恢复**：`projections.py::extract_reasoning_from_content_block` 在
+   `reasoning/thinking/text/content` 字符串回退后 flatten `summary[].text`，保持 OpenAI Responses API
+   summary 形态不丢。
 
-所以「直接用 `message.reasoning` 就完事」成立的前提是 provider 那层已把思考吐成
-`{"type":"reasoning","reasoning": str}` block——三个 provider 没一个原生长这样，都得有人归一：
-DeepSeek 的归一最简单（一个子类 hook 把 `reasoning_content` 拍成扁平字符串 block），OpenAI Responses
-最别扭（`summary[]` 列表，core 不认，得 projection 兜底扁平化），Anthropic 同样别扭。**「兼容 GPT 接口
-的 DeepSeek 反而比 GPT 本身好接」是真的**——DeepSeek 思考是 chat/completions 协议里的非标准扁平字段
-（trivial 转），OpenAI 自家 Responses 反用嵌套 `summary[]` 列表（core 的窄预期不认）。当前两处兼容：
-`runtime/models.py` bridge 子类（DeepSeek/custom）+ `projections.py::extract_reasoning_from_content_block`
-的 `summary[]` 扁平化（OpenAI Responses，§17.3 新增）。
+### 17.3 不变量与边界
 
-### 17.2 排除「裸 ChatOpenAI 丢 reasoning_content」这条线（live-verified）
-relay（`https://metapi.lilililwan.xyz/v1`）原始 SSE 实测：`glm-5.2` 的 `delta.reasoning_content`
-与 `delta.content` 在 SSE 层就是分开的两路（460 vs 126 chunks）。裸 `ChatOpenAI`（非 bridge 子类）
-**完全丢弃** `reasoning_content`（`BaseChatOpenAI` docstring 明确声明不提取非标准字段）→ reasoning
-以「思考过程：…」字样泄漏进 content 通道。而 `_SlotFlowChatDeepSeek` 桥接子类把它正确解析成
-`{"type":"reasoning"}` block（473 块全部进 reasoning 通道），与 SSE 计数一致，无串道。这印证
-`custom` 路径走 bridge 子类是对的；盲区只在**官方 OpenAI Responses API 的 summary 形态**。
+- `message.delta` 是用户已看到的 live stream；`state.snapshot` 只能补全或纠正为更完整内容，不能把已展示文本
+  缩短。除非未来能证明某类 snapshot 是权威“编辑后最终答案”，否则不要回到无条件替换。
+- 强制 clarify gate 不能完全删除：它仍负责短、欠规约产出型请求的 HITL。快路径覆盖“普通短消息/明显详细/
+  明确不要问”的请求，用确定性文本规则绕过额外 LLM 调用，避免把模型判断放到首字之前。
+- `ask_clarification` 的 resume 值仍是用户答案本身；前端只是不再人为加“我选择 A：”前缀。固定选项 id 属于
+  UI metadata，不应进入模型正文。
+- todo 的真实状态源仍是 LangGraph `todos` state → `todo.updated`；前端只允许一个展示位置：
+  `ComposerTodoPanel`。如果用户看不到实时更新，应修事件/状态/revision 链路，不要新增第二个 UI 面板。
+- Skills preflight 的 prepare-node 路径保持 local-only；网络型 skill search 只能由模型显式调用工具触发，避免
+  每轮 first-token 被外部请求拖慢。
+- OpenAI Responses `summary[]` reasoning 是 provider 契约的一部分；改 projection 前必须保
+  `tests/test_provider_reasoning_contract.py` 绿。
 
-### 17.3 修法（根因层，最小改动）
-单一入口扩展，不动 DeepSeek / Anthropic 已验证的路径：
+### 17.4 离线验收
 
-`app/chat/agent_adapter/projections.py::extract_reasoning_from_content_block`：在原有字符串 key
-回退之后，新增 `summary` 列表扁平化分支——遍历 `summary[].text` 拼接成 reasoning 文本。这样
-gpt-5 / o-series 的思考经 Responses API → `message.content` 的 summary block → reasoning 通道，
-与 DeepSeek bridge block、Anthropic thinking block 同归一到 `{"channel":"reasoning"}`。
+新增/更新的回归点：
 
-不动 `runtime/models.py`：OpenAI provider 用标准 `ChatOpenAI` + `reasoning_effort` 的现状是对的
-（Responses API 由 langchain-openai 自动选择，不需要我们传 `reasoning` dict 或 `use_responses_api`）。
-`build_openai_compatible_model_kwargs` 对 openai reasoning 模型只在 `thinking_enabled` 且
-`is_openai_reasoning_model` 时设 `reasoning_effort="high"`，否则不设——这本身正确。
-
-### 17.4 验证
-- 离线契约 `tests/test_provider_reasoning_contract.py`：新增 `openai-responses-reasoning-summary`
-  与 `openai-responses-reasoning-summary-multi` 两个用例，并在串道测试 `reasoning_items` 里补
-  summary 形态；12 passed。这是该契约首次覆盖 Responses API summary 形态（此前注释虽写
-  「OpenAI reasoning models -> reasoning content blocks」却没测真实 summary 结构，盲区因此漏网）。
-- 全量后端 `uv run pytest -q -k "not live"`：281 passed；`ruff check` 通过。
-- 端到端实测（relay `glm-5.2` 走 bridge 子类经完整 projection 链路）：reasoning=467 / content=113，
-  与原始 SSE 的 reasoning_content/content 分流计数一致，无串道。OpenAI Responses summary 形态
-  单元验证：`{"type":"reasoning","summary":[{"type":"summary_text","text":"先分析"}]}` →
-  `("reasoning","先分析")`，DeepSeek block / Anthropic thinking / text block 同样归一正确。
-
-### 17.5 不变量与边界（勿回归）
-- projection 层是**唯一**吸收 provider 差异的地方；新增 summary 扁平化只增不减，不影响 DeepSeek
-  bridge 的 `reasoning` 字符串 key 与 Anthropic 的 `thinking` key 优先级。
-- 不要为了让 OpenAI 走 reasoning 而去改 `runtime/models.py` 强塞 `use_responses_api`/`reasoning`
-  dict——langchain-openai 已按 `reasoning_effort` + 模型前缀自动选 Responses API，强塞反而可能
-  在非推理模型上触发 400。
-- `test_provider_reasoning_contract.py` 是这条链路的红线，改 projection 前先保它绿。
-- 真实 OpenAI gpt-5 端到端 live 验证缺凭据（`OPENAI_API_KEY` 未配、relay 不提供 gpt/o-series），
-  当前验证落在「契约 + 与 relay 真实 reasoning 模型一致的分流行为」；补 `OPENAI_API_KEY` 后建议
-  跑一次 gpt-5 真实流确认 summary delta 的逐块聚合（langchain-openai 是按 `summary_index` 聚合
-  还是逐 delta 直发，可能影响拼接顺序，但都进 reasoning 通道，不影响「不丢、不串道」核心）。
+- `test_should_skip_triage_model_call_for_direct_or_long_requests`：长完整请求、显式“不要问/直接做”、普通短消息
+  跳过 triage；“做个表格”仍不跳过。
+- `test_select_assistant_content_keeps_longer_streamed_content_over_short_snapshot`：短 snapshot 不再覆盖更长的
+  `message.delta` 正文。
+- `tests/test_provider_reasoning_contract.py` 的 OpenAI Responses summary fixtures 继续要求
+  `summary[].text` 进入 reasoning 通道。
 
 
 ---
 
-## 18. 迭代 10（2026-07-02 续）：HITL 自愿澄清完全失效 + 多轮答案串连（根因：tool-safety wrapper 吞 GraphBubbleUp）
+## 18. ToolNode HITL interrupt 不变量（2026-07-02 当前代码）
 
-### 18.0 症状
-用户报告：(1) 模型多次 HITL 询问时，后选的答案会把前面的答案也一起发过去，模型以为前面也选了同一个；
-(2) 前端"卡"、思考慢、内容多时卡顿；(3) pro 模式 todo 表不显示给用户；(4) 回答最新问题后弹出**旧的**
-产物网页（issue #8 第 3 点）。逐一诊断，(1) 是后端根因 bug，(3)(4) 是前端问题，(2) 是前端性能。
+### 18.0 代码核实
 
-### 18.1 HITL 根因（代码核实，可复现）：tool-safety wrapper 吞掉 GraphBubbleUp
-`GraphInterrupt` / `GraphBubbleUp` 是 `Exception` 子类（`langgraph.errors`，已核实 MRO）。SlotFlow 的
-tool-safety wrapper（`harness/graph.py::_slotflow_tool_safety_wrapper` / `_slotflow_async_tool_safety_wrapper`）
-用 `except Exception` 捕获所有异常并转成 `tool_execution_error` ToolMessage。所以 **voluntary
-`ask_clarification` 工具的 `interrupt()` 被 wrapper 当普通异常吞掉**——graph 根本不暂停，模型拿到一条
-`tool_execution_error: (Interrupt(value={'type': 'clarification'...` 的 ToolMessage 后直接继续回答。
+`harness/graph.py::_slotflow_tool_safety_wrapper` 和
+`_slotflow_async_tool_safety_wrapper` 包住 `ToolNode` 的每次工具调用；普通工具异常会转为
+`tool_execution_error` ToolMessage。但 `ask_clarification` 工具体内调用 LangGraph
+`interrupt(...)`，该异常路径是 `GraphBubbleUp`，必须上抛给 LangGraph runtime 才能暂停图并让
+`agent_adapter/streaming.py::_clarification_from_pending_interrupt` 发出 `clarification.requested`。
 
-实测（`build_slotflow_harness_graph` 真实 graph + ToolNode + wrapper）：模型调 `ask_clarification` →
-`interrupts` 为空，`messages` 末尾是 `ToolMessage(error=tool_execution_error...)` + `AIMessage("done")`，
-HITL 完全没发生。这与 AGENTS.md §"HITL clarification" 写的「triage_gate MUST let GraphBubbleUp propagate —
-never swallow it in a fail-open except Exception」是同一条规则，但**只守了 `triage_gate` 节点，没守 ToolNode
-的 safety wrapper**。`triage_gate`（forced gate）在节点内直接 `interrupt()`，不经 wrapper，所以它能暂停
-（§12 live 验证的是它）；voluntary `ask_clarification` 走 ToolNode + wrapper → 被吞。用户看到的"答案串连/
-重复"是 wrapper 吞 interrupt 后模型行为混乱的连锁表象。
+当前代码已经在两个 wrapper 的 `except Exception` 之前放行 `except GraphBubbleUp: raise`。这是
+ToolNode 路径的硬不变量；不要把它合并回通用异常处理。否则 voluntary `ask_clarification` 会被包装成
+普通工具错误，HITL 不会暂停。
 
-修法（根因层）：两个 wrapper 的 `except Exception` **之前**各加 `except GraphBubbleUp: raise`，让 interrupt
-照常上抛暂停 graph。与 `triage_gate` 同一条不变量，只是补到 ToolNode 路径。
+### 18.1 验证边界
 
-验证：(1) 单次 `ask_clarification` 现在真正 `interrupts` 非空、resume 后工具结果 = `用户对该澄清问题的回答是：A`、
-模型回答正确、无残留 interrupt。(2) **连续两次** `ask_clarification`（Q1→答A→Q2→答X）顺序正确，`final messages`
-= [user, AIMessage(调Q1), ToolMessage(答A), AIMessage(调Q2), ToolMessage(答X), AIMessage("结果:A和X")]，
-**不串答案**。新增回归测试 `test_ask_clarification_via_slotflow_tool_node_actually_interrupts`（走真实 graph，
-wrapper 在路径上）钉死这条。全量 282 passed。
+回归测试名：`test_ask_clarification_via_slotflow_tool_node_actually_interrupts`。它走真实 graph +
+ToolNode + wrapper，验证 `ask_clarification` 能产生 pending interrupt，并在 resume 后继续执行。
 
-### 18.2 issue #8 第 3 点：回答后弹出旧产物网页（前端根因）
-`chat-app.tsx::sendPreparedMessage` 末尾 `newArtifact = newArtifacts[0]` 无差别自动预览"最新产物"。但
-`newArtifacts` 来自 `refreshArtifacts()`（`listArtifacts` 递归全量 `artifacts/` 下**所有 thread + legacy**
-文件）减去 `previousArtifactPaths`。排序不稳定 + 全量 → 回答一个无关新问题时，`newArtifacts[0]` 可能是
-**别的 thread 或 legacy 的旧网页**，于是弹出旧的。
 
-修法：auto-open 只取**本 thread 命名空间**（`artifacts/<thread_id>/` 前缀）下、且本次 run 之前没有的新文件。
-`discoveredArtifacts`（流式 `state.snapshot` 的 `new_entries`）与 `nextArtifacts` 都先按 `threadOwned`
-（`artifacts/${threadId}/` 前缀）过滤，再减 `previousArtifactPaths`。这样回答新问题时只会弹**本次本 thread**
-新写的产物，旧 thread / legacy 产物不再误弹。
+---
 
-### 18.3 todo 在 pro 模式"不显示"（前端根因，非 §15 回归）
-后端逻辑绿（`todo_event_from_snapshot` 从 values snapshot 实时发 `todo.updated`，契约测试过）。根因在
-`composer-parts.tsx::ComposerTodoPanel`：默认 `isCollapsed=true`，只在 `todoRevision` 变化时展开；但
-`replaceTodos` 只在**首次出现** todo 时递增 `todoRevision`，后续 status 更新不递增 → 面板保持折叠，用户
-看到"不显示"。展开区 `max-h-32` 也太矮，多 todo 看不全。
+## 19. 迭代 11（2026-07-02）：懒加载 Docker 代码执行沙箱
 
-修法：流式期间（`isStreaming && todos.length>0`）强制展开，run 结束才折叠；展开区高度提到 `max-h-60`。
-（§15 删的前端 `state.snapshot` todos 分支与本次无关——后端 `todo.updated` 仍实时发，前端仍处理。）
+### 19.0 目标与取舍
 
-### 18.4 前端卡顿（思考慢/内容多卡）：每 delta 全量重渲 + 重 markdown 解析
-`message-list.tsx` 的 `messages.map` 在每次 delta（`appendAssistantDelta` patch 最新 assistant）都重渲
-**所有** `MessageBubble`，每个都跑 `ReactMarkdown`（`remark-gfm` + `remark-math` + `rehype-katex`，重）。
-流式每秒几十次 delta → 整个消息列表反复全量 markdown 解析 → 卡顿。
+后续 Skills 可能携带脚本、代码示例或需要执行的 helper。直接让模型在宿主机运行代码风险过高；但每轮都预先
+创建容器又会拖慢首字。因此本轮实现一个**懒加载**代码执行沙箱：只有模型实际调用 `sandbox_exec` 时才碰 Docker。
 
-修法：`MessageBubble` 用 `React.memo` + 自定义比较（只看 `message`/`isLatest*`/`isEditing`/`isStreaming`/
-`userMessageRef`，忽略回调引用变化），这样流式 delta 只重渲**正在流的那一条**，历史消息不再反复解析 markdown。
-`SoftStreamingMarkdown` 的 `isSoft` 由 `opacity-80` 闪烁改为 `opacity-70 → opacity-100` 的由浅到深淡入，
-新内容读起来是"逐字浮现、由浅变深"而非硬跳。`typecheck` + `next build` 均通过。
+没有采用“先复制整个 workspace 进容器、结束再搬回”的方案。SlotFlow 已有 `SlotFlowWorkspace` 边界和
+`artifacts/<thread_id>/` 产物命名空间，复制会引入同步冲突和结束时机问题。当前实现用 Docker bind mount：
+容器写入可写目录时，文件天然落在本地 workspace 中，不需要额外搬运。
 
-### 18.5 不变量与边界（勿回归）
-- **tool-safety wrapper 的 `except Exception` 必须在前面放行 `GraphBubbleUp`**（raise），否则 voluntary HITL
-  静默死。这与 `triage_gate` 的同源规则，补在 ToolNode 路径。回归测试
-  `test_ask_clarification_via_slotflow_tool_node_actually_interrupts` 钉死。
-- auto-open artifact 只取本 thread 命名空间 + 本次新文件；不要回到全量 `newArtifacts[0]`。
-- todo 面板流式期间必须展开；`replaceTodos` 的 revision 只管首次出现，不要改成每次 status 变都 bump（会
-  和后端 signature 去重打架）。
-- `MessageBubble` memo 比较必须含 `message` 引用（流式时最新消息的 message 对象会变 → 重渲那一条），历史
-  消息 message 引用稳定 → 不重渲。回调引用变化被刻意忽略，行为稳定即可。
+### 19.1 代码链路
+
+1. `chat/runtime/config.py::load_sandbox_config_from_env` 读取代码执行相关环境变量：
+   `SLOTFLOW_CODE_EXECUTION_ENABLED`、`SLOTFLOW_DOCKER_SANDBOX_IMAGE`、
+   `SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS`、`SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED`。
+2. `harness/tools/registry.py::build_harness_tools` 在 workspace tools 后、network tools 前注册
+   `build_sandbox_tools(...)`，并把当前 `thread_id` 与 `skills_root` 传入。
+3. `harness/tools/sandbox.py::build_sandbox_tools` 创建 `LazyDockerSandbox` 对象，但不启动容器；
+   `sandbox_exec(command, timeout_seconds)` 被实际调用时才执行。
+4. `harness/sandbox/docker.py::LazyDockerSandbox._ensure_started` 第一次执行时运行
+   `docker run -d --rm ... sleep 3600`，后续同一个工具实例复用该容器；进程退出时通过 `atexit` 尝试
+   `docker rm -f` 清理。
+5. `sandbox_exec` 内部用 `docker exec -w /workspace/work <container> sh -lc <command>` 执行命令，返回
+   `ok/exit_code/stdout/stderr/timeout_seconds/mounts/source` JSON；Docker 不可用或启动失败时返回结构化错误，
+   不让普通回答链路崩掉。
+
+### 19.2 文件边界
+
+所有路径都复用 `SlotFlowWorkspace.resolve_path`，避免另开一套路径校验规则：
+
+- `/workspace/uploads` → 本地 `uploads/`，只读。用户上传文件只能读取，不能被容器修改。
+- `/workspace/artifacts` → 本地 `artifacts/<thread_id>/`，可读写。用户可见输出必须写这里；因为是 bind mount，
+  文件立即回到本地 workspace，并会被既有 artifacts 列表/预览链路发现。
+- `/workspace/work` → 本地 `.sandbox/<thread_id>/`，可读写。用于临时代码、脚本、包实验和中间结果；不直接展示给用户。
+- `/workspace/skills` → 已安装 Skills 根目录，只读且仅当 `skills_root` 存在时挂载。Skill helper 脚本可被读取/执行，
+  但不会在容器内修改安装目录。
+
+默认网络为 `--network none`。需要联网安装依赖或访问外部资源时，必须显式设置
+`SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=true`；这和普通 `web_search/web_fetch` 的网络工具边界分开。
+
+### 19.3 不变量
+
+- Docker 容器必须懒创建：构造 `LazyDockerSandbox` 或注册工具不能运行 Docker 命令。
+- 代码/脚本执行走 `sandbox_exec`，不要重新引入宿主机 `subprocess` 工具。
+- 用户上传保持只读；当前线程 artifacts 和 scratch 才可写。
+- 需要展示给用户的文件写 `/workspace/artifacts`，不要写 `/workspace/work` 后再让前端猜。
+- Docker 失败是工具结果错误，不是 graph 崩溃。
+
+### 19.4 验证
+
+- `test_lazy_docker_sandbox_starts_only_on_first_exec` 用 fake runner 验证：构造阶段不调用 Docker；第一次
+  `exec` 才 `docker run` + `docker exec`；uploads/skills mount 带 `readonly=true`；artifacts/work 可写；
+  本地 `artifacts/<thread>` 和 `.sandbox/<thread>` 会创建。
+- `test_sandbox_exec_tool_is_disabled_by_config` 验证 `SLOTFLOW_CODE_EXECUTION_ENABLED=false` 对应配置下不注册工具。
+- `test_registry_exposes_key_tools_per_category` / `test_registry_orders_workspace_then_network_then_customization`
+  验证 `sandbox_exec` 进入 registry 且位于 workspace 与 network 之间。
+
+
+---
+
+## 20. 迭代 12（2026-07-02）：todo 可视化面板在 Flash 下没有被调用
+
+### 20.0 症状
+
+用户在输入框中要求“测试你的 todo 功能”，界面只看到模型在正文里解释 `write_todos`，没有出现输入框上方的
+实时 todo 面板。截图里的模型选择为 Flash 系列，说明这不是单纯前端 CSS 问题，而是工具可用性问题。
+
+### 20.1 根因
+
+`harness/tools/registry.py` 原来只在 `features.plan_enabled` 为真时注册 `write_todos`：
+`todo_tools = [write_todos_tool] if features.plan_enabled else []`。Flash 模式下 `plan_enabled=False`，
+所以模型根本没有 `write_todos` 工具可调用；它只能在 reasoning/正文中“模拟”或描述 todo 流程。
+
+前端 `ComposerTodoPanel` 仍在 `chat-composer.tsx` 渲染链路上，但 `todos.length === 0` 时返回 `null`。没有真实
+工具调用 → 没有 `todos` state → 面板自然不可见。这就是“面板有，但没被调用”的实际机制。
+
+另一个交互问题是旧逻辑在流结束后自动折叠 composer todo 面板；即使中途显示过，结束时也容易让用户误以为
+没有可视化面板。
+
+### 20.2 修法
+
+1. `write_todos` 在所有模式注册。Flash 不再因为 `plan_enabled=False` 失去工具；显式测试/要求 todo 时可以触发
+   真正的 `Command(update={"todos": ...})`。
+2. 当时 Pro/Ultra 仍依赖 `pre_model` 注入 `SLOTFLOW_TODO_SYSTEM_PROMPT` 和 builder 静态提示；§24 已删除这些
+   prompt 级约束，改为 `post_model` 节点检查后路由回 `pre_model`。
+4. 前端 `ComposerTodoPanel` 有 todo 时默认展开，流结束后不自动折叠；用户仍可手动折叠。
+5. 前端在 `state.snapshot` 分支也读取 `latestTodos(...)`，作为 `todo.updated` 中间事件之外的兜底同步。
+
+### 20.3 不变量
+
+- `write_todos` 是真实 UI 状态工具，不应只在 Pro/Ultra 可用；模式只决定“是否主动鼓励规划”，不决定用户显式要求
+  todo 时工具是否存在。
+- 面向用户的 todo 状态必须进入 `ComposerTodoPanel`，不能让模型用正文表格替代，也不能在消息区复制第二个
+  todo 面板。
+- 完成后仍保留输入框上方 todo 面板，除非用户手动折叠或切换/重置线程。
+
+### 20.4 验证
+
+- `test_registry_exposes_write_todos_even_in_flash_mode` 覆盖 Flash 模式仍注册 `write_todos`。
+- 前端 `pnpm typecheck` 覆盖 `state.snapshot` todo fallback 与 composer 面板改动。
+
+
+---
+
+## 21. 迭代 13（2026-07-02）：todo 面板重复与更新感修正
+
+### 21.0 症状
+
+用户实测发现 todo UI 仍然不对：
+
+1. 页面同时出现消息区的“任务进度”卡片和输入框上方的 `To-dos` 折叠面板。
+2. 用户期望只有输入框上方那个可折叠面板。
+3. 面板看起来不是每次 `write_todos` 后都实时推进。
+
+### 21.1 根因
+
+第 17 轮把“看不到 todo”的问题误判成“展示位置离用户视线太远”，于是新增了
+`message-list-parts.tsx::InlineTodoProgress` 并在 `MessageList` 中渲染第二个面板。这不是根因修复：
+真实状态源仍然只有 LangGraph `todos` state，但两个视觉面板会让用户以为存在两套状态，且违反“输入框上方
+可折叠 todo 面板是唯一展示位”的交互设计。
+
+实时性问题在前端 revision 语义上也有缺口：`use-chat-stream.ts::replaceTodos` 只在本轮第一次出现非空 todo
+时递增 `todoRevision`。后续 `pending → in_progress → completed` 的状态变化虽然会 `setTodos(...)`，但不会更新
+revision；`ComposerTodoPanel` 依赖 revision 触发展开/更新提示时，就表现为“不是每次工具调用都推进”。
+
+### 21.2 修法
+
+1. 删除 `InlineTodoProgress` 组件和 `MessageList` 的 `todos` 传参，todo 只在 `ComposerTodoPanel` 展示。
+2. `replaceTodos` 增加 `todoSignatureRef`，按完整 todo 列表签名去重；每次签名变化都 `setTodos` 并递增
+   `todoRevision`。
+3. 新消息发送、切换线程、重置线程、新建线程时同时清空 `todos`、`todoRevision`、`todoSignatureRef` 和
+   `hasTodoListForCurrentRunRef`，避免旧任务列表残留到下一轮。
+4. `AGENTS.md` 和本文件都把 todo UI 不变量改为“单一 composer 面板”，避免后续再按旧结论恢复第二展示位。
+
+### 21.3 不变量
+
+- `write_todos` 的唯一用户可见面板是输入框上方的 `ComposerTodoPanel`。
+- `todo.updated` 和 `state.snapshot` 都可以更新 `todos`，但前端必须按签名去重；重复事件不能造成闪烁，真实状态变化必须递增 revision。
+- 不要通过正文表格或消息区卡片模拟 todo 状态；如果面板没实时更新，应修 SSE/状态/revision 链路。
+
+
+---
+
+## 22. 迭代 14（2026-07-02）：todo 只显示勾、不显示内容的根因修复
+
+### 22.0 症状
+
+用户再次实测 todo：输入框上方的 `To-dos` 面板出现了进度 `4/4` 和四个完成图标，但每一行没有任务文字。
+模型正文还在解释“右侧 todo 面板实时更新”，这说明问题不是 Flash 模式，也不是面板不存在，而是状态内容没有被
+正确渲染进唯一的 composer todo 面板。
+
+### 22.1 真实数据复现
+
+直接读取本地运行产生的 `backend/.slotflow/checkpoints.sqlite3`，用 LangGraph 的
+`JsonPlusSerializer` 解码最近线程 `thread_306516daebe2` 的 `writes.channel='todos'`，真实 state 是：
+
+```python
+[
+  {"status": "completed", "text": "🔍 搜索 AI Agent 框架最新动态（LangGraph / CrewAI / AutoGen）"},
+  {"status": "completed", "text": "📊 整理三大框架核心对比维度"},
+  {"status": "completed", "text": "✍️ 生成技术要点汇总报告"},
+  {"status": "completed", "text": "📝 输出最终总结"},
+]
+```
+
+也就是说模型确实逐步调用了 `write_todos`，并且任务文字存在；但字段名是 `text`。当时后端
+`agent_adapter/projections.py::normalize_todos` 只读取 `content`，前端
+`hooks/use-chat-stream-helpers.ts::parseTodos` 又只是 `return value as ChatTodo[]` 的类型断言，最终 UI
+拿到的对象没有 `content` 字段。`ComposerTodoPanel` 渲染 `todo.content`，所以只剩状态图标和计数，看起来像
+“只有几个勾”。
+
+根因不是 CSS、不是滚动、不是模式选择，而是 todo item schema 在三段链路里不一致：
+
+1. `write_todos` 工具签名是 `todos: list[dict[str, Any]]`，暴露给模型的 JSON schema 只有
+   `additionalProperties: true`，没有明确告诉模型必须用 `content`。
+2. 模型按常见/官方习惯用了 `text` 字段。
+3. 后端 projection 和前端 parser 没把 `text` 归一到 `content`。
+
+### 22.2 修法
+
+1. `harness/steps/todo.py::Todo` 改为 Pydantic model，公开 schema 只展示 `content` + `status`；同时用
+   `validation_alias=AliasChoices("content", "text")` 兼容旧/模型已发出的 `text`。
+2. `write_todos_tool` 函数签名改为 `todos: list[Todo]`，让 LangChain tool schema 不再是任意 object；工具返回
+   `Command(update={"todos": normalized_todos})` 前统一 `model_dump()` 成 `{content, status}`。
+3. `agent_adapter/projections.py::normalize_todos` 兼容 `content` 和 `text`，把 SSE `todo.updated` 永远输出为
+   `{content, status}`。
+4. `frontend/src/hooks/use-chat-stream-helpers.ts::parseTodos` 不再做裸类型断言，逐项校验并兼容 `text`，避免旧
+   checkpoint / 异常事件再次让 UI 只有图标没有文字。
+5. 当时曾在 `SLOTFLOW_TODO_SYSTEM_PROMPT` 追加字段形状提示；§24 已删除这个 prompt 兜底。字段形状只保留在
+   tool schema、tool validation、projection normalization 和 frontend parser 边界。
+
+### 22.3 验证
+
+- 用真实 checkpoint 的 raw `text` todos 过修复后的 `normalize_todos`，输出包含完整 `content` 文本。
+- `tests/test_harness_steps.py::test_write_todos_tool_is_registered_with_command_return` 验证工具 schema 暴露
+  `content`、不暴露 `text`，但旧 `text` 入参会归一成 `content`。
+- `tests/test_agent_adapter.py::test_todos_in_values_snapshot_become_todo_updated_event` 验证 `text` snapshot
+  也能输出 `todo.updated` 的 `content`。
+- `pnpm typecheck` 通过前端 parser 和 UI 类型检查。
+
+### 22.4 不变量
+
+- 对外/前端统一只认 `{content, status}`；`text` 只能作为兼容输入存在于 tool validation、projection normalization
+  和 frontend parsing 边界。
+- `parseTodos` 不能再用裸类型断言；SSE 是跨边界数据，必须做运行时校验。
+- 看到“只有勾没有文字”时，优先检查真实 checkpoint/SSE payload 字段名，不要先改 CSS 或再加 UI 面板。
+
+
+---
+
+## 23. 迭代 15（2026-07-02）：删除父 Skill 后子 Skill 残留
+
+### 23.0 症状
+
+用户在 Skills 面板删除“大 Skill”（父 Skill）后，里面的小 Skills 仍然留在面板里。这个问题通常出现在两类安装：
+
+1. 新的 registry 安装：主 Skill 在 `skills/<parent>/`，依赖 Skill 被复制到
+   `skills/<parent>/dependencies/<child>/`，配置里 `child.parent=<parent>`。
+2. 老的/迁移前安装：同一个 `package_url` 的多个 Skill 仍是 `skills/<parent>/`、`skills/<child>/`
+   平级目录；`list_skills` 会通过 `infer_missing_dependency_parents()` 把子项归到父项下。
+
+### 23.1 根因
+
+`backend/app/skills/routes.py::delete_skill` 原来只做了：
+
+1. `find_skill_by_name(root, skill_name)` 找到当前要删的 Skill。
+2. `shutil.rmtree(skill.skill_dir)` 删除这个 Skill 自己的目录。
+3. `store.remove_skill_tree_config(skill.name)` 删除配置里的父子项。
+
+这只删除了“当前目录”。如果子 Skill 是平级 legacy 目录，配置被删后物理目录还在；下一次
+`load_enabled_skills(root, enabled_names=None)` 会重新扫描所有 `SKILL.md`，于是子 Skill 又以顶层/孤儿项形式出现。
+如果子 Skill 在 nested `dependencies/` 下，删除父目录会物理删除它，但扫描缓存也可能保留旧结果到 TTL 过期。
+
+所以根因不是前端分组，而是后端删除没有以“Skill tree”为物理删除单位，也没有在删除后显式清
+`harness.skills.registry` 的 scan cache。
+
+### 23.2 修法
+
+1. `delete_skill` 先调用 `skill_tree_for_delete(...)` 收集要删除的完整树：
+   - 被点选的父 Skill；
+   - 配置中 `parent` 递归指向它的子/孙 Skill；
+   - 物理目录位于父 Skill 目录下的 nested child Skill。
+2. 删除前逐项检查 protected 和路径边界，避免删到 `skills_root` 外或半删 protected 子项。
+3. 用 `minimal_delete_dirs(...)` 去掉已经被父目录覆盖的 nested 子目录，只对最小目录集合执行 `shutil.rmtree`。
+4. `SlotFlowSkillsConfigStore.remove_skill_tree_config` 改为递归删除配置树，不再只删一层 direct child。
+5. 删除后从 `runtime_config.enabled_skills` 移除整棵树的名字，并调用 `invalidate_skill_scan_cache()`，再
+   `refresh_runtime_skills_config(...)`。
+
+### 23.3 验证
+
+- `test_delete_parent_skill_removes_installed_dependency_skills`：模拟 skills CLI 返回父 + child，确认删除父后
+  `skills/<parent>/dependencies/<child>` 不会在 `/api/skills` 里残留。
+- `test_delete_parent_skill_removes_legacy_same_package_children`：模拟旧式同 `package_url` 的平级父/子目录，
+  先触发 `infer_missing_dependency_parents()`，再删除父，确认父目录和子目录都被物理删除，列表里也都消失。
+
+### 23.4 不变量
+
+- Skills 面板里的父子关系不是纯前端视觉分组；`SkillRecord.parent` 表示删除/配置生命周期上的树关系。
+- 删除父 Skill 必须删除整棵树的配置和物理目录。只删父配置或只删父目录都会留下可被扫描器重新发现的孤儿 Skill。
+- 修改 skills 磁盘目录后必须清 scan cache；不要依赖 `skills_root` mtime 捕捉 nested 目录变化。
+
+
+---
+
+## 24. 迭代 16（2026-07-02）：todo 从 prompt 约束迁移到 post_model 节点策略
+
+### 24.0 症状
+
+用户确认 composer 上方的 todo 面板终于能显示后，又指出上一次修法仍有一个设计问题：为了让模型更容易调用
+`write_todos`，我们把太多要求写进了静态 prompt，包括 builder 里的“显式测试 todo 时调用 write_todos”和
+`SLOTFLOW_TODO_SYSTEM_PROMPT` 里的字段形状提示。这会让 todo 行为继续依赖模型是否服从提示词；一旦模型正文先答、
+忘记更新状态、或把 todo 进度写进回答，前端状态仍可能滞后。
+
+### 24.1 根因
+
+根因是边界放错了：todo 是 SlotFlow 的运行时 UI 状态，不应该只靠 prompt 约束模型“记得更新”。提示词能提升概率，
+但不能保证图状态发生变化，也不能在每次模型步结束后检查实际 state。真正可靠的边界应该在 LangGraph 节点层：
+`agent` 产生 AIMessage 后，`post_model` 能看到最新 AIMessage、tool_calls 和当前 `state.todos`，因此它才是判断
+“是否需要创建/更新 todo 并回环给模型”的正确位置。
+
+另外，后端 streaming 原来对 `todo.updated` 做 signature 去重。这个优化降低了事件量，但也让“每个 values snapshot
+都输出当前 todo 状态”这个调试/同步契约不成立；前端已经有签名去重，后端再去重没有必要。
+
+### 24.2 修法
+
+1. 删除静态 todo prompt 入口：
+   - `harness/steps/todo.py` 删除 `SLOTFLOW_TODO_SYSTEM_PROMPT`；
+   - `harness/graph.py::make_pre_model_node` 不再把 todo prompt 拼进 `system_prompt`；
+   - `harness/builder.py` 删除“测试/展示 todo 时调用 write_todos”的扩展工具提示；
+   - `harness/builder.py` 删除 operating procedure 中“Plan the work with write_todos”的 prompt 级约束。
+2. 保留 schema 级修复：`write_todos_tool` 仍用 Pydantic `Todo` 暴露 `{content,status}`，并用
+   `validation_alias=AliasChoices("content", "text")` 兼容旧输入。字段正确性属于工具 API contract，不是 prompt
+   兜底。
+3. 新增 `harness/steps/todo.py::todo_enforcement_update`，由 `post_model` 每次模型调用后执行：
+   - 如果最新 AIMessage 已经调用 `write_todos`，交给 `ToolNode` 正常执行；
+   - 如果还有其它 tool_calls，先让工具执行，不抢路由；
+   - 如果没有 todos，且当前 Pro/Ultra 请求看起来需要进度管理（长任务、代码/修复/分析/报告等任务词，或显式
+     todo 请求），追加 `HumanMessage(name="slotflow_todo_enforcer")`，要求模型先调用 `write_todos`；
+   - 判断“请求是否需要 todo”前先剥掉 latest user message 开头的 `<slotflow-...>` 注入块，避免 Skills preflight /
+     uploads 等长上下文把普通工具读取误判成长任务并造成回环；
+   - 如果已有 todos 但未全部 completed，而模型试图直接回答且没有调用 `write_todos`，追加同名控制消息，要求先更新
+     当前状态；
+   - 同一次 write_todos 之后最多注入一次 enforcer，避免模型拒绝工具调用时形成无限回环。
+4. `harness/graph.py::route_after_model` 增加 todo enforcer 分支：最新消息是
+   `slotflow_todo_enforcer` 时路由回 `pre_model`，否则才走 `tools_condition` → `tools/finalize`。这使 todo 约束成为
+   图级后置策略，而不是静态 prompt。
+5. `chat/agent_adapter/streaming.py` 移除 backend todo signature 去重；每个 values snapshot 只要含 todos 就输出一次
+   `todo.updated`。前端 `use-chat-stream.ts::replaceTodos` 仍按签名去重，避免重复 identical event 造成 UI 闪烁。
+
+### 24.3 当前不变量
+
+- todo 创建/更新由 graph 的 `post_model` 节点兜底；不要再把 todo 可靠性修成 builder/system prompt 里的硬约束。
+- tool schema、projection normalization、frontend parser 可以约束/归一字段形状；不要靠自然语言提示模型不要用 `text`。
+- `write_todos` 仍在所有模式注册；主动强制创建 todo 只在 `plan_enabled` 且请求看起来需要计划时触发，或用户显式要求
+  todo 时触发。
+- `todo.updated` 是状态同步事件，不是“仅状态变化事件”；后端每个带 todos 的 values snapshot 都可以发，UI 层负责
+  去重和 revision。
+
+### 24.4 验证
+
+- `tests/test_harness_steps.py::test_todo_enforcement_requests_initial_list_for_planned_work` 覆盖无 todos 的计划任务会注入
+  `slotflow_todo_enforcer` 并通过 `route_after_model` 回到 `pre_model`。
+- `tests/test_harness_steps.py::test_todo_enforcement_requests_status_update_for_incomplete_todos` 覆盖已有未完成 todos 时，
+  模型直接回答会被要求先更新状态。
+- `tests/test_harness_steps.py::test_todo_enforcement_does_not_loop_after_existing_enforcer` 覆盖拒绝/遗漏工具调用时不会无限回环。
+- `tests/test_harness_steps.py::test_todo_enforcement_ignores_slotflow_injected_context_for_complexity` 覆盖 Skills preflight
+  这类注入块不会把简单请求误判成 todo-worthy。
+- `tests/test_agent_adapter.py::test_identical_todo_snapshots_emit_each_todo_updated_event` 覆盖重复 identical values snapshot 也会
+  输出两次 `todo.updated`。
+
+
+---
+
+## 25. 迭代 17（2026-07-02）：系统提示词加入时效性查证与记忆使用策略
+
+### 25.0 症状
+
+用户指出 DeepSeek 容易直接用训练数据回答，而不是先确认当前日期、判断是否需要联网或查其它来源；同时模型在任务开始前不会稳定判断是否要查已有长期记忆，任务结束后也不会稳定判断是否要保存新记忆。
+
+### 25.1 根因
+
+这不是工具缺失：`web_search`/`web_fetch` 已经在 harness tools 中，长期记忆也已有三条路径：prepare 检索、`memory_list`/`memory_save` 等显式工具、finalize 后台抽取。问题在系统 prompt 的默认决策策略不够明确：模型知道“能搜索/能记忆”，但没有被明确要求把“信息是否时效敏感”和“本轮是否需要记忆检索/保存”作为每轮任务的判断步骤。
+
+### 25.2 修法
+
+1. `harness/builder.py::build_system_prompt` 在 `<slotflow-runtime>` 中加入 `current_utc_date=<date>`，让模型有明确当前日期锚点，而不是只依赖训练截止时间。
+2. 新增 `<slotflow-freshness-policy>`：
+   - 回答前用当前日期约束时效性判断；
+   - 对新闻、价格、法律、发布版本、API/模型能力、排名、可用性、公司/产品状态、日程、天气、统计数据，以及用户问 latest/current/today/now 的问题，不能只用训练数据；
+   - 优先用 `web_search`/`web_fetch`、workspace/upload/MCP 等权威来源；
+   - 对稳定定义、基础数学、工作区本地代码这类不随时间明显变化的问题，可以不联网；
+   - 多个来源明显冲突时必须告诉用户冲突和不确定性。
+3. 扩展 `<slotflow-long-term-memory-status>`：
+   - 任务开始时先判断已有记忆是否可能影响回答；prepare 已自动检索相关记忆，但若用户偏好、过往项目、个人资料或历史决策可能相关且注入记忆不足，模型应调用 `memory_list`；
+   - 任务结束后判断是否有稳定偏好、profile、项目上下文或事实要保存/修正，使用 `memory_save`/`memory_update`/`memory_delete`；
+   - 明确不要保存一次性临时任务细节。
+
+### 25.3 不变量
+
+- 时效性策略是 system prompt 级行为约束，不是前端或工具层强制；不要让每个问题都无条件联网，否则会增加首字延迟和无意义搜索。
+- 当前日期使用 SlotFlow 后端 `utc_now().date()` 写入 prompt；如果后续要展示本地时区，应新增明确的 timezone 字段，而不是让模型猜。
+- 记忆策略应补充而不是替代图节点：prepare/pre_model/finalize 仍负责检索注入和后台抽取，模型工具调用负责需要显式判断的 `memory_list`/`memory_save`/`memory_update`/`memory_delete`。
+
+### 25.4 验证
+
+- `tests/test_harness_builder.py::test_harness_builder_passes_graph_boundary_arguments` 断言系统 prompt 包含 `current_utc_date=`、`<slotflow-freshness-policy>`、训练数据限制、来源冲突披露、`memory_list` 和 `memory_save` 策略。
