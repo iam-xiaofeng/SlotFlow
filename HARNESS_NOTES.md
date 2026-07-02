@@ -1125,8 +1125,9 @@ ToolNode + wrapper，验证 `ask_clarification` 能产生 pending interrupt，�
 - `/workspace/skills` → 已安装 Skills 根目录，只读且仅当 `skills_root` 存在时挂载。Skill helper 脚本可被读取/执行，
   但不会在容器内修改安装目录。
 
-默认网络为 `--network none`。需要联网安装依赖或访问外部资源时，必须显式设置
-`SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=true`；这和普通 `web_search/web_fetch` 的网络工具边界分开。
+默认网络为 `--network bridge`，默认镜像为 `python:3.12`，默认超时 120s，使模型可在沙箱内用
+`python -m pip install ...` 安装常见 Python 依赖。需要离线执行时，显式设置
+`SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=false`；这和普通 `web_search/web_fetch` 的网络工具边界分开。
 
 ### 19.3 不变量
 
@@ -1452,3 +1453,191 @@ revision；`ComposerTodoPanel` 依赖 revision 触发展开/更新提示时，�
 ### 25.4 验证
 
 - `tests/test_harness_builder.py::test_harness_builder_passes_graph_boundary_arguments` 断言系统 prompt 包含 `current_utc_date=`、`<slotflow-freshness-policy>`、训练数据限制、来源冲突披露、`memory_list` 和 `memory_save` 策略。
+
+
+---
+
+## 26. 迭代 18（2026-07-02）：Docker 沙箱可用性与危险执行工具收口
+
+### 26.0 症状
+
+用户实测发现模型好像不能在 Docker 沙箱中实际工作，怀疑依赖安装不可用；同时要求把原本比较危险的操作，例如 bash，限制成只能在 sandbox 中使用。
+
+### 26.1 根因
+
+上一版沙箱实现了懒加载和 bind mount，但默认运行环境偏“最小”：`python:3.12-slim`、30 秒 timeout、默认 `--network none`。这对纯 Python 小脚本足够，但模型一旦需要 `pip install`、执行带 bash 的 helper、或跑较慢依赖安装，就会失败或超时。更重要的是，工具注册层还没有显式过滤 extra tools / MCP tools 中可能出现的宿主机执行工具；即使 SlotFlow 自己没有提供 `bash`，外部 MCP 仍可能暴露同名/类似工具，造成绕过 `sandbox_exec` 的风险。
+
+当前运行环境没有 Docker CLI（`docker: command not found`），所以真实容器测试在本机只能 skip；这也说明工具层必须把 Docker 不可用作为结构化工具错误返回，而不是让 graph 崩溃。
+
+### 26.2 修法
+
+1. `harness/sandbox/config.py` 默认改为更可工作的执行环境：
+   - `docker_image="python:3.12"`，包含 Python/pip/bash 和更常见的基础能力；
+   - `docker_timeout_seconds=120`，给依赖安装和脚本启动留出时间；
+   - `docker_network_enabled=True`，默认允许容器联网安装依赖。需要离线时设置 `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=false`。
+2. `chat/runtime/config.py::load_sandbox_config_from_env` 不再把 Docker 网络默认硬编码为 false，而是跟随 `SlotFlowSandboxConfig().docker_network_enabled`。
+3. `harness/sandbox/docker.py::_ensure_started` 增加：
+   - `--init`，避免子进程僵尸；
+   - `PYTHONUNBUFFERED=1`；
+   - `PIP_DISABLE_PIP_VERSION_CHECK=1`；
+   - 默认 `--network bridge`，显式关闭时才是 `none`。
+4. `harness/tools/sandbox.py::sandbox_exec` docstring 明确：shell/bash/python/node/npm/pip、生成脚本、Skill helper、依赖安装和包实验全部必须走 `sandbox_exec`；需要 Python 依赖时用 `python -m pip install ...` 在沙箱内安装。
+5. `harness/tools/registry.py` 新增 `filter_unsafe_host_execution_tools` / `is_unsafe_host_execution_tool`，过滤 extra tools 与 MCP tools 中的宿主机执行入口，例如 `bash`、`shell`、`terminal`、`python_repl`、`run_command`、`execute_command`、`pip`、`npm`。`sandbox_exec` 本身不被过滤。
+6. `harness/builder.py` 系统提示词增加执行边界：所有 shell/bash/python/node/npm/pip 命令、生成脚本、依赖安装和 Skill helper 只能用 `sandbox_exec`；不要用 host shell/terminal/MCP execution tools。
+
+### 26.3 不变量
+
+- 模型可见的代码执行入口只能是 `sandbox_exec`。如果后续接入新的 MCP/extra tools，registry 仍必须过滤宿主机执行类工具。
+- 容器文件系统不持久；持久的是 bind mount：`/workspace/artifacts` 和 `/workspace/work`。全局 pip 安装不持久；需要复用依赖时应安装到 `/workspace/work` 里的 venv 或 target 目录。
+- 用户可见文件写 `/workspace/artifacts`；`/workspace/work` 是持久 scratch，不直接进 UI。
+- Docker 不存在/未启动是 `sandbox_exec` 的结构化错误结果；不能让 graph 崩溃。
+
+### 26.4 验证
+
+- `tests/test_harness_sandbox.py::test_sandbox_config_defaults_support_dependency_installation` 覆盖默认镜像、timeout、网络策略。
+- `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_starts_only_on_first_exec` 覆盖 `--init`、`bridge`、env、mount 和懒加载。
+- `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_uses_no_network_when_disabled` 覆盖显式离线时 `--network none`。
+- `tests/test_harness_sandbox.py::test_sandbox_exec_tool_returns_structured_error_without_docker` 覆盖 Docker 不可用时工具返回结构化错误。
+- `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_runs_real_container_when_docker_is_available` 是真实 Docker smoke test；当前机器无 Docker CLI，所以 pytest skip。
+- `tests/test_tool_registry.py::test_registry_filters_unsafe_host_execution_extra_tools` 覆盖 extra tools 中的 `bash`/`python_repl` 被过滤。
+- `tests/test_harness_mcp.py::test_build_harness_tools_filters_unsafe_mcp_execution_tools` 覆盖 MCP 暴露 `bash` 时也被过滤。
+
+
+---
+
+## 27. 迭代 19（2026-07-02）：沙箱执行状态流式展示
+
+### 27.0 症状
+
+用户指出初始化镜像、执行代码、安装依赖时前端长时间没有输出，体感像卡死，也缺少“当前到底在做什么”的安全感。
+
+### 27.1 根因
+
+`sandbox_exec` 的 Docker 启动和 `docker exec` 发生在 ToolNode 内部，是阻塞工具执行。现有前端只展示 `message.delta`、`context.compressing`、`todo.updated` 等事件；如果模型已经发起工具调用但 Docker 正在拉镜像/启动/执行命令，模型正文不会继续流出，UI 就没有任何进度反馈。
+
+直接在工具里用 `langgraph.config.get_stream_writer()` 不是当前依赖下的稳妥修法：实测 `astream_events(version="v3")` 的 projection 只暴露 `messages`、`values`、`lifecycle`、`subgraphs`，没有 `custom` channel；而 SlotFlow 不能为了自定义事件退回普通 `astream(stream_mode="custom")`，否则会破坏现有 v3 typed reasoning/content 投影。
+
+### 27.2 修法
+
+1. 新增业务/SSE 事件 `tool.status`：
+   - `chat/agent_adapter/events.py::AgentEventName`
+   - `chat/sse.py::SseEventName`
+   - `frontend/src/lib/sse-parser.ts::ChatStreamEventName`
+2. `chat/agent_adapter/projections.py::tool_status_event_from_tool_call` 从 LangGraph `tool_calls` projection 识别 `sandbox_exec`，生成：
+   - `tool_name="sandbox_exec"`
+   - `phase="running"`
+   - `message="正在初始化 Docker 沙箱并执行代码"`
+   - 截断后的 `command`
+3. `chat/agent_adapter/streaming.py::iter_projection_agent_events` 在转发 `tool.delta` 之前先转发 `tool.status`。这是当前 v3 projection 下最早的稳定时机：模型已经决定调用 `sandbox_exec`，ToolNode 还未完成阻塞执行。
+4. 前端 `use-chat-stream.ts` 处理 `tool.status`，把状态挂到当前 streaming assistant message；完成、取消或错误时清理。
+5. `message-list-parts.tsx` 在 assistant 气泡里渲染 `ToolStatusIndicator`，显示“沙箱 / 正在初始化 Docker 沙箱并执行代码 / 命令”，让用户看到长耗时工具正在运行。
+
+### 27.3 不变量
+
+- `tool.status` 是 UI 进度提示，不是工具结果；真实 stdout/stderr/exit_code 仍由 `sandbox_exec` 的 ToolMessage JSON 返回给模型。
+- 当前事件从 `tool_calls` projection 发出，因此描述应保持为“正在初始化 Docker 沙箱并执行代码”，不要假装知道 Docker 已经完成 pull、容器已启动或命令已进入某个更细阶段。
+- 不要切换掉 LangGraph v3 projection 协议；reasoning/content 正确分流优先级高于更细粒度的工具内部状态。
+- 若未来 LangGraph v3 暴露 custom projection channel，可以再把 Docker `_ensure_started` / `docker exec` 的细粒度阶段接入 `get_stream_writer()`，但必须保持 `tests/test_provider_reasoning_contract.py` 绿色。
+
+### 27.4 验证
+
+- `tests/test_agent_adapter.py::test_sandbox_tool_call_becomes_tool_status_event` 覆盖 `sandbox_exec` tool call 到 `tool.status` 的数据形状。
+- `tests/test_agent_adapter.py::test_langgraph_event_adapter_emits_sandbox_tool_status_before_tool_delta` 覆盖流式层先发 `tool.status`、再发 `tool.delta`。
+- `tests/test_sse.py::test_agent_event_to_sse_event_keeps_tool_status` 覆盖 SSE 层原样转发新事件。
+
+
+---
+
+## 28. 迭代 20（2026-07-02）：Docker Engine 安装入口与危险工具拦截提示
+
+### 28.0 症状
+
+用户希望 Docker 不存在时不要只告诉用户“docker: command not found”，而是把安装 Docker Engine 的能力纳入 SlotFlow；同时强调模型只能在 Docker 沙箱里运行危险命令/代码/脚本，否则应直接报错并提醒模型改用脚本/沙箱。
+
+### 28.1 根因
+
+前一版已经过滤 extra/MCP 中的 `bash`、`python_repl`、`run_command` 等宿主机执行工具，但仍有两个缺口：
+
+1. Docker Engine 是 `sandbox_exec` 的宿主机前置依赖；Docker 不存在时，模型没有可调用的“检查/安装 Docker”入口，只能把错误转述给用户。
+2. 被过滤的危险工具通常不会出现在模型 tool schema 中，但如果模型/旧上下文仍发起 `bash` 这类未知工具调用，ToolNode wrapper 只返回通用 `unknown_tool`，没有明确告诉模型“这是被安全策略拦截，应该改用 `sandbox_exec` 或 Docker 安装入口”。
+
+直接暴露宿主机 bash 或让模型传任意安装脚本不可接受：Docker 尚未安装时当然不能在 Docker 里安装 Docker；但宿主机安装又是高权限、可改变系统状态的操作，必须是固定流程、默认禁用、用户显式允许，而不是任意命令执行。
+
+### 28.2 修法
+
+1. 新增 `harness/sandbox/docker_engine.py::DockerEngineSetup`，读取 `/etc/os-release` 生成 `host`
+   信息（`os_id`、`id_like`、`pretty_name`、`install_manager`、`install_supported`），提供三种受控动作：
+   - `check`：检查 `docker` CLI 与 daemon，并返回宿主机信息；
+   - `install_script`：按检测到的 Linux 发行版返回固定安装脚本（Debian/Ubuntu=`apt`，
+     Fedora/RHEL-like=`dnf`，Arch-like=`pacman`）；
+   - `install`：仅在 `SlotFlowSandboxConfig.allow_host_docker_install=True` 且
+     `confirm_host_install=True` 时执行检测到的固定命令序列：包管理器安装 Docker 包、
+     `systemctl enable --now docker`、`usermod -aG docker <user>`；不接受模型传入脚本或任意命令。
+2. `SlotFlowSandboxConfig` 增加 `allow_host_docker_install`，环境变量为
+   `SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL`，默认 `true`，但 `install` 仍必须收到 `confirm_host_install=true`，并且只能在用户明确要求安装 Docker Engine 后调用。设置为 `false` 时，`install` 只返回错误、hint 和固定脚本，不改宿主机。
+3. `harness/tools/sandbox.py::build_sandbox_tools` 注册 `docker_engine_setup`。它与
+   `sandbox_exec` 同属沙箱/执行边界工具，但职责是宿主机 Docker 前置依赖的受控安装/检查，不是代码执行。
+4. 新增 `harness/tools/host_execution.py` 集中维护危险宿主机执行工具名/片段；
+   `harness/tools/registry.py` 和 `harness/steps/tool_safety.py` 共用同一检测逻辑。
+5. `harness/steps/tool_safety.py::build_unknown_tool_error_message` 在未知工具名属于危险宿主机执行入口时，返回
+   `unsafe_host_execution_tool` ToolMessage，明确提示模型用 `sandbox_exec`，Docker 缺失时用
+   `docker_engine_setup`。
+6. 系统提示词更新：`sandbox_exec` 失败且 Docker 不可用时先调用
+   `docker_engine_setup(action='check')` 查看宿主机信息，需要手动命令时调用 `install_script`，
+   只有用户明确要求安装且 host install 开关已启用时才调用 `install` + `confirm_host_install=true`。
+
+### 28.3 不变量
+
+- `docker_engine_setup` 是固定 host setup 入口，不是通用 host shell；不得增加任意 `command`/`script` 参数。不同宿主机的区分由它读取 `/etc/os-release` 完成，不需要另加“系统信息工具”。
+- 不允许静默安装 Docker；即使 `SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL` 默认为 true，模型也必须在用户明确要求后传
+  `confirm_host_install=true`。如果 sudo 需要密码，工具会失败并返回手动脚本，不能交互式索要密码。
+- 代码、包安装、Skill helper、用户脚本仍只能用 `sandbox_exec`；`docker_engine_setup` 只解决 Docker Engine 前置依赖。
+- 危险工具过滤和未知工具错误提示必须使用同一工具名检测逻辑，避免 registry 过滤与 ToolNode 错误信息分叉。
+
+### 28.4 验证
+
+- `tests/test_harness_sandbox.py::test_docker_engine_setup_tool_returns_install_script_when_host_install_disabled` 覆盖默认不改宿主机。
+- `tests/test_harness_sandbox.py::test_docker_engine_setup_check_reports_missing_docker` 覆盖 Docker 缺失检查结果。
+- `tests/test_harness_sandbox.py::test_docker_engine_setup_install_script_matches_detected_host` 覆盖 Fedora/RHEL-like 主机生成 `dnf` 脚本而不是 apt 脚本。
+- `tests/test_harness_sandbox.py::test_docker_engine_setup_install_uses_fixed_commands` 覆盖开启自动安装后只执行检测到的固定命令序列。
+- `tests/test_harness_steps.py::test_tool_safety_redirects_unsafe_unknown_host_tool_to_sandbox` 覆盖未知 `bash` 调用返回 `unsafe_host_execution_tool` 并提示 `sandbox_exec` / `docker_engine_setup`。
+- `tests/test_tool_registry.py::test_registry_exposes_key_tools_per_category` 覆盖 `docker_engine_setup` 在工具注册表中存在。
+
+
+---
+
+## 29. 迭代 21（2026-07-02）：Skills preflight 与长期记忆的上下文边界修复
+
+### 29.0 症状
+
+用户说“我研究的方向是小目标检测与跟踪”，但长期记忆里混入了 `installed_matches` 以及 Skill 描述 JSON。早期尝试加一个针对 `installed_matches` 尾巴的清洗器，这是错误方向：它只处理当前字符串形状，一旦 preflight JSON 改字段、换顺序、换上下文块，污染仍会复发。
+
+### 29.1 根因
+
+`harness/steps/skills_preflight.py::skills_preflight_update` 原来把 `<slotflow-skills-preflight>` 块 prepend 到最新 `HumanMessage.content`。这个设计把“SlotFlow 内部检索结果”伪装成了“用户说过的话”。随后两个记忆入口都会读取最新用户消息：
+
+1. `long_term_memory.build_turn_memory_candidate` / `explicit_save_update` 用最新 user+assistant turn 做显式“记住”提取；
+2. `long_term_memory.build_extraction_conversation` 把最新 user+assistant turn 交给后台 LLM 记忆抽取。
+
+因此 memory 层看到的不是纯用户事实，而是“内部 Skill 元数据 + 用户事实”。在 memory 层清洗 `installed_matches` 是表象修补；真正边界应是：内部检索上下文不得写入 `HumanMessage.content`。
+
+### 29.2 修法
+
+1. 删除 `harness/memory/sanitize.py` 以及所有 `strip_slotflow_context_blocks` 调用/测试，不再做字段名或尾巴形状清洗。
+2. `harness/steps/skills_preflight.py::skills_preflight_update` 只把 finder 结果写入 `state.slotflow.skills_preflight`，不返回 `messages`，不修改 `HumanMessage.content`。
+3. `harness/graph.py::make_pre_model_node` 在每次模型调用前读取 `state.slotflow.skills_preflight`，用 `format_preflight` 拼入当前 step 的 `system_prompt`。这样模型仍能看到 installed Skills 提示，但 memory extraction 读取的 user message 保持为用户原文。
+4. `harness/builder.py` 的提示词从“preflight 注入 latest user message”改为“preflight 作为 internal system context”。
+5. `format_preflight` 明确标注这是 SlotFlow internal context，不是 user profile/preference；这是系统上下文语义说明，不是污染修复的主要机制。
+
+### 29.3 不变量
+
+- 不要在 memory 层针对 `installed_matches`、`results`、Skill 描述 JSON 或其它尾巴形状写硬清洗；这些都是下游症状。
+- Skills preflight、tool discovery、runtime summary 等内部上下文必须走 `slotflow` state / `system_prompt`，不能写入 `HumanMessage.content`。
+- 用户上传文件路径仍由 `uploads_update` 注入到用户消息，这是模型读取上传文件的显式输入契约；它不是 Skill 元数据，不能用这次规则一刀切删除。
+- 任何未来新增的模型内部上下文，都先问“后续 memory / artifact / replay 会不会把它当作用户说过的话”；如果会，就必须放到 state/system，而不是 user message。
+
+### 29.4 验证
+
+- `tests/test_harness_steps.py::test_skills_preflight_stores_result_without_mutating_user_message` 覆盖 preflight 只写 `state.slotflow.skills_preflight`，不返回 `messages`，原 HumanMessage 保持纯用户文本。
+- `tests/test_harness_steps.py::test_skills_preflight_format_is_internal_system_context` 覆盖 preflight system block 的 internal context 标记与 installed skill 元数据仍可被模型读取。
+- 删除旧的 sanitizer 测试，避免把错误的表象修法固化成 contract。

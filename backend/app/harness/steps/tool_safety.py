@@ -11,6 +11,11 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
+from app.harness.tools.host_execution import (
+    is_unsafe_host_execution_tool_name,
+    unsafe_host_execution_tool_message,
+)
+
 SLOTFLOW_TOOL_ERROR_SOURCE = "slotflow_tool_safety"
 
 
@@ -40,6 +45,21 @@ def build_error_tool_message(
         name=name,
         tool_call_id=call_id,
         status="error",
+    )
+
+
+def build_unknown_tool_error_message(tool_call: Any) -> ToolMessage:
+    name = tool_call_name(tool_call)
+    if is_unsafe_host_execution_tool_name(name):
+        return build_error_tool_message(
+            tool_call,
+            error_type="unsafe_host_execution_tool",
+            message=unsafe_host_execution_tool_message(name),
+        )
+    return build_error_tool_message(
+        tool_call,
+        error_type="unknown_tool",
+        message=f"tool is not registered: {name!r}",
     )
 
 

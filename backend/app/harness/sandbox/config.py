@@ -11,8 +11,9 @@ DEFAULT_MAX_READ_BYTES = 1024 * 1024
 DEFAULT_MAX_WRITE_BYTES = 1024 * 1024
 DEFAULT_MAX_FETCH_BYTES = 512 * 1024
 DEFAULT_NETWORK_TIMEOUT_SECONDS = 15
-DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
-DEFAULT_DOCKER_TIMEOUT_SECONDS = 30
+DEFAULT_DOCKER_IMAGE = "python:3.12"
+DEFAULT_DOCKER_TIMEOUT_SECONDS = 120
+DEFAULT_DOCKER_NETWORK_ENABLED = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +34,8 @@ class SlotFlowSandboxConfig:
     code_execution_enabled: bool = True
     docker_image: str = DEFAULT_DOCKER_IMAGE
     docker_timeout_seconds: int = DEFAULT_DOCKER_TIMEOUT_SECONDS
-    docker_network_enabled: bool = False
+    docker_network_enabled: bool = DEFAULT_DOCKER_NETWORK_ENABLED
+    allow_host_docker_install: bool = True
 
     def resolved_workspace_root(self) -> Path:
         """Return the absolute workspace root without creating it."""

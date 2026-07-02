@@ -45,7 +45,11 @@ from app.harness.steps.todo import (
     todo_reminder_update,
     write_todos_tool,
 )
-from app.harness.steps.tool_safety import build_error_tool_message, tool_call_name
+from app.harness.steps.tool_safety import (
+    build_error_tool_message,
+    build_unknown_tool_error_message,
+    tool_call_name,
+)
 from app.harness.steps.uploads import uploads_update
 
 
@@ -422,6 +426,19 @@ def test_tool_safety_builds_unknown_tool_error() -> None:
     assert message.name == "missing_tool"
     assert payload["error"]["type"] == "unknown_tool"
     assert tool_call_name({"name": "missing_tool"}) == "missing_tool"
+
+
+def test_tool_safety_redirects_unsafe_unknown_host_tool_to_sandbox() -> None:
+    message = build_unknown_tool_error_message(
+        {"name": "bash", "args": {"command": "python -V"}, "id": "call_bash"}
+    )
+    payload = json.loads(str(message.content))
+
+    assert message.status == "error"
+    assert message.name == "bash"
+    assert payload["error"]["type"] == "unsafe_host_execution_tool"
+    assert "sandbox_exec" in payload["error"]["message"]
+    assert "docker_engine_setup" in payload["error"]["message"]
 
 
 # --- dangling tool call repair --------------------------------------------

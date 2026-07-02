@@ -69,7 +69,10 @@ from app.harness.steps.todo import (
     todo_parallel_call_guard,
     todo_reminder_update,
 )
-from app.harness.steps.tool_safety import build_error_tool_message, tool_call_name
+from app.harness.steps.tool_safety import (
+    build_error_tool_message,
+    build_unknown_tool_error_message,
+)
 from app.harness.steps.uploads import uploads_update
 
 if TYPE_CHECKING:
@@ -483,11 +486,7 @@ def _slotflow_tool_safety_wrapper(
     handler: Callable[[ToolCallRequest], Any],
 ) -> Any:
     if request.tool is None:
-        return build_error_tool_message(
-            request.tool_call,
-            error_type="unknown_tool",
-            message=f"tool is not registered: {tool_call_name(request.tool_call)!r}",
-        )
+        return build_unknown_tool_error_message(request.tool_call)
     try:
         return handler(request)
     except GraphBubbleUp:
@@ -509,11 +508,7 @@ async def _slotflow_async_tool_safety_wrapper(
     handler: Callable[[ToolCallRequest], Awaitable[Any]],
 ) -> Any:
     if request.tool is None:
-        return build_error_tool_message(
-            request.tool_call,
-            error_type="unknown_tool",
-            message=f"tool is not registered: {tool_call_name(request.tool_call)!r}",
-        )
+        return build_unknown_tool_error_message(request.tool_call)
     try:
         return await handler(request)
     except GraphBubbleUp:

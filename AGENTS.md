@@ -202,16 +202,34 @@ frontend/src/
   `未归类产物`, so older outputs remain findable. Read/preview (`/artifacts/read`,
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
 - **Code execution sandbox**: untrusted code, generated scripts, package experiments, and Skill
-  helper scripts run through `sandbox_exec`, not on the host. The implementation is
+  helper scripts run through `sandbox_exec`, not on the host. Host shell/code execution tools named
+  like `bash`, `shell`, `python_repl`, `run_command`, etc. are filtered out of extra/MCP tool lists
+  by `harness/tools/registry.py`; if a model still calls an unregistered unsafe host execution
+  tool, `harness/steps/tool_safety.py::build_unknown_tool_error_message` returns an
+  `unsafe_host_execution_tool` ToolMessage that tells it to use `sandbox_exec`. Code execution must
+  go through the Docker sandbox boundary. The implementation is
   `harness/sandbox/docker.py::LazyDockerSandbox` + `harness/tools/sandbox.py`; it is lazy, so Docker
-  is not touched until the tool is actually called. The container uses bind mounts instead of copy
-  in/out: `/workspace/uploads` is read-only user uploads, `/workspace/artifacts` is read-write for
-  the current thread's generated artifacts, `/workspace/work` is read-write scratch under
-  `.sandbox/<thread>`, and `/workspace/skills` is read-only installed Skills when configured.
-  Outputs that should appear in the UI must be written under `/workspace/artifacts`; they are
-  already on the host because of the bind mount. Env knobs: `SLOTFLOW_CODE_EXECUTION_ENABLED`,
-  `SLOTFLOW_DOCKER_SANDBOX_IMAGE`, `SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS`,
-  `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED`.
+  is not touched until the tool is actually called. The default image is `python:3.12` with network
+  enabled (`bridge`) and a 120s timeout so `python -m pip install ...` works inside the sandbox;
+  set `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=false` for offline execution. The container uses bind
+  mounts instead of copy in/out: `/workspace/uploads` is read-only user uploads,
+  `/workspace/artifacts` is read-write for the current thread's generated artifacts,
+  `/workspace/work` is read-write scratch under `.sandbox/<thread>`, and `/workspace/skills` is
+  read-only installed Skills when configured. Outputs that should appear in the UI must be written
+  under `/workspace/artifacts`; they are already on the host because of the bind mount. Env knobs:
+  `SLOTFLOW_CODE_EXECUTION_ENABLED`, `SLOTFLOW_DOCKER_SANDBOX_IMAGE`,
+  `SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS`, `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED`. When the
+  model calls `sandbox_exec`, `chat/agent_adapter/streaming.py` emits a `tool.status` SSE event
+  from the LangGraph `tool_calls` projection before the blocking ToolNode run, and the frontend
+  shows that status on the streaming assistant bubble; this avoids a silent wait while Docker pulls
+  or starts the image. `docker_engine_setup` is the only controlled host setup exception: it reads
+  `/etc/os-release` to report host OS/package-manager info, checks Docker, returns a fixed
+  per-family Linux install script (apt/dnf/pacman), or runs that fixed package-manager/systemctl/usermod
+  flow only when `SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL` allows host install (default true) and the
+  model passes `confirm_host_install=true` after an explicit user request. It is not a generic host
+  shell; do not add arbitrary command/script parameters to it. Do not replace `tool.status` with
+  `get_stream_writer()` unless LangGraph v3 exposes a custom projection channel in the current
+  dependency version.
 - **Todo tool availability and enforcement**: `write_todos` is registered in every mode, including
   Flash, so explicit todo requests can drive the real visual panel instead of prose simulation.
   Todo planning is no longer a static system-prompt constraint: `harness/steps/todo.py` keeps the

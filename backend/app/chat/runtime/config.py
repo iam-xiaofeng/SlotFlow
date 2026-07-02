@@ -309,7 +309,11 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
         ),
         docker_network_enabled=load_bool_from_env(
             "SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED",
-            default=False,
+            default=SlotFlowSandboxConfig().docker_network_enabled,
+        ),
+        allow_host_docker_install=load_bool_from_env(
+            "SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL",
+            default=SlotFlowSandboxConfig().allow_host_docker_install,
         ),
     )
 
