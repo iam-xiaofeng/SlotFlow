@@ -998,6 +998,29 @@ gpt-5 / o-series）路径上，三 provider 各走各路：
 直接丢弃（实测 `projection_item_to_agent_event` 对该形态返回 `None`）。结果：gpt-5 的思考流在前端
 **完全看不到**，只剩正文；DeepSeek 路径是好的，无需动。
 
+### 17.1b 压缩结论：`message.reasoning` typed channel 为何不能「直接用」
+
+LangGraph v3 的 `messages` projection 上确有 `.reasoning` / `.text` 两个 typed channel，但它们
+不是凭空有的——靠 langchain-core `chat_model_stream.py` 把 `content-block-delta`（`delta.type ==
+"reasoning-delta"`）累积而成；而 `reasoning-delta` 又由 `_compat_bridge._to_content_delta` 从
+`content_blocks` 里 `type=="reasoning"` 的 block 提取，提取/发不发的字段写死成
+`block.get("reasoning")`（扁平字符串，`_compat_bridge.py:128` / `_should_emit_delta:283`）。**整条
+typed 链只认 `reasoning` 扁平字符串字段，不认 `summary` 列表。** 决定性实测（喂真实形态进 core）：
+
+- OpenAI Responses `{"type":"reasoning","summary":[{...,"text":"先分析"}]}` → `_should_emit_delta=False`、
+  `reasoning-delta.reasoning=""` → `.reasoning` channel 收不到，静默丢失。
+- DeepSeek bridge `{"type":"reasoning","reasoning":"..."}` → `True`，进 channel。
+- Anthropic `{"type":"thinking",...}` → core 包成 `non_standard`，`_should_emit_delta=False`。
+
+所以「直接用 `message.reasoning` 就完事」成立的前提是 provider 那层已把思考吐成
+`{"type":"reasoning","reasoning": str}` block——三个 provider 没一个原生长这样，都得有人归一：
+DeepSeek 的归一最简单（一个子类 hook 把 `reasoning_content` 拍成扁平字符串 block），OpenAI Responses
+最别扭（`summary[]` 列表，core 不认，得 projection 兜底扁平化），Anthropic 同样别扭。**「兼容 GPT 接口
+的 DeepSeek 反而比 GPT 本身好接」是真的**——DeepSeek 思考是 chat/completions 协议里的非标准扁平字段
+（trivial 转），OpenAI 自家 Responses 反用嵌套 `summary[]` 列表（core 的窄预期不认）。当前两处兼容：
+`runtime/models.py` bridge 子类（DeepSeek/custom）+ `projections.py::extract_reasoning_from_content_block`
+的 `summary[]` 扁平化（OpenAI Responses，§17.3 新增）。
+
 ### 17.2 排除「裸 ChatOpenAI 丢 reasoning_content」这条线（live-verified）
 relay（`https://metapi.lilililwan.xyz/v1`）原始 SSE 实测：`glm-5.2` 的 `delta.reasoning_content`
 与 `delta.content` 在 SSE 层就是分开的两路（460 vs 126 chunks）。裸 `ChatOpenAI`（非 bridge 子类）
@@ -1041,3 +1064,77 @@ gpt-5 / o-series 的思考经 Responses API → `message.content` 的 summary bl
   当前验证落在「契约 + 与 relay 真实 reasoning 模型一致的分流行为」；补 `OPENAI_API_KEY` 后建议
   跑一次 gpt-5 真实流确认 summary delta 的逐块聚合（langchain-openai 是按 `summary_index` 聚合
   还是逐 delta 直发，可能影响拼接顺序，但都进 reasoning 通道，不影响「不丢、不串道」核心）。
+
+
+---
+
+## 18. 迭代 10（2026-07-02 续）：HITL 自愿澄清完全失效 + 多轮答案串连（根因：tool-safety wrapper 吞 GraphBubbleUp）
+
+### 18.0 症状
+用户报告：(1) 模型多次 HITL 询问时，后选的答案会把前面的答案也一起发过去，模型以为前面也选了同一个；
+(2) 前端"卡"、思考慢、内容多时卡顿；(3) pro 模式 todo 表不显示给用户；(4) 回答最新问题后弹出**旧的**
+产物网页（issue #8 第 3 点）。逐一诊断，(1) 是后端根因 bug，(3)(4) 是前端问题，(2) 是前端性能。
+
+### 18.1 HITL 根因（代码核实，可复现）：tool-safety wrapper 吞掉 GraphBubbleUp
+`GraphInterrupt` / `GraphBubbleUp` 是 `Exception` 子类（`langgraph.errors`，已核实 MRO）。SlotFlow 的
+tool-safety wrapper（`harness/graph.py::_slotflow_tool_safety_wrapper` / `_slotflow_async_tool_safety_wrapper`）
+用 `except Exception` 捕获所有异常并转成 `tool_execution_error` ToolMessage。所以 **voluntary
+`ask_clarification` 工具的 `interrupt()` 被 wrapper 当普通异常吞掉**——graph 根本不暂停，模型拿到一条
+`tool_execution_error: (Interrupt(value={'type': 'clarification'...` 的 ToolMessage 后直接继续回答。
+
+实测（`build_slotflow_harness_graph` 真实 graph + ToolNode + wrapper）：模型调 `ask_clarification` →
+`interrupts` 为空，`messages` 末尾是 `ToolMessage(error=tool_execution_error...)` + `AIMessage("done")`，
+HITL 完全没发生。这与 AGENTS.md §"HITL clarification" 写的「triage_gate MUST let GraphBubbleUp propagate —
+never swallow it in a fail-open except Exception」是同一条规则，但**只守了 `triage_gate` 节点，没守 ToolNode
+的 safety wrapper**。`triage_gate`（forced gate）在节点内直接 `interrupt()`，不经 wrapper，所以它能暂停
+（§12 live 验证的是它）；voluntary `ask_clarification` 走 ToolNode + wrapper → 被吞。用户看到的"答案串连/
+重复"是 wrapper 吞 interrupt 后模型行为混乱的连锁表象。
+
+修法（根因层）：两个 wrapper 的 `except Exception` **之前**各加 `except GraphBubbleUp: raise`，让 interrupt
+照常上抛暂停 graph。与 `triage_gate` 同一条不变量，只是补到 ToolNode 路径。
+
+验证：(1) 单次 `ask_clarification` 现在真正 `interrupts` 非空、resume 后工具结果 = `用户对该澄清问题的回答是：A`、
+模型回答正确、无残留 interrupt。(2) **连续两次** `ask_clarification`（Q1→答A→Q2→答X）顺序正确，`final messages`
+= [user, AIMessage(调Q1), ToolMessage(答A), AIMessage(调Q2), ToolMessage(答X), AIMessage("结果:A和X")]，
+**不串答案**。新增回归测试 `test_ask_clarification_via_slotflow_tool_node_actually_interrupts`（走真实 graph，
+wrapper 在路径上）钉死这条。全量 282 passed。
+
+### 18.2 issue #8 第 3 点：回答后弹出旧产物网页（前端根因）
+`chat-app.tsx::sendPreparedMessage` 末尾 `newArtifact = newArtifacts[0]` 无差别自动预览"最新产物"。但
+`newArtifacts` 来自 `refreshArtifacts()`（`listArtifacts` 递归全量 `artifacts/` 下**所有 thread + legacy**
+文件）减去 `previousArtifactPaths`。排序不稳定 + 全量 → 回答一个无关新问题时，`newArtifacts[0]` 可能是
+**别的 thread 或 legacy 的旧网页**，于是弹出旧的。
+
+修法：auto-open 只取**本 thread 命名空间**（`artifacts/<thread_id>/` 前缀）下、且本次 run 之前没有的新文件。
+`discoveredArtifacts`（流式 `state.snapshot` 的 `new_entries`）与 `nextArtifacts` 都先按 `threadOwned`
+（`artifacts/${threadId}/` 前缀）过滤，再减 `previousArtifactPaths`。这样回答新问题时只会弹**本次本 thread**
+新写的产物，旧 thread / legacy 产物不再误弹。
+
+### 18.3 todo 在 pro 模式"不显示"（前端根因，非 §15 回归）
+后端逻辑绿（`todo_event_from_snapshot` 从 values snapshot 实时发 `todo.updated`，契约测试过）。根因在
+`composer-parts.tsx::ComposerTodoPanel`：默认 `isCollapsed=true`，只在 `todoRevision` 变化时展开；但
+`replaceTodos` 只在**首次出现** todo 时递增 `todoRevision`，后续 status 更新不递增 → 面板保持折叠，用户
+看到"不显示"。展开区 `max-h-32` 也太矮，多 todo 看不全。
+
+修法：流式期间（`isStreaming && todos.length>0`）强制展开，run 结束才折叠；展开区高度提到 `max-h-60`。
+（§15 删的前端 `state.snapshot` todos 分支与本次无关——后端 `todo.updated` 仍实时发，前端仍处理。）
+
+### 18.4 前端卡顿（思考慢/内容多卡）：每 delta 全量重渲 + 重 markdown 解析
+`message-list.tsx` 的 `messages.map` 在每次 delta（`appendAssistantDelta` patch 最新 assistant）都重渲
+**所有** `MessageBubble`，每个都跑 `ReactMarkdown`（`remark-gfm` + `remark-math` + `rehype-katex`，重）。
+流式每秒几十次 delta → 整个消息列表反复全量 markdown 解析 → 卡顿。
+
+修法：`MessageBubble` 用 `React.memo` + 自定义比较（只看 `message`/`isLatest*`/`isEditing`/`isStreaming`/
+`userMessageRef`，忽略回调引用变化），这样流式 delta 只重渲**正在流的那一条**，历史消息不再反复解析 markdown。
+`SoftStreamingMarkdown` 的 `isSoft` 由 `opacity-80` 闪烁改为 `opacity-70 → opacity-100` 的由浅到深淡入，
+新内容读起来是"逐字浮现、由浅变深"而非硬跳。`typecheck` + `next build` 均通过。
+
+### 18.5 不变量与边界（勿回归）
+- **tool-safety wrapper 的 `except Exception` 必须在前面放行 `GraphBubbleUp`**（raise），否则 voluntary HITL
+  静默死。这与 `triage_gate` 的同源规则，补在 ToolNode 路径。回归测试
+  `test_ask_clarification_via_slotflow_tool_node_actually_interrupts` 钉死。
+- auto-open artifact 只取本 thread 命名空间 + 本次新文件；不要回到全量 `newArtifacts[0]`。
+- todo 面板流式期间必须展开；`replaceTodos` 的 revision 只管首次出现，不要改成每次 status 变都 bump（会
+  和后端 signature 去重打架）。
+- `MessageBubble` memo 比较必须含 `message` 引用（流式时最新消息的 message 对象会变 → 重渲那一条），历史
+  消息 message 引用稳定 → 不重渲。回调引用变化被刻意忽略，行为稳定即可。

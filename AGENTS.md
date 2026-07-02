@@ -231,6 +231,14 @@ frontend/src/
     Gated by `clarify_gate_enabled` (default on) + `run_context.mode in {pro, ultra}`. Scripted-model
     graph tests set `clarify_gate_enabled=False`. Live-validated against `deepseek-v4-pro`:
     underspecified requests clarify, the answer resumes the run, and the clarification does not re-pop.
+  - **The same `GraphBubbleUp`-propagation rule applies to the ToolNode path**: the SlotFlow
+    tool-safety wrappers (`harness/graph.py::_slotflow_tool_safety_wrapper` /
+    `_slotflow_async_tool_safety_wrapper`) that wrap every ToolNode call MUST re-raise
+    `GraphBubbleUp` before their `except Exception` — otherwise the voluntary
+    `ask_clarification` tool's `interrupt()` is swallowed into a `tool_execution_error`
+    ToolMessage and HITL silently never pauses (the 2026-07-02 fix; regression test
+    `test_ask_clarification_via_slotflow_tool_node_actually_interrupts` pins it). See
+    `HARNESS_NOTES.md` §18.
 - **Long-term memory (cross-conversation, proactive)**: memory is **global, not thread-scoped** —
   `store.search_memories` ranks across ALL threads (`thread_id` is only a relevance bonus), so a
   fact learned in one conversation is retrievable in any other. Logic lives in
