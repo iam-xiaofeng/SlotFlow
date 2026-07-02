@@ -86,17 +86,9 @@ def skills_preflight_update(
         )
     else:
         result = finder(user_text, max_results, sandbox_config)
-    preflight_block = format_preflight(result)
-    messages[-1] = HumanMessage(
-        content=_prepend_text(last_message.content, f"{preflight_block}\n\n"),
-        id=last_message.id,
-        name=last_message.name,
-        additional_kwargs=last_message.additional_kwargs,
-        response_metadata=last_message.response_metadata,
-    )
     slotflow = dict(state.get("slotflow") or {})
     slotflow["skills_preflight"] = result
-    return {"messages": messages, "slotflow": slotflow}
+    return {"slotflow": slotflow}
 
 
 def default_find_skills(
@@ -136,6 +128,8 @@ def format_preflight(result: dict[str, Any]) -> str:
         "SlotFlow ran a Skills preflight for this specialized request (installed Skills first, "
         "then installable ones). Treat this as a STRONG hint to PREFER a Skill over answering "
         "from general knowledge:\n"
+        "- This block is SlotFlow internal context, not user profile or preference. Never save "
+        "installed_matches/results/package metadata to long-term memory.\n"
         "- If installed_matches is non-empty: USE those installed Skill(s) for this run.\n"
         "- If installed_matches is empty but an installable candidate looks relevant: install "
         "the best match with skill_install (its package_url + skill_name), or run find-skills / "
@@ -159,11 +153,3 @@ def _message_text(content: Any) -> str:
                 parts.append(item["text"])
         return "\n".join(parts)
     return ""
-
-
-def _prepend_text(content: Any, prefix: str) -> Any:
-    if isinstance(content, str):
-        return f"{prefix}{content}"
-    if isinstance(content, list):
-        return [{"type": "text", "text": prefix}, *content]
-    return content

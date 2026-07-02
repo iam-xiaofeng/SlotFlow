@@ -424,7 +424,7 @@ START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddlew
 节点职责（对应 steps 模块）：
 - `prepare`（每回合一次）：`runtime_summary` / `uploads` / `skills_preflight` / 记忆检索(`long_term_memory.retrieve_memories`) / 产物基线(`artifact_discovery.artifact_baseline`)。
 - `triage_gate`（仅首步，pro/ultra）：`clarify_gate.run_triage` → 不可做则 `clarify_via_interrupt`（`interrupt`+答案 `HumanMessage`）。
-- `pre_model`（每步）：动态 `todo_reminder_update` / `repair_dangling_tool_calls` / 记忆 system 注入(`append_memory_system_message`)。
+- `pre_model`（每步）：动态 `todo_reminder_update` / `repair_dangling_tool_calls` / skills preflight system 注入(`format_preflight`) / 记忆 system 注入(`append_memory_system_message`)。
 - `SlotFlowSummarizationMiddleware`（独立节点，名字固定）：复用官方 `SummarizationMiddleware.abefore_model` 的 `RemoveMessage`+`lc_source` 逻辑。
 - `agent`：`model.bind_tools(tools)` 调用，读 `state.llm_input_messages` + `state.system_prompt`。
 - `post_model`：`todo_parallel_call_guard` + `todo_enforcement_update`，再由 `subagent_limit.cap_subagent_calls` 截断超额 `task_tool`。
@@ -1386,8 +1386,7 @@ revision；`ComposerTodoPanel` 依赖 revision 触发展开/更新提示时，�
    - 如果还有其它 tool_calls，先让工具执行，不抢路由；
    - 如果没有 todos，且当前 Pro/Ultra 请求看起来需要进度管理（长任务、代码/修复/分析/报告等任务词，或显式
      todo 请求），追加 `HumanMessage(name="slotflow_todo_enforcer")`，要求模型先调用 `write_todos`；
-   - 判断“请求是否需要 todo”前先剥掉 latest user message 开头的 `<slotflow-...>` 注入块，避免 Skills preflight /
-     uploads 等长上下文把普通工具读取误判成长任务并造成回环；
+   - 判断“请求是否需要 todo”前先剥掉 latest user message 开头的 `<slotflow-...>` 注入块，避免 uploads 等长上下文把普通工具读取误判成长任务并造成回环；
    - 如果已有 todos 但未全部 completed，而模型试图直接回答且没有调用 `write_todos`，追加同名控制消息，要求先更新
      当前状态；
    - 同一次 write_todos 之后最多注入一次 enforcer，避免模型拒绝工具调用时形成无限回环。
@@ -1413,8 +1412,7 @@ revision；`ComposerTodoPanel` 依赖 revision 触发展开/更新提示时，�
 - `tests/test_harness_steps.py::test_todo_enforcement_requests_status_update_for_incomplete_todos` 覆盖已有未完成 todos 时，
   模型直接回答会被要求先更新状态。
 - `tests/test_harness_steps.py::test_todo_enforcement_does_not_loop_after_existing_enforcer` 覆盖拒绝/遗漏工具调用时不会无限回环。
-- `tests/test_harness_steps.py::test_todo_enforcement_ignores_slotflow_injected_context_for_complexity` 覆盖 Skills preflight
-  这类注入块不会把简单请求误判成 todo-worthy。
+- `tests/test_harness_steps.py::test_todo_enforcement_ignores_slotflow_injected_context_for_complexity` 覆盖内部注入块不会把简单请求误判成 todo-worthy。
 - `tests/test_agent_adapter.py::test_identical_todo_snapshots_emit_each_todo_updated_event` 覆盖重复 identical values snapshot 也会
   输出两次 `todo.updated`。
 

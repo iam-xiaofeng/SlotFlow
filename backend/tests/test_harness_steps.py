@@ -33,6 +33,7 @@ from app.harness.steps.clarify_gate import (
 from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.runtime_summary import runtime_summary_update
 from app.harness.steps.skills_preflight import (
+    format_preflight,
     should_run_preflight,
     skills_preflight_update,
 )
@@ -167,24 +168,41 @@ def test_uploads_injects_image_content_blocks(tmp_path: Path) -> None:
 # --- skills preflight ------------------------------------------------------
 
 
-def test_skills_preflight_injects_find_skills_result() -> None:
+def test_skills_preflight_stores_result_without_mutating_user_message() -> None:
     calls: list[tuple[str, int]] = []
+    message = HumanMessage(content="请分析股票数据并生成图表报告")
 
     def fake_finder(query, max_results, config, skills_root=None, skills_config_store=None):
         calls.append((query, max_results))
-        return {"query": query, "results": [{"title": "chart skill"}], "tool": "find-skills"}
+        return {
+            "query": query,
+            "installed_matches": [{"name": "chart skill"}],
+            "tool": "find-skills",
+        }
 
     update = skills_preflight_update(
-        state={"messages": [HumanMessage(content="请分析股票数据并生成图表报告")]},
+        state={"messages": [message]},
         finder=fake_finder,
         uses_default_finder=False,
     )
     assert calls == [("请分析股票数据并生成图表报告", 5)]
     assert update is not None
     assert update["slotflow"]["skills_preflight"]["tool"] == "find-skills"
-    message = update["messages"][0]
-    assert "<slotflow-skills-preflight>" in str(message.content)
-    assert str(message.content).endswith("请分析股票数据并生成图表报告")
+    assert "messages" not in update
+    assert message.content == "请分析股票数据并生成图表报告"
+
+
+def test_skills_preflight_format_is_internal_system_context() -> None:
+    preflight = format_preflight(
+        {
+            "installed_matches": [{"name": "academic-plotting"}],
+            "tool": "find-skills",
+        }
+    )
+
+    assert preflight.startswith("<slotflow-skills-preflight>")
+    assert "SlotFlow internal context" in preflight
+    assert "academic-plotting" in preflight
 
 
 def test_should_run_preflight_skips_simple_chat() -> None:

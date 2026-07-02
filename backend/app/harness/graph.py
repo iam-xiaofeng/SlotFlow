@@ -58,6 +58,7 @@ from app.harness.steps.long_term_memory import (
 from app.harness.steps.runtime_summary import runtime_summary_update
 from app.harness.steps.skills_preflight import (
     default_find_skills,
+    format_preflight,
     skills_preflight_update,
 )
 from app.harness.steps.subagent_limit import cap_subagent_calls
@@ -162,7 +163,6 @@ def make_prepare_node(inputs: _GraphInputs):
                 uses_default_finder=True,
             )
             if preflight is not None:
-                messages = preflight["messages"]
                 slotflow.update(preflight.get("slotflow") or {})
 
         # long-term memory retrieval -> system prompt section (stored for pre_model)
@@ -264,6 +264,14 @@ def make_pre_model_node(inputs: _GraphInputs):
 
         # Compose the final system prompt for this step: base + memory section.
         system_sections: list[str] = [inputs.system_prompt]
+        slotflow = state.get("slotflow") or {}
+        skills_preflight = (
+            slotflow.get("skills_preflight")
+            if isinstance(slotflow, dict)
+            else None
+        )
+        if isinstance(skills_preflight, dict):
+            system_sections.append(format_preflight(skills_preflight))
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             memories = state.get("retrieved_memories") or []
             if memories:

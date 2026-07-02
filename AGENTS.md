@@ -85,8 +85,8 @@ START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddlew
   long-term-memory retrieval, artifact baseline.
 - `triage_gate` (first step only, pro/ultra): triage → `interrupt()` clarification; resume
   injects the answer verbatim as a `HumanMessage`.
-- `pre_model` (every step): dynamic todo-state reminder, dangling-tool-call repair, long-term-memory
-  system-prompt injection.
+- `pre_model` (every step): dynamic todo-state reminder, dangling-tool-call repair, skills-preflight
+  system-context injection, long-term-memory system-prompt injection.
 - `SlotFlowSummarizationMiddleware` (own node so the projection layer filters its internal
   summary stream by node name): compresses history when token threshold exceeded.
 - `agent`: `model.bind_tools(tools)` call; reads `llm_input_messages` + `system_prompt`.
@@ -220,7 +220,7 @@ frontend/src/
   answered without creating todos, or if active todos are incomplete and the model tries to answer
   without updating them, the node appends a named control message and routes back to `pre_model`.
   The initial-todo heuristic strips leading `<slotflow-...>` injected context blocks before judging
-  complexity, so skills/uploads preflight text cannot turn a simple user request into a todo loop.
+  complexity, so upload/runtime context text cannot turn a simple user request into a todo loop.
   `chat/agent_adapter/streaming.py` emits `todo.updated` for every values snapshot containing
   todos, even when the list is unchanged; the frontend still signature-dedupes UI updates to avoid
   flicker.
@@ -320,7 +320,10 @@ frontend/src/
   `ecosystem_sources` (Anthropic / Codex / skills.sh) to browse. Local installed-skill matching
   (`match_installed_skills` in `tools/customization.py`) is memoized with a short TTL so the skills
   preflight and a later `skill_match` in the same turn don't re-scan disk; `skill_install` calls
-  `invalidate_skill_match_cache()`.
+  `invalidate_skill_match_cache()`. The prepare-node skills preflight stores its result only in
+  `state.slotflow.skills_preflight`; `pre_model` formats that state into internal system context.
+  It must not prepend `installed_matches` / search metadata to `HumanMessage.content`, because user
+  messages are later consumed by explicit/background memory extraction.
 - **Skill management UI/API**: multi-skill installs group dependency skills under a parent via
   `SkillRecord.parent`. Deleting a parent skill from `/api/skills/{name}` must delete the whole
   skill tree: the parent directory, any nested `dependencies/*` child directories, legacy
