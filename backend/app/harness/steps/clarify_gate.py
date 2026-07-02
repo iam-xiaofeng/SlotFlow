@@ -25,6 +25,53 @@ from app.harness.clarification import (
 TriageFn = Callable[[str], dict[str, Any] | None]
 
 _CLARIFY_MODES = {"pro", "ultra"}
+_DIRECT_REQUEST_MARKERS = (
+    "不要澄清",
+    "不要问",
+    "不用问",
+    "无需确认",
+    "不需要确认",
+    "直接做",
+    "直接回答",
+    "直接开始",
+    "按当前信息",
+    "no clarification",
+    "don't ask",
+    "do not ask",
+    "just do",
+    "go ahead",
+)
+_LONG_REQUEST_FAST_PATH_CHARS = 120
+_SHORT_UNDERSPECIFIED_TASK_MAX_CHARS = 48
+_SHORT_UNDERSPECIFIED_TASK_MARKERS = (
+    "做个",
+    "做一个",
+    "搞个",
+    "弄个",
+    "生成",
+    "创建",
+    "设计",
+    "写一",
+    "写个",
+    "写封",
+    "整理成",
+    "输出",
+    "导出",
+    "表格",
+    "计划",
+    "方案",
+    "报告",
+    "页面",
+    "网页",
+    "应用",
+    "图片",
+    "make ",
+    "create ",
+    "generate ",
+    "write ",
+    "design ",
+    "build ",
+)
 
 _TRIAGE_SYSTEM = (
     "You are a routing classifier for an AI agent — NOT the agent. Given the user's latest "
@@ -58,6 +105,27 @@ def already_clarified(messages: list[Any]) -> bool:
         if isinstance(message, dict) and message.get("name") == "ask_clarification":
             return True
     return False
+
+
+def should_skip_triage_model_call(user_text: str) -> bool:
+    """Deterministically skip the pre-token triage LLM call for most normal requests."""
+
+    normalized = " ".join(user_text.split()).lower()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in _DIRECT_REQUEST_MARKERS):
+        return True
+    if len(normalized) >= _LONG_REQUEST_FAST_PATH_CHARS:
+        return True
+    return not _looks_like_short_underspecified_task(normalized)
+
+
+def _looks_like_short_underspecified_task(normalized_text: str) -> bool:
+    """Return true only for short creation/output requests likely to need one choice."""
+
+    if len(normalized_text) > _SHORT_UNDERSPECIFIED_TASK_MAX_CHARS:
+        return False
+    return any(marker in normalized_text for marker in _SHORT_UNDERSPECIFIED_TASK_MARKERS)
 
 
 async def run_triage(
@@ -182,4 +250,5 @@ __all__ = [
     "clarify_via_interrupt",
     "parse_triage",
     "latest_user_text",
+    "should_skip_triage_model_call",
 ]

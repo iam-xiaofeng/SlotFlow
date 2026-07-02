@@ -17,6 +17,7 @@ from langchain_core.tools import tool
 from app.chat.models import ChatStreamRequest, RunContext, UploadedFileContext
 from app.chat.run_config import build_run_config
 from app.harness.features import features_from_run_context
+from app.harness.graph import route_after_model
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.steps.artifact_discovery import (
     artifact_baseline,
@@ -36,7 +37,13 @@ from app.harness.steps.skills_preflight import (
     skills_preflight_update,
 )
 from app.harness.steps.subagent_limit import cap_subagent_calls
-from app.harness.steps.todo import todo_parallel_call_guard, todo_reminder_update, write_todos_tool
+from app.harness.steps.todo import (
+    latest_message_is_todo_enforcer,
+    todo_enforcement_update,
+    todo_parallel_call_guard,
+    todo_reminder_update,
+    write_todos_tool,
+)
 from app.harness.steps.tool_safety import build_error_tool_message, tool_call_name
 from app.harness.steps.uploads import uploads_update
 
@@ -207,11 +214,15 @@ def test_todo_reminder_reminds_when_todos_leave_context() -> None:
 
 def test_write_todos_tool_is_registered_with_command_return() -> None:
     assert write_todos_tool.name == "write_todos"
+    assert write_todos_tool.args["todos"]["items"]["$ref"] == "#/$defs/Todo"
+    schema = write_todos_tool.args_schema.model_json_schema()
+    assert "content" in schema["$defs"]["Todo"]["properties"]
+    assert "text" not in schema["$defs"]["Todo"]["properties"]
     # The official tool returns a Command updating todos + a ToolMessage. InjectedToolCallId
     # requires a full model ToolCall shape (as ToolNode provides in the graph).
     tool_call = {
         "name": "write_todos",
-        "args": {"todos": [{"content": "step", "status": "in_progress"}]},
+        "args": {"todos": [{"text": "step", "status": "in_progress"}]},
         "id": "c1",
         "type": "tool_call",
     }
@@ -237,6 +248,81 @@ def test_todo_parallel_call_guard_rejects_multiple_calls() -> None:
 def test_todo_parallel_call_guard_allows_single_call() -> None:
     msg = AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "a", "type": "tool_call"}])
     assert todo_parallel_call_guard(state={"messages": [HumanMessage("go"), msg]}) is None
+
+
+def test_todo_enforcement_requests_initial_list_for_planned_work() -> None:
+    update = todo_enforcement_update(
+        state={"messages": [HumanMessage("修复 todo 链路并补测试"), AIMessage(content="我来处理。")]},
+        plan_enabled=True,
+    )
+
+    assert update is not None
+    enforcer = update["messages"][0]
+    assert isinstance(enforcer, HumanMessage)
+    assert enforcer.name == "slotflow_todo_enforcer"
+    assert "Call `write_todos` now" in str(enforcer.content)
+    assert latest_message_is_todo_enforcer({"messages": [enforcer]})
+    assert route_after_model({"messages": [HumanMessage("修复 todo 链路"), AIMessage(content="我来处理。"), enforcer]}) == "pre_model"
+
+
+def test_todo_enforcement_skips_simple_unplanned_answer() -> None:
+    update = todo_enforcement_update(
+        state={"messages": [HumanMessage("你好"), AIMessage(content="你好。")]},
+        plan_enabled=True,
+    )
+
+    assert update is None
+
+
+def test_todo_enforcement_ignores_slotflow_injected_context_for_complexity() -> None:
+    injected = (
+        "<slotflow-skills-preflight>\n"
+        "This injected block is intentionally long and mentions analyze, research, report, "
+        "implement, test, verify, and other workflow words that must not make a simple "
+        "user request look todo-worthy.\n"
+        "</slotflow-skills-preflight>\n\n"
+        "读取当前 SlotFlow run context"
+    )
+    update = todo_enforcement_update(
+        state={"messages": [HumanMessage(injected), AIMessage(content="工具结果已经收到。")]},
+        plan_enabled=True,
+    )
+
+    assert update is None
+
+
+def test_todo_enforcement_honors_explicit_todo_request_without_plan_mode() -> None:
+    update = todo_enforcement_update(
+        state={"messages": [HumanMessage("测试 todo 功能"), AIMessage(content="我会展示。")]},
+        plan_enabled=False,
+    )
+
+    assert update is not None
+    assert update["messages"][0].name == "slotflow_todo_enforcer"
+
+
+def test_todo_enforcement_requests_status_update_for_incomplete_todos() -> None:
+    update = todo_enforcement_update(
+        state={
+            "messages": [HumanMessage("继续"), AIMessage(content="已经完成。")],
+            "todos": [{"content": "修复后端", "status": "in_progress"}],
+        },
+        plan_enabled=True,
+    )
+
+    assert update is not None
+    assert "The active todo list is not complete" in str(update["messages"][0].content)
+
+
+def test_todo_enforcement_does_not_loop_after_existing_enforcer() -> None:
+    first = HumanMessage("修复 todo 链路")
+    enforcer = HumanMessage(name="slotflow_todo_enforcer", content="call write_todos")
+    update = todo_enforcement_update(
+        state={"messages": [first, AIMessage(content="我来处理。"), enforcer, AIMessage(content="继续解释。")]},
+        plan_enabled=True,
+    )
+
+    assert update is None
 
 
 # --- subagent limit --------------------------------------------------------

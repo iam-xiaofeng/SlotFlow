@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from app.chat.agent_adapter import AgentEvent
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 from app.chat.repository import ChatRepository, SQLiteChatRepository
+from app.chat.routes import select_assistant_content
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
@@ -261,7 +262,7 @@ class CompressingAgentAdapter:
 
 
 class ReplacedContentAgentAdapter:
-    """测试用 adapter：模拟 state snapshot 替换之前流出的 content。"""
+    """测试用 adapter：模拟 state snapshot 短于已经流出的 content。"""
 
     async def stream_events(
         self,
@@ -271,14 +272,14 @@ class ReplacedContentAgentAdapter:
     ) -> AsyncIterator[AgentEvent]:
         _ = request
         message_id = f"{bundle.context.run_id}:assistant"
-        transient_content = "这段会被 snapshot 替换。"
+        streamed_content = "这段已经通过 message.delta 流式展示给用户，不能被短 snapshot 擦掉。"
         final_answer = "最终报告正文。"
         yield AgentEvent(
             event="message.delta",
             data={
                 "message_id": message_id,
                 "role": "assistant",
-                "delta": transient_content,
+                "delta": streamed_content,
                 "channel": "content",
                 "index": 0,
             },
@@ -585,24 +586,13 @@ def test_stream_run_exposes_context_compressing_without_persisting_it() -> None:
     assert "compressing" not in messages[1].metadata
 
 
-def test_stream_run_does_not_guess_replaced_content_delta_as_reasoning_metadata() -> None:
-    repo = SQLiteChatRepository(":memory:")
-    client = _client(repo, adapter=ReplacedContentAgentAdapter())
-    thread = client.post("/api/chat/threads", json={"title": "替换正文"}).json()
-
-    response = client.post(
-        f"/api/chat/threads/{thread['id']}/runs/stream",
-        json={"message": "需要深度分析"},
+def test_select_assistant_content_keeps_longer_streamed_content_over_short_snapshot() -> None:
+    content = select_assistant_content(
+        snapshot_message_content="最终报告正文。",
+        streamed_content="这段已经通过 message.delta 流式展示给用户，不能被短 snapshot 擦掉。",
     )
-    messages = repo.list_messages(thread["id"])
 
-    assert response.status_code == 200
-    assert [message.role for message in messages] == ["user", "assistant"]
-    assert messages[1].content == "最终报告正文。"
-    assert messages[1].metadata == {
-        "source": "agent",
-        "thinking_enabled": True,
-    }
+    assert content == "这段已经通过 message.delta 流式展示给用户，不能被短 snapshot 擦掉。"
 
 
 def test_stream_run_can_reuse_user_message_for_edit_or_retry() -> None:

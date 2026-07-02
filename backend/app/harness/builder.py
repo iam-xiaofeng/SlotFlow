@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from app.clock import utc_now
 from app.chat.models import RunContext
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.graph import build_slotflow_graph
@@ -93,6 +94,7 @@ def build_system_prompt(
         harness_config.system_prompt,
         "",
         "<slotflow-runtime>",
+        f"current_utc_date={utc_now().date().isoformat()}",
         f"thinking_enabled={features.thinking_enabled}",
         f"plan_enabled={features.plan_enabled}",
         f"subagent_enabled={features.subagent_enabled}",
@@ -101,9 +103,21 @@ def build_system_prompt(
     sections.extend(
         [
             "",
+            "<slotflow-freshness-policy>",
+            "Before answering, ground time-sensitive claims on the current date above. For facts that change over time — current events, prices, laws, releases, APIs, model capabilities, rankings, availability, company/product status, schedules, weather, statistics, or anything the user asks as 'latest/current/today/now' — do not rely on training data alone.",
+            "Use web_search/web_fetch, workspace files, uploaded files, MCP tools, or another authoritative source before answering time-sensitive questions. If the answer is stable and unlikely to have changed (definitions, timeless concepts, basic math, local code already in the workspace), you may answer without web search.",
+            "When sources disagree materially, say so clearly, cite/describe the conflicting sources, and give the best-supported conclusion with uncertainty instead of hiding the conflict.",
+            "</slotflow-freshness-policy>",
+        ]
+    )
+    sections.extend(
+        [
+            "",
             "<slotflow-long-term-memory-status>",
             f"enabled={harness_config.memory_store is not None}",
             "When enabled, long-term memory retrieval/injection/save is handled by the prepare/pre_model/finalize graph nodes.",
+            "At the start of a task, decide whether existing long-term memory could matter. The graph already retrieves likely relevant memories, but if the task depends on user preferences, prior project context, profile facts, or past decisions and the injected memories are missing/insufficient, call memory_list before working.",
+            "After completing a task, decide whether anything durable should be saved or corrected. Use memory_save for stable preferences/profile/project context/facts worth reusing; use memory_update or memory_delete when an existing memory is wrong or obsolete. Do not save one-off transient task details.",
             "</slotflow-long-term-memory-status>",
         ]
     )
@@ -139,10 +153,6 @@ def build_system_prompt(
         "- Keep the final answer clean: never include meta-commentary about your own indecision, apologies for confusion, or 'let me think about whether to ask'. Decide, state the assumption in one line, deliver.",
         "- For a specialized, domain, or expert task, call skill_match before doing the work to find a relevant Skill.",
     ]
-    if features.plan_enabled:
-        orchestration_lines.append(
-            "- Plan the work with write_todos (3-7 concrete steps) and work the list, marking items in_progress/completed as you go — don't keep the plan only in your head.",
-        )
     if features.subagent_enabled:
         orchestration_lines.append(
             "- When the task splits into INDEPENDENT parts (research multiple items, evaluate multiple options, build multiple components), delegate each to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself — don't do every part sequentially in one thread.",

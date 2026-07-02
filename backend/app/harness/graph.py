@@ -4,8 +4,9 @@
 `create_agent` + middleware 单 ReAct 循环改为 LangGraph 原生 `StateGraph`（显式 node +
 edge）。链路严格按 `docs/refactor-plan.md` §2 拓扑运行：
 
-    START → prepare → triage_gate → pre_model → agent → post_model → route
+    START → prepare → triage_gate → pre_model → agent → post_model
                                                                   ├─ tools → pre_model
+                                                                  ├─ pre_model (todo enforcement)
                                                                   └─ finalize → END
 
 中间件逻辑已抽成 `app/harness/steps/*` 的无状态纯函数，节点直接调用，顺序由边显式
@@ -43,7 +44,9 @@ from app.harness.steps.clarify_gate import (
     clarify_mode_enabled,
     clarify_via_interrupt,
     is_fresh_user_turn,
+    latest_user_text,
     run_triage,
+    should_skip_triage_model_call,
 )
 from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.long_term_memory import (
@@ -59,7 +62,12 @@ from app.harness.steps.skills_preflight import (
 )
 from app.harness.steps.subagent_limit import cap_subagent_calls
 from app.harness.steps.summarization import build_summarization_middleware
-from app.harness.steps.todo import SLOTFLOW_TODO_SYSTEM_PROMPT, todo_parallel_call_guard, todo_reminder_update
+from app.harness.steps.todo import (
+    latest_message_is_todo_enforcer,
+    todo_enforcement_update,
+    todo_parallel_call_guard,
+    todo_reminder_update,
+)
 from app.harness.steps.tool_safety import build_error_tool_message, tool_call_name
 from app.harness.steps.uploads import uploads_update
 
@@ -205,6 +213,8 @@ def make_triage_gate_node(inputs: _GraphInputs):
             return {}
         if already_clarified(messages):
             return {}
+        if should_skip_triage_model_call(latest_user_text(messages)):
+            return {}
         triage = await run_triage(messages=messages, model=inputs.model)
         if triage is None:
             return {}
@@ -240,7 +250,7 @@ def make_pre_model_node(inputs: _GraphInputs):
         messages = list(state.get("messages") or [])
         updates: dict[str, Any] = {}
 
-        # todo reminder + system prompt (before_model / wrap_model_call parity)
+        # todo reminder: dynamic state recap only, not a static system-prompt constraint.
         if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
             reminder = todo_reminder_update(state=state)
             if reminder is not None:
@@ -252,10 +262,8 @@ def make_pre_model_node(inputs: _GraphInputs):
             updates["llm_input_messages"] = repaired
             messages = repaired
 
-        # Compose the final system prompt for this step: base + todo section + memory section.
+        # Compose the final system prompt for this step: base + memory section.
         system_sections: list[str] = [inputs.system_prompt]
-        if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
-            system_sections.append(SLOTFLOW_TODO_SYSTEM_PROMPT)
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             memories = state.get("retrieved_memories") or []
             if memories:
@@ -365,10 +373,16 @@ def make_post_model_node(inputs: _GraphInputs):
         runtime: Runtime[RunContext],
     ) -> dict[str, Any]:
         updates: dict[str, Any] = {}
-        if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
+        if flags.todo_enabled and inputs.tools:
             guard = todo_parallel_call_guard(state=state)
             if guard is not None:
                 updates.update(guard)
+            enforcer = todo_enforcement_update(
+                state=state,
+                plan_enabled=inputs.features.plan_enabled,
+            )
+            if enforcer is not None:
+                updates.update(enforcer)
         if flags.subagent_limit_enabled and inputs.features.subagent_enabled and inputs.tools:
             capped = cap_subagent_calls(
                 state=state,
@@ -389,6 +403,8 @@ def make_post_model_node(inputs: _GraphInputs):
 
 
 def route_after_model(state: SlotFlowAgentState) -> str:
+    if latest_message_is_todo_enforcer(state):
+        return "pre_model"
     decision = tools_condition(state)
     return "tools" if decision == "tools" else "finalize"
 
@@ -567,7 +583,7 @@ def build_slotflow_graph(
     graph.add_conditional_edges(
         "post_model",
         route_after_model,
-        {"tools": "tools", "finalize": "finalize"},
+        {"tools": "tools", "pre_model": "pre_model", "finalize": "finalize"},
     )
     graph.add_edge("tools", "pre_model")
     graph.add_edge("finalize", END)

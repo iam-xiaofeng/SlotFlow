@@ -24,6 +24,7 @@ from app.chat.agent_adapter import (
     extract_message_delta,
     extract_message_delta_parts,
     flatten_message_projection_items,
+    iter_projection_agent_events,
     normalize_values_snapshot,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
@@ -402,7 +403,7 @@ def test_todos_in_values_snapshot_become_todo_updated_event() -> None:
         item={
             "messages": [],
             "todos": [
-                {"content": "读取代码", "status": "completed"},
+                {"text": "读取代码", "status": "completed"},
                 {"content": "补前端展示", "status": "in_progress"},
                 {"content": "跑测试", "status": "later"},
             ],
@@ -424,6 +425,42 @@ def test_todos_in_values_snapshot_become_todo_updated_event() -> None:
             ],
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_identical_todo_snapshots_emit_each_todo_updated_event() -> None:
+    class ProjectionChannel:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def iterator():
+                for item in self._items:
+                    yield item
+
+            return iterator()
+
+    class ProjectionOnlyStream:
+        def __init__(self) -> None:
+            snapshot = {
+                "messages": [],
+                "todos": [{"content": "保持当前状态", "status": "in_progress"}],
+            }
+            self.values = ProjectionChannel([snapshot, snapshot])
+
+    events = [
+        event
+        async for event in iter_projection_agent_events(
+            ProjectionOnlyStream(),
+            bundle=_bundle(),
+        )
+    ]
+
+    todo_events = [event for event in events if event.event == "todo.updated"]
+    assert len(todo_events) == 2
+    assert todo_events[0].data["todos"] == [
+        {"content": "保持当前状态", "status": "in_progress"}
+    ]
 
 
 def test_run_bundle_keeps_business_context_out_of_configurable() -> None:

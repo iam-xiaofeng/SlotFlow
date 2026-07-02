@@ -24,6 +24,7 @@ from app.harness.steps.clarify_gate import (
     is_fresh_user_turn,
     parse_triage,
     run_triage,
+    should_skip_triage_model_call,
 )
 
 
@@ -69,6 +70,16 @@ def test_already_clarified_after_ask_clarification_tool() -> None:
 def test_parse_triage_reads_json() -> None:
     assert parse_triage('{"actionable": false, "question": "q?"}') == {"actionable": False, "question": "q?"}
     assert parse_triage("nope") is None
+
+
+def test_should_skip_triage_model_call_for_direct_or_long_requests() -> None:
+    assert should_skip_triage_model_call("不要问，直接做一个简短总结")
+    assert should_skip_triage_model_call("Please do not ask follow-up questions; go ahead.")
+    assert should_skip_triage_model_call("请基于下面完整上下文优化交互：" + "细节" * 80)
+    assert should_skip_triage_model_call("你好")
+    assert should_skip_triage_model_call("模型不会回复了")
+    assert should_skip_triage_model_call("整个链路反应好慢")
+    assert not should_skip_triage_model_call("做个表格")
 
 
 @pytest.mark.asyncio

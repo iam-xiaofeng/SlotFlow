@@ -240,7 +240,10 @@ async def stream_thread_run(
                     return
 
                 if event.event == "run.finished":
-                    content = snapshot_message_content or "".join(assistant_text_parts)
+                    content = select_assistant_content(
+                        snapshot_message_content=snapshot_message_content,
+                        streamed_content="".join(assistant_text_parts),
+                    )
                     reasoning_content = select_assistant_reasoning_content(
                         snapshot_reasoning_content=snapshot_reasoning_content,
                         streamed_reasoning_content="".join(assistant_reasoning_parts),
@@ -316,6 +319,32 @@ def latest_assistant_reasoning_content(event: BusinessSseEvent) -> str | None:
     """从 state.snapshot 里取最后一条 assistant reasoning_content。"""
 
     return latest_assistant_message_field(event, "reasoning_content")
+
+
+def select_assistant_content(
+    *,
+    snapshot_message_content: str | None,
+    streamed_content: str,
+) -> str:
+    """Choose persisted assistant content without letting short snapshots erase live text."""
+
+    streamed = streamed_content.strip()
+    snapshot = (
+        snapshot_message_content.strip()
+        if isinstance(snapshot_message_content, str)
+        else ""
+    )
+    if streamed and snapshot:
+        if snapshot.startswith(streamed):
+            return snapshot
+        if streamed.startswith(snapshot):
+            return streamed
+        return snapshot if len(snapshot) > len(streamed) else streamed
+
+    if streamed:
+        return streamed
+
+    return snapshot
 
 
 def select_assistant_reasoning_content(

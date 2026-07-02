@@ -9,7 +9,6 @@ typed projection channel（messages / values / tool_calls）并发拉取、近�
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -145,11 +144,10 @@ async def iter_projection_agent_events(
     queue: asyncio.Queue[ProjectionEnvelope | BaseException | object] = asyncio.Queue()
     done_sentinel = object()
     latest_snapshot: AgentEvent | None = None
-    latest_todos_signature: str | None = None
     compression_announced = False
 
     async def pump_projection(projection: str, channel: Any) -> None:
-        nonlocal compression_announced, latest_snapshot, latest_todos_signature
+        nonlocal compression_announced, latest_snapshot
         try:
             async for item in channel:
                 if projection == "values":
@@ -161,14 +159,7 @@ async def iter_projection_agent_events(
                     if latest_snapshot is not None:
                         todo_event = todo_event_from_snapshot(latest_snapshot.data)
                         if todo_event is not None:
-                            signature = json.dumps(
-                                todo_event.data.get("todos", []),
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            )
-                            if signature != latest_todos_signature:
-                                latest_todos_signature = signature
-                                await queue.put(todo_event)
+                            await queue.put(todo_event)
                     continue
                 if projection == "messages":
                     if is_summarization_item(item):

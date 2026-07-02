@@ -1,10 +1,10 @@
-"""Step: todo-list tool, system prompt, reminder, and parallel-call guard.
+"""Step: todo-list tool, reminder, post-model enforcement, and parallel-call guard.
 
 重构后 SlotFlow 不再用官方 ``TodoListMiddleware``（它依赖 ``AgentMiddleware`` 的
 ``wrap_model_call``/``after_model`` hook）。这里直接复用官方 ``write_todos`` 工具（返回
 ``Command(update={"todos":..., "messages":[ToolMessage]})``，ToolNode 原生支持，state 已有
-``todos`` 字段），并把官方中间件的两段逻辑——system prompt 注入与「禁止并行 write_todos」
-守卫——抽成纯函数，由 graph 节点调用。
+``todos`` 字段），并把「活跃 todo 遗忘提醒」「缺失/过期 todo 的后置节点约束」和
+「禁止并行 write_todos」抽成纯函数，由 graph 节点调用。
 """
 
 from __future__ import annotations
@@ -14,34 +14,70 @@ from typing import Annotated, Any, Literal
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.harness.state import SlotFlowAgentState
 
-SLOTFLOW_TODO_SYSTEM_PROMPT = """## `write_todos`
+TODO_ENFORCER_MESSAGE_NAME = "slotflow_todo_enforcer"
+TODO_REMINDER_MESSAGE_NAME = "slotflow_todo_reminder"
 
-You have access to the `write_todos` tool to help you manage and plan complex objectives.
-Use this tool for complex objectives to ensure that you are tracking each necessary step.
-This tool is very helpful for planning complex objectives, and for breaking down these larger complex objectives into smaller steps.
-
-It is critical that you mark todos as completed as soon as you are done with a step. Do not batch up multiple steps before marking them as completed.
-For simple objectives that only require a few steps, it is better to just complete the objective directly and NOT use this tool.
-Writing todos takes time and tokens, use it when it is helpful for managing complex many-step problems! But not for simple few-step requests.
-
-## Important To-Do List Usage Notes to Remember
-
-- The `write_todos` tool should never be called multiple times in parallel.
-- Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant.
-
-## Finishing a task
-
-When you finish all work, write your final answer in the message AFTER your last `write_todos` call — not in the same turn as that call. Start the final message with the substantive content the user asked for — the data, computation, summary, or analysis. The user wants the result, not confirmation that the work is done."""
+_TODO_EXPLICIT_MARKERS = (
+    "todo",
+    "to-do",
+    "待办",
+    "任务列表",
+    "write_todos",
+    "write todos",
+)
+_TODO_COMPLEX_TASK_MARKERS = (
+    "实现",
+    "修复",
+    "优化",
+    "重构",
+    "检查",
+    "排查",
+    "测试",
+    "验证",
+    "新增",
+    "添加",
+    "设计",
+    "分析",
+    "调研",
+    "对比",
+    "整理",
+    "报告",
+    "计划",
+    "方案",
+    "整个",
+    "全部",
+    "前端",
+    "后端",
+    "链路",
+    "issue",
+    "commit",
+    "implement",
+    "fix",
+    "debug",
+    "refactor",
+    "test",
+    "verify",
+    "analyze",
+    "research",
+    "compare",
+    "plan",
+    "report",
+)
 
 
 class Todo(BaseModel):
     """A single todo item with content and status."""
 
-    content: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    content: str = Field(
+        description="User-visible todo item text.",
+        validation_alias=AliasChoices("content", "text"),
+    )
     status: Literal["pending", "in_progress", "completed"]
 
 
@@ -53,7 +89,7 @@ class WriteTodosInput(BaseModel):
 
 @tool("write_todos")
 def write_todos_tool(
-    todos: list[dict[str, Any]], tool_call_id: Annotated[str, InjectedToolCallId]
+    todos: list[Todo], tool_call_id: Annotated[str, InjectedToolCallId]
 ) -> Command[Any]:
     """Create and manage a structured task list for your current work session.
 
@@ -63,11 +99,18 @@ def write_todos_tool(
     The todo list tracks work; it is not the final answer.
     """
 
+    normalized_todos = [
+        todo.model_dump() if isinstance(todo, Todo) else Todo.model_validate(todo).model_dump()
+        for todo in todos
+    ]
     return Command(
         update={
-            "todos": todos,
+            "todos": normalized_todos,
             "messages": [
-                ToolMessage(f"Updated todo list to {todos}", tool_call_id=tool_call_id)
+                ToolMessage(
+                    f"Updated todo list to {normalized_todos}",
+                    tool_call_id=tool_call_id,
+                )
             ],
         }
     )
@@ -85,10 +128,10 @@ def todo_reminder_update(
     messages = list(state.get("messages") or [])
     if _has_write_todos_call(messages):
         return None
-    if _has_named_human_message(messages, "slotflow_todo_reminder"):
+    if _has_named_human_message(messages, TODO_REMINDER_MESSAGE_NAME):
         return None
     reminder = HumanMessage(
-        name="slotflow_todo_reminder",
+        name=TODO_REMINDER_MESSAGE_NAME,
         content=(
             "<slotflow-todo-reminder>\n"
             "The active todo list is no longer visible in the recent context, "
@@ -99,6 +142,74 @@ def todo_reminder_update(
         ),
     )
     return {"messages": [reminder]}
+
+
+def todo_enforcement_update(
+    *,
+    state: SlotFlowAgentState,
+    plan_enabled: bool,
+) -> dict[str, Any] | None:
+    """Ask the model to create/update todos from the post-model graph node when needed.
+
+    This is deliberately dynamic graph behavior, not a static system-prompt rule: the node
+    inspects the just-produced AI message and active ``todos`` state after every model call.
+    """
+
+    messages = list(state.get("messages") or [])
+    last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+    if last_ai is None or messages[-1] is not last_ai:
+        return None
+    if _has_write_todos_call([last_ai]):
+        return None
+    if last_ai.tool_calls:
+        return None
+    if _has_named_human_message_since_last_write_todos(messages, TODO_ENFORCER_MESSAGE_NAME):
+        return None
+
+    todos = list(state.get("todos") or [])
+    latest_user_request = _latest_user_text(messages)
+    if not todos:
+        if not _should_create_initial_todos(latest_user_request, plan_enabled=plan_enabled):
+            return None
+        message = HumanMessage(
+            name=TODO_ENFORCER_MESSAGE_NAME,
+            content=(
+                "<slotflow-todo-enforcer>\n"
+                "This request needs visible progress tracking. Call `write_todos` now with "
+                "3-7 concrete user-visible steps and mark the first active step "
+                "`in_progress`. Do not answer in prose before creating the todo list.\n"
+                "</slotflow-todo-enforcer>"
+            ),
+        )
+        return {"messages": [message]}
+
+    if _all_todos_completed(todos):
+        return None
+    message = HumanMessage(
+        name=TODO_ENFORCER_MESSAGE_NAME,
+        content=(
+            "<slotflow-todo-enforcer>\n"
+            "The active todo list is not complete. Before giving a final answer, call "
+            "`write_todos` with the current statuses. Mark completed work as completed and "
+            "keep exactly one current item `in_progress` when work remains.\n\n"
+            f"{_format_todos(todos)}\n"
+            "</slotflow-todo-enforcer>"
+        ),
+    )
+    return {"messages": [message]}
+
+
+def latest_message_is_todo_enforcer(state: SlotFlowAgentState) -> bool:
+    """Return true when post_model just appended the todo enforcement control message."""
+
+    messages = list(state.get("messages") or [])
+    if not messages:
+        return False
+    message = messages[-1]
+    return (
+        isinstance(message, HumanMessage)
+        and getattr(message, "name", None) == TODO_ENFORCER_MESSAGE_NAME
+    )
 
 
 def todo_parallel_call_guard(
@@ -147,6 +258,63 @@ def _has_named_human_message(messages: list[Any], name: str) -> bool:
         isinstance(message, HumanMessage) and getattr(message, "name", None) == name
         for message in messages
     )
+
+
+def _has_named_human_message_since_last_write_todos(messages: list[Any], name: str) -> bool:
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            for tool_call in message.tool_calls or []:
+                if tool_call.get("name") == "write_todos":
+                    return False
+        if isinstance(message, HumanMessage) and getattr(message, "name", None) == name:
+            return True
+    return False
+
+
+def _looks_like_todo_worthy_request(text: str) -> bool:
+    normalized = " ".join(text.split()).lower()
+    if not normalized:
+        return False
+    if len(normalized) >= 80:
+        return True
+    return any(marker in normalized for marker in _TODO_COMPLEX_TASK_MARKERS)
+
+
+def _should_create_initial_todos(text: str, *, plan_enabled: bool) -> bool:
+    normalized = " ".join(text.split()).lower()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in _TODO_EXPLICIT_MARKERS):
+        return True
+    return plan_enabled and _looks_like_todo_worthy_request(normalized)
+
+
+def _all_todos_completed(todos: list[dict[str, Any]]) -> bool:
+    return bool(todos) and all(todo.get("status") == "completed" for todo in todos)
+
+
+def _latest_user_text(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage) and getattr(message, "name", None) is None:
+            content = getattr(message, "content", "")
+            text = content if isinstance(content, str) else str(content)
+            return _strip_slotflow_injected_context(text)
+    return ""
+
+
+def _strip_slotflow_injected_context(text: str) -> str:
+    """Return the user's original request after SlotFlow-injected XML context blocks."""
+
+    remaining = text.strip()
+    while remaining.startswith("<slotflow-"):
+        close_start = remaining.find("</slotflow-")
+        if close_start == -1:
+            break
+        close_end = remaining.find(">", close_start)
+        if close_end == -1:
+            break
+        remaining = remaining[close_end + 1 :].lstrip()
+    return remaining
 
 
 def _format_todos(todos: list[dict[str, Any]]) -> str:

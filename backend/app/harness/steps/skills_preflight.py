@@ -106,12 +106,17 @@ def default_find_skills(
     skills_root: Any = None,
     skills_config_store: Any = None,
 ) -> dict[str, Any]:
+    # Preflight runs in the synchronous prepare node BEFORE the first model token, so it
+    # MUST NOT do a network installable-skill search (a ~4s web request would delay every
+    # first token). Local-only matching; the model can run the network search itself via
+    # skill_match when it actually wants to install a Skill.
     return find_relevant_skills(
         query=query,
         max_results=max_results,
         skills_root=skills_root,
         skills_config_store=skills_config_store,
         config=config,
+        local_only=True,
     )
 
 

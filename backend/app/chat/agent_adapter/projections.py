@@ -206,13 +206,9 @@ def extract_reasoning_from_content_block(item: Any) -> str:
         if isinstance(value, str) and value:
             return value
 
-    # OpenAI Responses API emits reasoning as a *summary* of sub-blocks, not a flat
-    # string: {"type": "reasoning", "summary": [{"type": "summary_text", "text": ...}],
-    # "id": ...}. langchain-openai keeps this shape verbatim in message.content when
-    # output_version is the default "responses/v1" (it only flattens to
-    # additional_kwargs["reasoning"] under the legacy "v0" output_version, which we do
-    # not set). Flatten the summary text so gpt-5 / o-series thinking reaches the
-    # reasoning channel instead of being silently dropped.
+    # OpenAI Responses API emits reasoning as summary sub-blocks under the default
+    # responses/v1 output_version, not as a flat string. Flatten those texts so gpt-5 /
+    # o-series thinking reaches the reasoning channel instead of being silently dropped.
     summary = item.get("summary")
     if isinstance(summary, list):
         parts: list[str] = []
@@ -332,6 +328,8 @@ def normalize_todos(value: Any) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         content = item.get("content")
+        if not isinstance(content, str):
+            content = item.get("text")
         status = item.get("status")
         if not isinstance(content, str) or not content.strip():
             continue
