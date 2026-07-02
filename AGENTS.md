@@ -209,12 +209,14 @@ frontend/src/
   by `harness/tools/registry.py`; if a model still calls an unregistered unsafe host execution
   tool, `harness/steps/tool_safety.py::build_unknown_tool_error_message` returns an
   `unsafe_host_execution_tool` ToolMessage that tells it to use `sandbox_exec`. Code execution must
-  go through the Docker sandbox boundary. The implementation is
+  go through the Docker sandbox boundary. Docker images are project/host cached by Docker itself
+  (so the same image is downloaded once and reused by later `docker run` calls). The implementation is
   `harness/sandbox/docker.py::LazyDockerSandbox` + `harness/tools/sandbox.py`; it is lazy, so Docker
   is not touched until the tool is actually called. The default image is `python:3.12` with network
-  enabled (`bridge`) and a 120s timeout so `python -m pip install ...` works inside the sandbox;
-  set `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=false` for offline execution. The container uses bind
-  mounts instead of copy in/out: `/workspace/uploads` is read-only user uploads,
+  enabled (`bridge`), a 120s command timeout, and a 600s idle container timeout so abandoned sessions
+  do not keep consuming Docker resources; set `SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS` to tune
+  the close-after-inactivity window. Set `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED=false` for offline
+  execution. The container uses bind mounts instead of copy in/out: `/workspace/uploads` is read-only user uploads,
   `/workspace/artifacts` is read-write for the current thread's generated artifacts,
   `/workspace/work` is read-write scratch under `.sandbox/<thread>`, and `/workspace/skills` is
   read-only installed Skills when configured. Outputs that should appear in the UI must be written

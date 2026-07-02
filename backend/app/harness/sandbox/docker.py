@@ -16,9 +16,10 @@ from __future__ import annotations
 import atexit
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.harness.sandbox.config import SlotFlowSandboxConfig
 from app.harness.sandbox.workspace import build_slotflow_workspace
@@ -47,13 +48,17 @@ class LazyDockerSandbox:
         thread_id: str | None = None,
         skills_root: Path | None = None,
         runner=subprocess.run,
+        timer_factory: Callable[[float, Callable[[], None]], threading.Timer] = threading.Timer,
     ) -> None:
         self.config = config or SlotFlowSandboxConfig()
         self.thread_id = thread_id
         self.skills_root = skills_root
         self._runner = runner
+        self._timer_factory = timer_factory
         self._workspace = build_slotflow_workspace(self.config)
         self._container_id: str | None = None
+        self._idle_timer: threading.Timer | None = None
+        self._lock = threading.RLock()
 
     @property
     def started(self) -> bool:
@@ -76,44 +81,49 @@ class LazyDockerSandbox:
                 "source": "slotflow_docker_sandbox",
             }
 
-        container_id = self._ensure_started()
-        timeout = _effective_timeout(
-            requested=timeout_seconds,
-            default=self.config.docker_timeout_seconds,
-        )
-        try:
-            result = self._runner(
-                [
-                    "docker",
-                    "exec",
-                    "-w",
-                    "/workspace/work",
-                    container_id,
-                    "sh",
-                    "-lc",
-                    stripped,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+        with self._lock:
+            self._cancel_idle_close_locked()
+            container_id = self._ensure_started()
+            timeout = _effective_timeout(
+                requested=timeout_seconds,
+                default=self.config.docker_timeout_seconds,
             )
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "ok": False,
-                "timed_out": True,
-                "timeout_seconds": timeout,
-                "stdout": _truncate_text(exc.stdout or "", self.config.max_read_bytes),
-                "stderr": _truncate_text(exc.stderr or "", self.config.max_read_bytes),
-                "source": "slotflow_docker_sandbox",
-            }
-        except OSError as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                "hint": "Docker CLI is required for sandbox_exec.",
-                "source": "slotflow_docker_sandbox",
-            }
+            try:
+                result = self._runner(
+                    [
+                        "docker",
+                        "exec",
+                        "-w",
+                        "/workspace/work",
+                        container_id,
+                        "sh",
+                        "-lc",
+                        stripped,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._schedule_idle_close_locked()
+                return {
+                    "ok": False,
+                    "timed_out": True,
+                    "timeout_seconds": timeout,
+                    "stdout": _truncate_text(exc.stdout or "", self.config.max_read_bytes),
+                    "stderr": _truncate_text(exc.stderr or "", self.config.max_read_bytes),
+                    "source": "slotflow_docker_sandbox",
+                }
+            except OSError as exc:
+                self._schedule_idle_close_locked()
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "hint": "Docker CLI is required for sandbox_exec.",
+                    "source": "slotflow_docker_sandbox",
+                }
+            self._schedule_idle_close_locked()
 
         return {
             "ok": result.returncode == 0,
@@ -121,6 +131,7 @@ class LazyDockerSandbox:
             "stdout": _truncate_text(result.stdout, self.config.max_read_bytes),
             "stderr": _truncate_text(result.stderr, self.config.max_read_bytes),
             "timeout_seconds": timeout,
+            "idle_timeout_seconds": self.config.docker_idle_timeout_seconds,
             "mounts": self.mount_summary(),
             "source": "slotflow_docker_sandbox",
         }
@@ -139,16 +150,33 @@ class LazyDockerSandbox:
         }
 
     def close(self) -> None:
-        container_id = self._container_id
-        if container_id is None:
-            return
-        self._container_id = None
+        with self._lock:
+            self._cancel_idle_close_locked()
+            container_id = self._container_id
+            if container_id is None:
+                return
+            self._container_id = None
         self._runner(
             ["docker", "rm", "-f", container_id],
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def _schedule_idle_close_locked(self) -> None:
+        if self._container_id is None:
+            return
+        timeout = max(1, self.config.docker_idle_timeout_seconds)
+        timer = self._timer_factory(timeout, self.close)
+        timer.daemon = True
+        self._idle_timer = timer
+        timer.start()
+
+    def _cancel_idle_close_locked(self) -> None:
+        timer = self._idle_timer
+        self._idle_timer = None
+        if timer is not None:
+            timer.cancel()
 
     def _ensure_started(self) -> str:
         if self._container_id is not None:

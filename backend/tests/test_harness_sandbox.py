@@ -40,6 +40,28 @@ class ToolAwareFakeListChatModel(FakeListChatModel):
         return self
 
 
+class FakeTimer:
+    instances: list["FakeTimer"] = []
+
+    def __init__(self, interval: float, function):
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+        FakeTimer.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        if not self.cancelled:
+            self.function()
+
+
 def _run_context():
     request = ChatStreamRequest(message="解释 sandbox", mode="pro")
     return build_run_config(
@@ -175,6 +197,7 @@ def test_runtime_loads_sandbox_config_from_env(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_IMAGE", "python:3.13-slim")
     monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS", "12")
     monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED", "true")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS", "34")
     monkeypatch.setenv("SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL", "true")
 
     config = load_runtime_config_from_env()
@@ -188,6 +211,7 @@ def test_runtime_loads_sandbox_config_from_env(monkeypatch, tmp_path: Path) -> N
         docker_image="python:3.13-slim",
         docker_timeout_seconds=12,
         docker_network_enabled=True,
+        docker_idle_timeout_seconds=34,
         allow_host_docker_install=True,
     )
 
@@ -200,6 +224,7 @@ def test_sandbox_config_defaults_support_dependency_installation() -> None:
     assert config.docker_image == "python:3.12"
     assert config.docker_timeout_seconds == 120
     assert config.docker_network_enabled is True
+    assert config.docker_idle_timeout_seconds == 600
     assert config.allow_host_docker_install is True
 
 
@@ -281,6 +306,7 @@ def test_harness_builder_passes_sandbox_config_to_tool_registry(
 def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
     """Docker 容器懒加载；uploads/skills 只读，当前 thread artifacts/work 可写回本地。"""
 
+    FakeTimer.instances = []
     calls: list[list[str]] = []
 
     def fake_runner(args, **kwargs):
@@ -295,10 +321,15 @@ def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
     sandbox = LazyDockerSandbox(
-        config=SlotFlowSandboxConfig(workspace_root=root, docker_image="python:test"),
+        config=SlotFlowSandboxConfig(
+            workspace_root=root,
+            docker_image="python:test",
+            docker_idle_timeout_seconds=42,
+        ),
         thread_id="thread-1",
         skills_root=skills_root,
         runner=fake_runner,
+        timer_factory=FakeTimer,
     )
 
     assert sandbox.started is False
@@ -310,6 +341,9 @@ def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
     assert sandbox.started is True
     assert calls[0][:2] == ["docker", "run"]
     assert calls[1][:2] == ["docker", "exec"]
+    assert result["idle_timeout_seconds"] == 42
+    assert FakeTimer.instances[-1].interval == 42
+    assert FakeTimer.instances[-1].started is True
     run_command = calls[0]
     assert "--init" in run_command
     assert "--network" in run_command
@@ -328,6 +362,46 @@ def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
     assert any("/workspace/work" in mount and "readonly" not in mount for mount in mounts)
     assert (root / "artifacts" / "thread-1").is_dir()
     assert (root / ".sandbox" / "thread-1").is_dir()
+
+
+def test_lazy_docker_sandbox_closes_after_idle_timeout(tmp_path: Path) -> None:
+    FakeTimer.instances = []
+    calls: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "run"]:
+            container_number = sum(1 for call in calls if call[:2] == ["docker", "run"])
+            return subprocess.CompletedProcess(args, 0, stdout=f"container{container_number}\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+        if args[:3] == ["docker", "rm", "-f"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            docker_idle_timeout_seconds=7,
+        ),
+        thread_id="thread-1",
+        runner=fake_runner,
+        timer_factory=FakeTimer,
+    )
+
+    assert sandbox.exec("python -V")["ok"] is True
+    first_timer = FakeTimer.instances[-1]
+    assert sandbox.started is True
+
+    first_timer.fire()
+
+    assert sandbox.started is False
+    assert ["docker", "rm", "-f", "container1"] in calls
+
+    assert sandbox.exec("python -V")["ok"] is True
+
+    run_calls = [call for call in calls if call[:2] == ["docker", "run"]]
+    assert len(run_calls) == 2
 
 
 def test_sandbox_exec_tool_is_disabled_by_config(tmp_path: Path) -> None:

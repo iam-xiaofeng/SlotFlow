@@ -1641,3 +1641,37 @@ revision；`ComposerTodoPanel` 依赖 revision 触发展开/更新提示时，�
 - `tests/test_harness_steps.py::test_skills_preflight_stores_result_without_mutating_user_message` 覆盖 preflight 只写 `state.slotflow.skills_preflight`，不返回 `messages`，原 HumanMessage 保持纯用户文本。
 - `tests/test_harness_steps.py::test_skills_preflight_format_is_internal_system_context` 覆盖 preflight system block 的 internal context 标记与 installed skill 元数据仍可被模型读取。
 - 删除旧的 sanitizer 测试，避免把错误的表象修法固化成 contract。
+
+
+---
+
+## 30. 迭代 22（2026-07-02）：Docker 沙箱 idle 生命周期
+
+### 30.0 症状
+
+用户指出沙箱不应该每次都像重新下载/长期占用资源：理想行为是项目级镜像下载一次，后续只是在需要时打开容器，不操作一段时间就自动关闭，避免浏览器/服务异常退出后容器一直跑。
+
+### 30.1 根因
+
+Docker 镜像本身已经由 Docker daemon 按 image tag/layer 全局缓存；`docker run python:3.12 ...` 只有本机没有该镜像时才会拉取，后续同项目/同宿主机不会重复下载同一镜像。真正的问题在 SlotFlow 容器生命周期：`LazyDockerSandbox` 只在第一次 `sandbox_exec` 懒启动容器，之后只通过 `atexit` 在后端进程退出时清理。由于 runtime 每轮会创建 graph/tool closure，异常中断或长时间无新命令时，容器可能一直存在到进程退出。
+
+### 30.2 修法
+
+1. `SlotFlowSandboxConfig` 新增 `docker_idle_timeout_seconds`，默认 600 秒，环境变量 `SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS`。
+2. `LazyDockerSandbox.exec` 在每次命令开始前取消旧 idle timer，命令结束后重新安排 idle close。这样连续命令不会被中途关闭；最后一次命令后开始计时。
+3. `LazyDockerSandbox.close` 线程安全化：取消 idle timer、清空 container id，然后执行 `docker rm -f <container>`。
+4. `sandbox_exec` 返回 payload 增加 `idle_timeout_seconds`，方便前端/日志知道当前回收窗口。
+
+### 30.3 不变量
+
+- 镜像下载交给 Docker daemon 缓存，不在 SlotFlow 自己实现“下载缓存”。不要在每次 `sandbox_exec` 前显式 `docker pull`。
+- 容器仍然懒创建；注册工具、构造 graph、创建 `LazyDockerSandbox` 都不能触碰 Docker。
+- 容器仍按当前 thread 挂载 `/workspace/artifacts` 和 `/workspace/work`，避免跨会话写错产物目录。项目级复用的是 Docker image cache，不是把所有 thread 强行塞进同一个容器挂载。
+- idle close 是资源保护边界；手动 `close()`、后端退出 `atexit` 和 idle timer 都必须安全地重复调用。
+
+### 30.4 验证
+
+- `tests/test_harness_sandbox.py::test_runtime_loads_sandbox_config_from_env` 覆盖 idle timeout env 解析。
+- `tests/test_harness_sandbox.py::test_sandbox_config_defaults_support_dependency_installation` 覆盖默认 idle timeout 为 600 秒。
+- `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_starts_only_on_first_exec` 覆盖执行后返回 idle timeout 并安排 timer。
+- `tests/test_harness_sandbox.py::test_lazy_docker_sandbox_closes_after_idle_timeout` 覆盖 idle timer 触发后 `docker rm -f`，下一次执行重新 `docker run` 打开容器。

@@ -14,6 +14,7 @@ DEFAULT_NETWORK_TIMEOUT_SECONDS = 15
 DEFAULT_DOCKER_IMAGE = "python:3.12"
 DEFAULT_DOCKER_TIMEOUT_SECONDS = 120
 DEFAULT_DOCKER_NETWORK_ENABLED = True
+DEFAULT_DOCKER_IDLE_TIMEOUT_SECONDS = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class SlotFlowSandboxConfig:
     docker_image: str = DEFAULT_DOCKER_IMAGE
     docker_timeout_seconds: int = DEFAULT_DOCKER_TIMEOUT_SECONDS
     docker_network_enabled: bool = DEFAULT_DOCKER_NETWORK_ENABLED
+    docker_idle_timeout_seconds: int = DEFAULT_DOCKER_IDLE_TIMEOUT_SECONDS
     allow_host_docker_install: bool = True
 
     def resolved_workspace_root(self) -> Path:

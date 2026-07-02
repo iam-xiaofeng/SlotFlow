@@ -311,6 +311,10 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
             "SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED",
             default=SlotFlowSandboxConfig().docker_network_enabled,
         ),
+        docker_idle_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS",
+            default=SlotFlowSandboxConfig().docker_idle_timeout_seconds,
+        ),
         allow_host_docker_install=load_bool_from_env(
             "SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL",
             default=SlotFlowSandboxConfig().allow_host_docker_install,
