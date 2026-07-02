@@ -443,10 +443,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             if (reasoningContent) {
               replaceAssistantContent(assistantMessageId, "reasoning", reasoningContent);
             }
-            const nextTodos = latestTodos(streamEvent);
-            if (nextTodos) {
-              replaceTodos(nextTodos);
-            }
             const nextArtifacts = latestDiscoveredArtifacts(streamEvent);
             if (nextArtifacts.length > 0) {
               discoveredArtifacts = mergeWorkspaceEntries(

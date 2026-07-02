@@ -133,27 +133,7 @@ export function parseTodos(value: unknown): ChatTodo[] {
   if (!Array.isArray(value)) {
     return [];
   }
-
-  return value.flatMap((item) => {
-    if (
-      typeof item === "object" &&
-      item !== null &&
-      "content" in item &&
-      "status" in item &&
-      typeof item.content === "string"
-    ) {
-      const status = parseTodoStatus(item.status);
-      return [{ content: item.content, status }];
-    }
-    return [];
-  });
-}
-
-function parseTodoStatus(value: unknown): ChatTodoStatus {
-  if (value === "completed" || value === "in_progress" || value === "pending") {
-    return value;
-  }
-  return "pending";
+  return value as ChatTodo[];
 }
 
 export function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord[] {
