@@ -73,6 +73,27 @@ export function mergeReasoningContent(
   return incoming.length > currentText.length ? incoming : currentText;
 }
 
+export function mergeAssistantContent(current: string, incoming: string): string {
+  const currentText = current ?? "";
+  if (!currentText.trim()) {
+    return incoming;
+  }
+  if (!incoming.trim()) {
+    return currentText;
+  }
+  if (incoming.startsWith(currentText)) {
+    return incoming;
+  }
+  if (currentText.startsWith(incoming)) {
+    return currentText;
+  }
+
+  // Values snapshots can lag behind the live message.delta stream or retain only the
+  // final compact assistant message. Never let a shorter unrelated snapshot erase text
+  // the user already watched stream in.
+  return incoming.length > currentText.length ? incoming : currentText;
+}
+
 export function latestAssistantContent(event: ChatStreamEvent): string | null {
   const messages = event.data.messages;
   if (!Array.isArray(messages)) {
@@ -133,7 +154,25 @@ export function parseTodos(value: unknown): ChatTodo[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value as ChatTodo[];
+  const todos: ChatTodo[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const content = typeof record.content === "string" ? record.content : record.text;
+    if (typeof content !== "string" || !content.trim()) {
+      continue;
+    }
+    const status =
+      record.status === "in_progress" ||
+      record.status === "completed" ||
+      record.status === "pending"
+        ? record.status
+        : "pending";
+    todos.push({ content, status });
+  }
+  return todos;
 }
 
 export function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord[] {

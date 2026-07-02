@@ -21,6 +21,7 @@ import {
   latestDiscoveredArtifacts,
   latestTodos,
   makeId,
+  mergeAssistantContent,
   mergeReasoningContent,
   mergeWorkspaceEntries,
   messageRecordToUiMessage,
@@ -85,6 +86,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const abortControllerRef = useRef<AbortController | null>(null);
   const isStreamingRef = useRef(false);
   const hasTodoListForCurrentRunRef = useRef(false);
+  const todoSignatureRef = useRef("[]");
   const pendingAssistantDeltasRef = useRef(new Map<string, PendingAssistantDeltas>());
   const pendingFlushTimerRef = useRef<number | null>(null);
 
@@ -114,11 +116,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     if (nextTodos.length === 0 && !hasTodoListForCurrentRunRef.current) {
       return;
     }
-    setTodos(nextTodos);
-    if (nextTodos.length > 0 && !hasTodoListForCurrentRunRef.current) {
-      hasTodoListForCurrentRunRef.current = true;
-      setTodoRevision((current) => current + 1);
+    const nextSignature = JSON.stringify(nextTodos);
+    if (nextSignature === todoSignatureRef.current) {
+      return;
     }
+    todoSignatureRef.current = nextSignature;
+    if (nextTodos.length > 0) {
+      hasTodoListForCurrentRunRef.current = true;
+    }
+    setTodos(nextTodos);
+    setTodoRevision((current) => current + 1);
   }, []);
 
   const updateAssistantMessage = useCallback((
@@ -217,7 +224,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       return {
         ...message,
         compressionStarted: false,
-        content,
+        content: mergeAssistantContent(message.content, content),
       };
     });
   }, [updateAssistantMessage]);
@@ -243,6 +250,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         setTodos([]);
         setTodoRevision(0);
         hasTodoListForCurrentRunRef.current = false;
+        todoSignatureRef.current = "[]";
         setEvents([]);
         return nextThread;
       } catch (caught) {
@@ -264,6 +272,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     setTodos([]);
     setTodoRevision(0);
     hasTodoListForCurrentRunRef.current = false;
+    todoSignatureRef.current = "[]";
     setEvents([]);
     setError(null);
     return true;
@@ -286,6 +295,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       setTodos([]);
       setTodoRevision(0);
       hasTodoListForCurrentRunRef.current = false;
+      todoSignatureRef.current = "[]";
       setEvents([]);
       return true;
     } catch (caught) {
@@ -332,6 +342,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       abortControllerRef.current = controller;
       isStreamingRef.current = true;
       hasTodoListForCurrentRunRef.current = false;
+      todoSignatureRef.current = "[]";
+      setTodos([]);
+      setTodoRevision(0);
       setIsStreaming(true);
       setError(null);
 
@@ -435,6 +448,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
           if (streamEvent.event === "state.snapshot") {
             flushPendingAssistantDeltas();
+            const snapshotTodos = latestTodos(streamEvent);
+            if (snapshotTodos !== null) {
+              replaceTodos(snapshotTodos);
+            }
             const content = latestAssistantContent(streamEvent);
             if (content) {
               replaceAssistantContent(assistantMessageId, "content", content);

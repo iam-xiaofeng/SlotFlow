@@ -26,6 +26,7 @@ import {
   type MemoryKind,
   type MemoryRecord,
   type SkillRecord,
+  type SkillInstallRequest,
   type ThreadRecord,
   type UploadedFileRecord,
   type WorkspaceEntryRecord,
@@ -519,16 +520,16 @@ export function ChatApp() {
     }
   }
 
-  async function handleInstallSkillFromRegistry() {
-    const packageUrl = window.prompt(
-      "Skill package URL",
-      "https://github.com/vercel-labs/skills",
-    );
+  async function handleInstallSkillFromRegistry(request?: SkillInstallRequest) {
+    const packageUrl =
+      request?.package_url ??
+      window.prompt("Skill package URL", "https://github.com/vercel-labs/skills");
     if (!packageUrl?.trim()) {
       return;
     }
 
-    const skillName = window.prompt("Skill name", "find-skills");
+    const skillName =
+      request?.skill_name ?? window.prompt("Skill name", "find-skills");
     if (!skillName?.trim()) {
       return;
     }
@@ -868,13 +869,14 @@ export function ChatApp() {
       return;
     }
     removeMessage(messageId);
-    await submitMessage(`我选择 ${option.id}：${option.label}`, {
+    await submitMessage(option.label, {
       files: [],
       metadata: {
         source: "clarification-choice",
         clarification_id: clarification.id,
         clarification_question: clarification.question,
         option_id: option.id,
+        option_label: option.label,
       },
     });
   }
@@ -907,7 +909,6 @@ export function ChatApp() {
       selectedMode={selectedMode}
       selectedModelName={selectedModelName}
       selectedThinkingEnabled={selectedThinkingEnabled}
-      showPromptChips={messages.length === 0}
       isLoadingModels={isLoadingModels}
       onAttachFiles={() => fileInputRef.current?.click()}
       onCancel={cancelStream}
@@ -959,7 +960,7 @@ export function ChatApp() {
           onDeleteArtifact={(artifact) => void handleDeleteArtifact(artifact)}
           onDeleteThread={(targetThread) => void handleDeleteThread(targetThread)}
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
-          onInstallSkill={() => void handleInstallSkillFromRegistry()}
+          onInstallSkill={handleInstallSkillFromRegistry}
           onNewThread={handleNewThread}
           onOpenArtifacts={handleOpenArtifactPanel}
           onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}

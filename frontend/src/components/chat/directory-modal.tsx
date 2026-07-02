@@ -7,6 +7,9 @@ import {
   Brain,
   Check,
   ChevronDown,
+  Download,
+  ExternalLink,
+  LoaderCircle,
   Pencil,
   Pin,
   PinOff,
@@ -19,11 +22,11 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import type {
   McpServerRecord,
   MemoryKind,
   MemoryRecord,
+  SkillInstallRequest,
   SkillRecord,
 } from "@/lib/chat-stream";
 import { cn } from "@/lib/utils";
@@ -50,6 +53,32 @@ const SEARCH_PLACEHOLDER: Record<DirectoryTab, string> = {
   memory: "搜索记忆…",
 };
 
+type RecommendedSkill = SkillInstallRequest & {
+  label: string;
+  description: string;
+};
+
+const RECOMMENDED_SKILLS: RecommendedSkill[] = [
+  {
+    label: "agency-agents",
+    description: "Agency-style agent workflows and helper skills.",
+    package_url: "https://github.com/msitarzewski/agency-agents",
+    skill_name: "agency-agents",
+  },
+  {
+    label: "Agent-Reach",
+    description: "Agent reach / outreach workflow skills.",
+    package_url: "https://github.com/Panniantong/Agent-Reach",
+    skill_name: "Agent-Reach",
+  },
+  {
+    label: "nature-skills",
+    description: "Nature and science-oriented skill collection.",
+    package_url: "https://github.com/Yuan1z0825/nature-skills",
+    skill_name: "nature-skills",
+  },
+];
+
 type DirectoryModalProps = {
   open: boolean;
   tab: DirectoryTab;
@@ -58,7 +87,7 @@ type DirectoryModalProps = {
   skills: SkillRecord[];
   mcpServers: McpServerRecord[];
   memories: MemoryRecord[];
-  onInstallSkill: () => void;
+  onInstallSkill: (request?: SkillInstallRequest) => Promise<void> | void;
   onUploadSkill: () => void;
   onToggleSkill: (skill: SkillRecord, enabled: boolean) => void;
   onPinSkill: (skill: SkillRecord, pinned: boolean) => void;
@@ -109,7 +138,7 @@ export function DirectoryModal(props: DirectoryModalProps) {
             })}
           </nav>
 
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <div className="flex h-16 shrink-0 items-center gap-3 border-b px-5 max-sm:h-auto max-sm:flex-wrap max-sm:py-4">
               <Dialog.Title className="hidden w-full text-lg font-semibold max-sm:block">
                 目录
@@ -143,7 +172,12 @@ export function DirectoryModal(props: DirectoryModalProps) {
               </div>
               {tab === "skills" ? (
                 <div className="flex shrink-0 items-center gap-2">
-                  <Button type="button" size="sm" variant="outline" onClick={props.onInstallSkill}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void props.onInstallSkill()}
+                  >
                     <Plus className="size-4" />
                     安装
                   </Button>
@@ -166,7 +200,7 @@ export function DirectoryModal(props: DirectoryModalProps) {
               </Dialog.Close>
             </div>
 
-            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
               <div className="p-5">
                 {tab === "skills" ? (
                   <SkillsGrid query={query} {...props} />
@@ -176,7 +210,7 @@ export function DirectoryModal(props: DirectoryModalProps) {
                   <MemoryGrid query={query} {...props} />
                 )}
               </div>
-            </ScrollArea>
+            </div>
           </div>
         </Dialog.Popup>
       </Dialog.Portal>
@@ -243,15 +277,32 @@ type SkillGroup = {
 function SkillsGrid({
   query,
   skills,
+  onInstallSkill,
   onToggleSkill,
   onPinSkill,
   onDeleteSkill,
 }: { query: string } & DirectoryModalProps) {
+  const [installingSkillName, setInstallingSkillName] = useState<string | null>(null);
   const q = query.trim().toLowerCase();
   const matches = (skill: SkillRecord) =>
     !q ||
     skill.name.toLowerCase().includes(q) ||
     (skill.description ?? "").toLowerCase().includes(q);
+  const installedNames = useMemo(
+    () => new Set(skills.map((skill) => skill.name.toLowerCase())),
+    [skills],
+  );
+  const recommendedSkills = useMemo(
+    () =>
+      RECOMMENDED_SKILLS.filter(
+        (skill) =>
+          !q ||
+          skill.label.toLowerCase().includes(q) ||
+          skill.description.toLowerCase().includes(q) ||
+          skill.package_url.toLowerCase().includes(q),
+      ),
+    [q],
+  );
 
   // Group by parent: skills with parent===null (or whose parent isn't in the list) are
   // roots; the rest nest under their parent. A multi-skill package like nature-skills
@@ -299,23 +350,132 @@ function SkillsGrid({
       .filter((group): group is SkillGroup => group !== null);
   }, [groups, q]);
 
-  if (visible.length === 0) {
-    return <EmptyState text={q ? "没有匹配的 Skill" : "暂无 Skill，点右上角「安装」或「上传」"} />;
+  async function installRecommendedSkill(skill: RecommendedSkill) {
+    setInstallingSkillName(skill.skill_name);
+    try {
+      await onInstallSkill({
+        package_url: skill.package_url,
+        skill_name: skill.skill_name,
+      });
+    } finally {
+      setInstallingSkillName(null);
+    }
   }
 
   return (
-    <CardGrid>
-      {visible.map((group) => (
-        <SkillGroupCard
-          key={group.root.name}
-          group={group}
-          query={q}
-          onToggleSkill={onToggleSkill}
-          onPinSkill={onPinSkill}
-          onDeleteSkill={onDeleteSkill}
-        />
-      ))}
-    </CardGrid>
+    <div className="flex flex-col gap-5">
+      <RecommendedSkillsSection
+        skills={recommendedSkills}
+        installedNames={installedNames}
+        installingSkillName={installingSkillName}
+        onInstallSkill={(skill) => void installRecommendedSkill(skill)}
+      />
+      {visible.length > 0 ? (
+        <section className="flex flex-col gap-3">
+          <SectionHeading title="已安装 Skills" description="当前可用的本地 Skills。" />
+          <CardGrid>
+            {visible.map((group) => (
+              <SkillGroupCard
+                key={group.root.name}
+                group={group}
+                query={q}
+                onToggleSkill={onToggleSkill}
+                onPinSkill={onPinSkill}
+                onDeleteSkill={onDeleteSkill}
+              />
+            ))}
+          </CardGrid>
+        </section>
+      ) : (
+        <EmptyState text={q ? "没有匹配的已安装 Skill" : "暂无已安装 Skill，点推荐卡片下载或右上角安装/上传"} />
+      )}
+    </div>
+  );
+}
+
+function RecommendedSkillsSection({
+  skills,
+  installedNames,
+  installingSkillName,
+  onInstallSkill,
+}: {
+  skills: RecommendedSkill[];
+  installedNames: Set<string>;
+  installingSkillName: string | null;
+  onInstallSkill: (skill: RecommendedSkill) => void;
+}) {
+  if (skills.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionHeading
+        title="推荐 Skills"
+        description="精选仓库，点击下载后直接安装到本地 Skills。"
+      />
+      <CardGrid>
+        {skills.map((skill) => {
+          const installed = installedNames.has(skill.skill_name.toLowerCase());
+          const installing = installingSkillName === skill.skill_name;
+          return (
+            <div
+              key={skill.package_url}
+              className="flex min-h-32 flex-col gap-3 rounded-lg border border-primary/20 bg-primary/5 p-4"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Download className="size-4 shrink-0 text-primary" />
+                  <span className="truncate font-medium">{skill.label}</span>
+                </div>
+                <CardChip>{installed ? "已安装" : "推荐"}</CardChip>
+              </div>
+              <p className="line-clamp-2 min-h-[2.5rem] text-sm text-muted-foreground">
+                {skill.description}
+              </p>
+              <div className="mt-auto flex items-center justify-between gap-2">
+                <a
+                  href={skill.package_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <ExternalLink className="size-3.5 shrink-0" />
+                  <span className="truncate">{skill.package_url.replace("https://github.com/", "")}</span>
+                </a>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={installed || installing}
+                  onClick={() => onInstallSkill(skill)}
+                  className="shrink-0"
+                >
+                  {installing ? (
+                    <LoaderCircle className="mr-1.5 size-3.5 animate-spin" />
+                  ) : null}
+                  {installed ? "已安装" : installing ? "下载中" : "下载"}
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </CardGrid>
+    </section>
+  );
+}
+
+function SectionHeading({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+      <p className="text-xs text-muted-foreground">{description}</p>
+    </div>
   );
 }
 
@@ -403,7 +563,7 @@ function SkillGroupCard({
         </div>
       </div>
       {hasChildren && expanded ? (
-        <ul className="mt-1 flex flex-col gap-1 border-t pt-2">
+        <ul className="mt-1 flex max-h-60 flex-col gap-1 overflow-y-auto overscroll-contain border-t pt-2 [scrollbar-gutter:stable]">
           {group.children.map((child) => (
             <li
               key={child.name}

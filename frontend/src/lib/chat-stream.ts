@@ -130,6 +130,11 @@ export type SkillRecord = {
   parent?: string | null;
 };
 
+export type SkillInstallRequest = {
+  package_url: string;
+  skill_name: string;
+};
+
 export type McpServerRecord = {
   name: string;
   enabled: boolean;
@@ -413,10 +418,7 @@ export async function uploadSkillFolder(
 }
 
 export async function installSkill(
-  body: {
-    package_url: string;
-    skill_name: string;
-  },
+  body: SkillInstallRequest,
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord> {
   const response = await fetch("/api/skills/install", {

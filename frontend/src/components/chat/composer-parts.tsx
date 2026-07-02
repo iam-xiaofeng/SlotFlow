@@ -9,26 +9,17 @@ import {
   useState,
 } from "react";
 import {
-  type LucideIcon,
   ArrowUp,
-  Brain,
   Check,
   CheckCircle2,
   ChevronRight,
   ChevronDown,
   Circle,
   FileText,
-  Folder,
-  Globe2,
-  ImageIcon,
   ListTodo,
   LoaderCircle,
-  Mic,
-  MoreHorizontal,
-  Paperclip,
   Plus,
   Square,
-  Telescope,
   X,
 } from "lucide-react";
 
@@ -93,12 +84,11 @@ export function ComposerTodoPanel({
   todoRevision: number;
   isStreaming: boolean;
 }) {
-  // Auto-expand while streaming so the live plan is visible without a click; collapse on
-  // completion. A new todo list (revision bump) also forces expansion. Previously the panel
-  // stayed collapsed by default, so users saw "todo not showing" even though it was there.
-  const [isCollapsed, setIsCollapsed] = useState(true);
+  // Auto-expand whenever a todo list exists and keep it visible after completion. The
+  // panel is the primary visual surface for write_todos; collapsing it at run end makes
+  // users think the tool never updated the UI.
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const previousTodoRevisionRef = useRef(todoRevision);
-  const previousStreamingRef = useRef(isStreaming);
 
   useEffect(() => {
     if (previousTodoRevisionRef.current !== todoRevision && todos.length > 0) {
@@ -108,13 +98,9 @@ export function ComposerTodoPanel({
   }, [todoRevision, todos.length]);
 
   useEffect(() => {
-    // While streaming with an active plan, keep it open; once the run ends, collapse.
     if (isStreaming && todos.length > 0) {
       setIsCollapsed(false);
-    } else if (previousStreamingRef.current && !isStreaming && todos.length > 0) {
-      setIsCollapsed(true);
     }
-    previousStreamingRef.current = isStreaming;
   }, [isStreaming, todos.length]);
 
   if (todos.length === 0) {
@@ -386,24 +372,6 @@ export function defaultAttachmentMessage(files: UploadedFileRecord[]) {
   return "请查看这些附件。";
 }
 
-export function ComposerPromptChip({
-  icon: Icon,
-  label,
-}: {
-  icon: LucideIcon;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      className="inline-flex h-10 items-center gap-2 rounded-xl border border-border/80 bg-background px-3 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted/60"
-    >
-      <Icon className="size-4 text-muted-foreground" />
-      {label}
-    </button>
-  );
-}
-
 type ComposerToolsProps = {
   disabled: boolean;
   isUploading: boolean;
@@ -417,72 +385,22 @@ export function ComposerTools({
 }: ComposerToolsProps) {
   return (
     <div className="flex items-center gap-1">
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={disabled}
-              className="size-10 rounded-full text-foreground hover:bg-muted"
-            />
-          }
-        >
-          {isUploading ? (
-            <LoaderCircle className="size-5 animate-spin" />
-          ) : (
-            <Plus className="size-5" />
-          )}
-          <span className="sr-only">打开添加菜单</span>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          side="top"
-          align="start"
-          sideOffset={10}
-          className="w-72 rounded-2xl p-2"
-        >
-          <DropdownMenuItem onClick={onAttachFiles} className="gap-3 px-3 py-2.5">
-            <Paperclip className="size-5" />
-            添加照片和文件
-          </DropdownMenuItem>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger className="gap-3 px-3 py-2.5">
-              <FileText className="size-5" />
-              近期文件
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent className="w-48">
-              <DropdownMenuItem disabled>暂无近期文件</DropdownMenuItem>
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem disabled className="gap-3 px-3 py-2.5">
-            <ImageIcon className="size-5" />
-            创建图片
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled className="gap-3 px-3 py-2.5">
-            <Brain className="size-5" />
-            思考一下
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled className="gap-3 px-3 py-2.5">
-            <Telescope className="size-5" />
-            深度研究
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled className="gap-3 px-3 py-2.5">
-            <Globe2 className="size-5" />
-            网页搜索
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem disabled className="gap-3 px-3 py-2.5">
-            <MoreHorizontal className="size-5" />
-            更多
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled className="gap-3 px-3 py-2.5">
-            <Folder className="size-5" />
-            项目
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        title="添加照片和文件"
+        disabled={disabled}
+        onClick={onAttachFiles}
+        className="size-10 rounded-full text-foreground hover:bg-muted"
+      >
+        {isUploading ? (
+          <LoaderCircle className="size-5 animate-spin" />
+        ) : (
+          <Plus className="size-5" />
+        )}
+        <span className="sr-only">添加照片和文件</span>
+      </Button>
     </div>
   );
 }
@@ -531,16 +449,6 @@ export function ComposerActions({
         onThinkingEnabledChange={onThinkingEnabledChange}
         onChange={onModelChange}
       />
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        title="语音输入"
-        className="size-9 rounded-full text-foreground hover:bg-muted"
-      >
-        <Mic className="size-5" />
-        <span className="sr-only">语音输入</span>
-      </Button>
 
       {isStreaming ? (
         <>

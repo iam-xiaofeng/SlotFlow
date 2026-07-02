@@ -51,6 +51,8 @@ export function MessageList({
   const userMessageSignatureRef = useRef("");
   const navigatorCloseTimerRef = useRef<number | null>(null);
   const firstTokenScrolledMessageIdsRef = useRef(new Set<string>());
+  const autoFollowLatestAssistantRef = useRef(true);
+  const userScrollIntentRef = useRef(false);
   const [activeUserIndex, setActiveUserIndex] = useState(0);
   const [isNavigatorOpen, setIsNavigatorOpen] = useState(false);
   const [editingUserMessageId, setEditingUserMessageId] = useState<string | null>(null);
@@ -87,6 +89,15 @@ export function MessageList({
     assistantMessageHasOutput(latestAssistantMessage)
       ? latestAssistantMessage.id
       : null;
+  const latestAssistantStreamingOutputKey =
+    latestAssistantMessage?.status === "streaming" &&
+    assistantMessageHasOutput(latestAssistantMessage)
+      ? [
+          latestAssistantMessage.id,
+          latestAssistantMessage.content.length,
+          latestAssistantMessage.reasoningContent?.length ?? 0,
+        ].join(":")
+      : null;
 
   const getViewport = useCallback(
     () =>
@@ -95,6 +106,29 @@ export function MessageList({
       ) ?? null,
     [],
   );
+
+  const scrollViewportToBottom = useCallback(
+    (behavior: ScrollBehavior) => {
+      const viewport = getViewport();
+      if (!viewport) {
+        return null;
+      }
+
+      return window.requestAnimationFrame(() => {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+      });
+    },
+    [getViewport],
+  );
+
+  const isViewportNearBottom = useCallback((viewport: HTMLElement) => {
+    const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    return maxScrollTop - viewport.scrollTop <= 24;
+  }, []);
+
+  const markUserScrollIntent = useCallback(() => {
+    userScrollIntentRef.current = true;
+  }, []);
 
   const updateActiveUserMessage = useCallback(() => {
     const viewport = getViewport();
@@ -138,10 +172,32 @@ export function MessageList({
       return;
     }
 
+    const handleScroll = () => {
+      updateActiveUserMessage();
+      if (isViewportNearBottom(viewport)) {
+        autoFollowLatestAssistantRef.current = true;
+        userScrollIntentRef.current = false;
+        return;
+      }
+      if (userScrollIntentRef.current) {
+        autoFollowLatestAssistantRef.current = false;
+      }
+    };
+
     updateActiveUserMessage();
-    viewport.addEventListener("scroll", updateActiveUserMessage, { passive: true });
-    return () => viewport.removeEventListener("scroll", updateActiveUserMessage);
-  }, [getViewport, updateActiveUserMessage]);
+    viewport.addEventListener("scroll", handleScroll, { passive: true });
+    viewport.addEventListener("wheel", markUserScrollIntent, { passive: true });
+    viewport.addEventListener("touchmove", markUserScrollIntent, { passive: true });
+    viewport.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
+    viewport.addEventListener("keydown", markUserScrollIntent);
+    return () => {
+      viewport.removeEventListener("scroll", handleScroll);
+      viewport.removeEventListener("wheel", markUserScrollIntent);
+      viewport.removeEventListener("touchmove", markUserScrollIntent);
+      viewport.removeEventListener("pointerdown", markUserScrollIntent);
+      viewport.removeEventListener("keydown", markUserScrollIntent);
+    };
+  }, [getViewport, isViewportNearBottom, markUserScrollIntent, updateActiveUserMessage]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(updateActiveUserMessage);
@@ -154,17 +210,29 @@ export function MessageList({
       return;
     }
 
-    const viewport = getViewport();
-    if (!viewport) {
+    const frame = scrollViewportToBottom("smooth");
+    if (frame === null) {
       return;
     }
 
+    autoFollowLatestAssistantRef.current = true;
+    userScrollIntentRef.current = false;
     firstTokenScrolledMessageIdsRef.current.add(messageId);
-    const frame = window.requestAnimationFrame(() => {
-      viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
-    });
     return () => window.cancelAnimationFrame(frame);
-  }, [getViewport, latestAssistantFirstTokenScrollKey]);
+  }, [latestAssistantFirstTokenScrollKey, scrollViewportToBottom]);
+
+  useEffect(() => {
+    if (!latestAssistantStreamingOutputKey || !autoFollowLatestAssistantRef.current) {
+      return;
+    }
+
+    const frame = scrollViewportToBottom("auto");
+    if (frame === null) {
+      return;
+    }
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [latestAssistantStreamingOutputKey, scrollViewportToBottom]);
 
   useEffect(() => {
     return () => {
@@ -264,4 +332,3 @@ export function EmptyState() {
     </div>
   );
 }
-

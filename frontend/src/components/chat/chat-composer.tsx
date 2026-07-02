@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { GraduationCap, Pencil, Telescope } from "lucide-react";
 
 import {
   type ChatMode,
@@ -22,7 +21,6 @@ import {
   ComposerActions,
   ComposerAttachments,
   ComposerError,
-  ComposerPromptChip,
   ComposerQueue,
   ComposerTextarea,
   ComposerTodoPanel,
@@ -46,7 +44,6 @@ type ChatComposerProps = {
   selectedMode: ChatMode;
   selectedModelName: string;
   selectedThinkingEnabled: boolean;
-  showPromptChips: boolean;
   onAttachFiles: () => void;
   onCancel: () => void;
   onClearError: () => void;
@@ -77,7 +74,6 @@ export function ChatComposer({
   selectedMode,
   selectedModelName,
   selectedThinkingEnabled,
-  showPromptChips,
   onAttachFiles,
   onCancel,
   onClearError,
@@ -216,15 +212,7 @@ export function ChatComposer({
             />
           </div>
         </div>
-        {showPromptChips ? (
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 group-data-[collapsible=icon]:hidden">
-            <ComposerPromptChip icon={Pencil} label="Write" />
-            <ComposerPromptChip icon={GraduationCap} label="Learn" />
-            <ComposerPromptChip icon={Telescope} label="Research" />
-          </div>
-        ) : null}
       </div>
     </form>
   );
 }
-

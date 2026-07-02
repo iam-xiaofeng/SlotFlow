@@ -46,6 +46,7 @@ import {
   type McpServerRecord,
   type MemoryKind,
   type MemoryRecord,
+  type SkillInstallRequest,
   type SkillRecord,
   type ThreadRecord,
   type WorkspaceEntryRecord,
@@ -76,7 +77,7 @@ type ThreadSidebarProps = {
   onDeleteArtifact: (artifact: WorkspaceEntryRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
-  onInstallSkill: () => void;
+  onInstallSkill: (request?: SkillInstallRequest) => Promise<void> | void;
   onNewThread: () => void;
   onOpenArtifacts: () => void;
   onPinMcpServer: (server: McpServerRecord, pinned: boolean) => void;
