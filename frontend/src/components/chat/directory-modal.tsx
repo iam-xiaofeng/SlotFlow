@@ -1,11 +1,12 @@
 "use client";
 
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import {
   Blocks,
   Brain,
   Check,
+  ChevronDown,
   Pencil,
   Pin,
   PinOff,
@@ -165,7 +166,7 @@ export function DirectoryModal(props: DirectoryModalProps) {
               </Dialog.Close>
             </div>
 
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
               <div className="p-5">
                 {tab === "skills" ? (
                   <SkillsGrid query={query} {...props} />
@@ -234,6 +235,11 @@ function CardChip({ children }: { children: ReactNode }) {
   );
 }
 
+type SkillGroup = {
+  root: SkillRecord;
+  children: SkillRecord[];
+};
+
 function SkillsGrid({
   query,
   skills,
@@ -241,72 +247,202 @@ function SkillsGrid({
   onPinSkill,
   onDeleteSkill,
 }: { query: string } & DirectoryModalProps) {
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const list = q
-      ? skills.filter(
-          (skill) =>
-            skill.name.toLowerCase().includes(q) ||
-            (skill.description ?? "").toLowerCase().includes(q),
-        )
-      : skills;
-    return [...list].sort((a, b) => Number(b.pinned) - Number(a.pinned));
-  }, [skills, query]);
+  const q = query.trim().toLowerCase();
+  const matches = (skill: SkillRecord) =>
+    !q ||
+    skill.name.toLowerCase().includes(q) ||
+    (skill.description ?? "").toLowerCase().includes(q);
 
-  if (filtered.length === 0) {
-    return <EmptyState text={query ? "没有匹配的 Skill" : "暂无 Skill，点右上角「安装」或「上传」"} />;
+  // Group by parent: skills with parent===null (or whose parent isn't in the list) are
+  // roots; the rest nest under their parent. A multi-skill package like nature-skills
+  // then shows as ONE root card with a collapsible list of its sub-skills instead of a
+  // flat wall of cards.
+  const groups = useMemo<SkillGroup[]>(() => {
+    const byName = new Map(skills.map((skill) => [skill.name, skill]));
+    const childrenByParent = new Map<string, SkillRecord[]>();
+    const roots: SkillRecord[] = [];
+    for (const skill of skills) {
+      const parentName = skill.parent ?? null;
+      if (parentName && byName.has(parentName)) {
+        const list = childrenByParent.get(parentName) ?? [];
+        list.push(skill);
+        childrenByParent.set(parentName, list);
+      } else {
+        roots.push(skill);
+      }
+    }
+    return roots
+      .map((root) => ({
+        root,
+        children: (childrenByParent.get(root.name) ?? []).slice().sort(sortSkillsPinnedFirst),
+      }))
+      .sort((a, b) => sortSkillsPinnedFirst(a.root, b.root));
+  }, [skills]);
+
+  // When searching, keep a root if it or any of its children matches; auto-expand those.
+  const visible = useMemo(() => {
+    if (!q) {
+      return groups;
+    }
+    return groups
+      .map((group) => {
+        const rootHit = matches(group.root);
+        const childHits = group.children.filter(matches);
+        if (!rootHit && childHits.length === 0) {
+          return null;
+        }
+        return {
+          root: group.root,
+          children: rootHit ? group.children : childHits,
+        };
+      })
+      .filter((group): group is SkillGroup => group !== null);
+  }, [groups, q]);
+
+  if (visible.length === 0) {
+    return <EmptyState text={q ? "没有匹配的 Skill" : "暂无 Skill，点右上角「安装」或「上传」"} />;
   }
 
   return (
     <CardGrid>
-      {filtered.map((skill) => (
-        <div
-          key={skill.name}
-          className="group flex min-h-32 flex-col gap-2 rounded-lg border bg-card p-4 transition-colors hover:border-foreground/20 hover:shadow-sm"
-        >
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <Blocks className="size-4 shrink-0 text-primary" />
-              <span className="truncate font-medium">{skill.name}</span>
-              {skill.pinned ? <Pin className="size-3.5 shrink-0 text-amber-500" /> : null}
-            </div>
-            <ToggleSwitch
-              enabled={skill.enabled}
-              onChange={(next) => onToggleSkill(skill, next)}
-            />
-          </div>
-          <p className="line-clamp-2 min-h-[2.5rem] text-sm text-muted-foreground">
-            {skill.description || "（无描述）"}
-          </p>
-          <div className="mt-auto flex items-center justify-between gap-2 pt-1">
-            <CardChip>{skill.source}</CardChip>
-            <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-              <Button
-                type="button"
-                size="icon-xs"
-                variant="ghost"
-                title={skill.pinned ? "取消置顶" : "置顶"}
-                onClick={() => onPinSkill(skill, !skill.pinned)}
-              >
-                {skill.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
-              </Button>
-              {!skill.protected ? (
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="ghost"
-                  title="删除"
-                  className="text-muted-foreground hover:text-destructive"
-                  onClick={() => onDeleteSkill(skill)}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
-              ) : null}
-            </div>
-          </div>
-        </div>
+      {visible.map((group) => (
+        <SkillGroupCard
+          key={group.root.name}
+          group={group}
+          query={q}
+          onToggleSkill={onToggleSkill}
+          onPinSkill={onPinSkill}
+          onDeleteSkill={onDeleteSkill}
+        />
       ))}
     </CardGrid>
+  );
+}
+
+function sortSkillsPinnedFirst(a: SkillRecord, b: SkillRecord) {
+  return Number(b.pinned) - Number(a.pinned);
+}
+
+function SkillGroupCard({
+  group,
+  query,
+  onToggleSkill,
+  onPinSkill,
+  onDeleteSkill,
+}: {
+  group: SkillGroup;
+  query: string;
+  onToggleSkill: DirectoryModalProps["onToggleSkill"];
+  onPinSkill: DirectoryModalProps["onPinSkill"];
+  onDeleteSkill: DirectoryModalProps["onDeleteSkill"];
+}) {
+  const hasChildren = group.children.length > 0;
+  // Auto-expand while searching (so matched sub-skills are visible) or on user toggle.
+  const [expanded, setExpanded] = useState(hasChildren && query.length > 0);
+  useEffect(() => {
+    if (query.length > 0 && hasChildren) {
+      setExpanded(true);
+    }
+  }, [query, hasChildren]);
+
+  return (
+    <div className="group flex min-h-32 flex-col gap-2 rounded-lg border bg-card p-4 transition-colors hover:border-foreground/20 hover:shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Blocks className="size-4 shrink-0 text-primary" />
+          <span className="truncate font-medium">{group.root.name}</span>
+          {group.root.pinned ? <Pin className="size-3.5 shrink-0 text-amber-500" /> : null}
+        </div>
+        <ToggleSwitch
+          enabled={group.root.enabled}
+          onChange={(next) => onToggleSkill(group.root, next)}
+        />
+      </div>
+      <p className="line-clamp-2 min-h-[2.5rem] text-sm text-muted-foreground">
+        {group.root.description || "（无描述）"}
+      </p>
+      <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <CardChip>{group.root.source}</CardChip>
+          {hasChildren ? (
+            <button
+              type="button"
+              onClick={() => setExpanded((current) => !current)}
+              className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              aria-expanded={expanded}
+            >
+              <span>{group.children.length} 个子 Skill</span>
+              <ChevronDown
+                className={cn("size-3.5 transition-transform", expanded && "rotate-180")}
+              />
+            </button>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            title={group.root.pinned ? "取消置顶" : "置顶"}
+            onClick={() => onPinSkill(group.root, !group.root.pinned)}
+          >
+            {group.root.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+          </Button>
+          {!group.root.protected ? (
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              title="删除"
+              className="text-muted-foreground hover:text-destructive"
+              onClick={() => onDeleteSkill(group.root)}
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          ) : null}
+        </div>
+      </div>
+      {hasChildren && expanded ? (
+        <ul className="mt-1 flex flex-col gap-1 border-t pt-2">
+          {group.children.map((child) => (
+            <li
+              key={child.name}
+              className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-muted/50"
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <Blocks className="size-3.5 shrink-0 text-muted-foreground" />
+                <div className="flex min-w-0 flex-col">
+                  <span className="truncate">{child.name}</span>
+                  {child.description ? (
+                    <span className="truncate text-xs text-muted-foreground">
+                      {child.description}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <ToggleSwitch
+                  enabled={child.enabled}
+                  onChange={(next) => onToggleSkill(child, next)}
+                />
+                {!child.protected ? (
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    title="删除"
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={() => onDeleteSkill(child)}
+                  >
+                    <Trash2 className="size-3" />
+                  </Button>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
