@@ -254,10 +254,22 @@ export function ChatApp() {
           refreshMcpServers(),
           refreshMemories(),
         ]);
+        // Only auto-open artifacts that belong to THIS thread and are genuinely new.
+        // `nextArtifacts` is the full recursive listing under artifacts/ (every thread +
+        // legacy), so naively taking newArtifacts[0] could pop up an older thread's file
+        // after answering an unrelated question (issue #8). Restrict to this thread's
+        // namespaced path + remembered paths, then to files not seen before this run.
+        const threadId = result.thread?.id ?? thread?.id;
+        const threadPrefix = threadId ? `artifacts/${threadId}/` : null;
+        const threadOwned = (artifact: WorkspaceEntryRecord) =>
+          threadPrefix !== null && artifact.path.startsWith(threadPrefix);
         const newArtifacts = mergeWorkspaceEntries(
-          discoveredArtifacts,
+          discoveredArtifacts.filter(threadOwned),
           nextArtifacts.filter(
-            (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
+            (artifact) =>
+              artifact.kind === "file" &&
+              threadOwned(artifact) &&
+              !previousArtifactPaths.has(artifact.path),
           ),
         );
         if (result.thread && newArtifacts.length > 0) {

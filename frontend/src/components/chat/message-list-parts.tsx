@@ -1,5 +1,6 @@
 import {
   type RefObject,
+  memo,
   useEffect,
   useRef,
   useState,
@@ -44,7 +45,7 @@ type AssistantContentParts = {
   body: string;
 };
 
-export function MessageBubble({
+function MessageBubbleImpl({
   message,
   isLatestUser,
   isLatestAssistant,
@@ -198,6 +199,20 @@ export function MessageBubble({
     </article>
   );
 }
+
+// Memoize so a streaming delta on the latest message does NOT re-render every older bubble
+// (each would otherwise re-run the heavy react-markdown pipeline). We compare only the
+// props that affect output; callback identities are ignored since their behavior is stable.
+export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
+  return (
+    prev.message === next.message &&
+    prev.isLatestUser === next.isLatestUser &&
+    prev.isLatestAssistant === next.isLatestAssistant &&
+    prev.isEditing === next.isEditing &&
+    prev.isStreaming === next.isStreaming &&
+    prev.userMessageRef === next.userMessageRef
+  );
+});
 
 function UserMessageActions({
   canEdit,
@@ -728,11 +743,13 @@ function SoftStreamingMarkdown({
     return () => window.clearTimeout(timer);
   }, [content, isStreaming]);
 
+  // While fresh tokens arrive, render slightly faded; settle to full opacity so new text
+  // reads as fading in from light to dark instead of a hard pop. motion-reduce keeps it crisp.
   return (
     <MarkdownContent
       className={cn(
         "transition-opacity duration-300 ease-out motion-reduce:transition-none",
-        isSoft && "opacity-80",
+        isSoft ? "opacity-70" : "opacity-100",
         className,
       )}
       compact={compact}

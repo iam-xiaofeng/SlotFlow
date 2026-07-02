@@ -93,6 +93,9 @@ export function ComposerTodoPanel({
   todoRevision: number;
   isStreaming: boolean;
 }) {
+  // Auto-expand while streaming so the live plan is visible without a click; collapse on
+  // completion. A new todo list (revision bump) also forces expansion. Previously the panel
+  // stayed collapsed by default, so users saw "todo not showing" even though it was there.
   const [isCollapsed, setIsCollapsed] = useState(true);
   const previousTodoRevisionRef = useRef(todoRevision);
   const previousStreamingRef = useRef(isStreaming);
@@ -105,7 +108,10 @@ export function ComposerTodoPanel({
   }, [todoRevision, todos.length]);
 
   useEffect(() => {
-    if (previousStreamingRef.current && !isStreaming && todos.length > 0) {
+    // While streaming with an active plan, keep it open; once the run ends, collapse.
+    if (isStreaming && todos.length > 0) {
+      setIsCollapsed(false);
+    } else if (previousStreamingRef.current && !isStreaming && todos.length > 0) {
       setIsCollapsed(true);
     }
     previousStreamingRef.current = isStreaming;
@@ -146,7 +152,7 @@ export function ComposerTodoPanel({
           "overflow-hidden bg-background/90 transition-[max-height,padding] duration-200 ease-out",
           isCollapsed
             ? "max-h-0 px-4 py-0 sm:px-5"
-            : "max-h-32 overflow-y-auto px-4 pb-3 pt-2 sm:px-5",
+            : "max-h-60 overflow-y-auto px-4 pb-3 pt-2 sm:px-5",
         )}
       >
         <ol className="flex flex-col gap-1.5">
