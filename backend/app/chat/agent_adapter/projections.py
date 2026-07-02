@@ -59,6 +59,76 @@ def projection_item_to_agent_event(
     return None
 
 
+def tool_status_event_from_tool_call(
+    item: Any,
+    *,
+    bundle: RunConfigBundle,
+) -> AgentEvent | None:
+    """Create a visible long-running-tool status event from a tool-call projection.
+
+    LangGraph v3 currently exposes model tool calls through the ``tool_calls`` projection,
+    but custom ``get_stream_writer()`` payloads are not exposed as a projection channel.
+    For sandbox work this tool-call boundary is the earliest stable point where the UI can
+    show "Docker is starting / code is running" before the ToolNode blocks on Docker.
+    """
+
+    tool_call = normalize_mapping(item)
+    tool_name = extract_tool_call_name(tool_call)
+    if tool_name != "sandbox_exec":
+        return None
+
+    command = extract_sandbox_command(tool_call)
+    return AgentEvent(
+        event="tool.status",
+        data={
+            "thread_id": bundle.context.thread_id,
+            "run_id": bundle.context.run_id,
+            "tool_name": tool_name,
+            "phase": "running",
+            "message": "正在初始化 Docker 沙箱并执行代码",
+            "command": truncate_status_text(command, 240) if command else None,
+            "source": "slotflow_tool_call_projection",
+        },
+    )
+
+
+def extract_tool_call_name(tool_call: dict[str, Any]) -> str | None:
+    name = tool_call.get("name")
+    if isinstance(name, str):
+        return name
+
+    nested = tool_call.get("tool_call")
+    if isinstance(nested, dict):
+        nested_name = nested.get("name")
+        if isinstance(nested_name, str):
+            return nested_name
+
+    return None
+
+
+def extract_sandbox_command(tool_call: dict[str, Any]) -> str | None:
+    args = tool_call.get("args")
+    if isinstance(args, dict):
+        command = args.get("command")
+        if isinstance(command, str):
+            return command
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return args
+        if isinstance(parsed, dict) and isinstance(parsed.get("command"), str):
+            return parsed["command"]
+    return None
+
+
+def truncate_status_text(value: str, max_chars: int) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}…"
+
+
 def extract_message_delta(item: Any) -> str:
     """从 message projection item 中提取文本增量。
 
@@ -384,6 +454,10 @@ def normalize_message(message: Any) -> dict[str, Any]:
         reasoning = extract_reasoning_text(message)
         if reasoning:
             normalized["reasoning_content"] = reasoning
+        tool_call_count = count_message_tool_calls(message)
+        if tool_call_count:
+            normalized["has_tool_calls"] = True
+            normalized["tool_call_count"] = tool_call_count
         if isinstance(message.get("id"), str):
             normalized["id"] = message["id"]
         if isinstance(message.get("name"), str):
@@ -399,6 +473,10 @@ def normalize_message(message: Any) -> dict[str, Any]:
     reasoning = extract_reasoning_text(message)
     if reasoning:
         normalized["reasoning_content"] = reasoning
+    tool_call_count = count_message_tool_calls(message)
+    if tool_call_count:
+        normalized["has_tool_calls"] = True
+        normalized["tool_call_count"] = tool_call_count
     message_id = getattr(message, "id", None)
     if isinstance(message_id, str):
         normalized["id"] = message_id
@@ -406,6 +484,31 @@ def normalize_message(message: Any) -> dict[str, Any]:
     if isinstance(name, str):
         normalized["name"] = name
     return normalized
+
+
+def count_message_tool_calls(message: Any) -> int:
+    """Return whether an assistant message is an intermediate tool-call step."""
+
+    if isinstance(message, dict):
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            return len(tool_calls)
+        additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict):
+            raw_tool_calls = additional_kwargs.get("tool_calls")
+            if isinstance(raw_tool_calls, list):
+                return len(raw_tool_calls)
+        return 0
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list):
+        return len(tool_calls)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        raw_tool_calls = additional_kwargs.get("tool_calls")
+        if isinstance(raw_tool_calls, list):
+            return len(raw_tool_calls)
+    return 0
 
 
 def normalize_message_content(content: Any) -> str:

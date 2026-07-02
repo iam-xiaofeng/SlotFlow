@@ -382,6 +382,8 @@ def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str |
             continue
         role = message.get("role")
         value = message.get(field)
+        if field == "content" and message.get("has_tool_calls") is True:
+            continue
         if role in ("assistant", "ai") and isinstance(value, str):
             return value
     return None

@@ -26,6 +26,7 @@ import {
   mergeWorkspaceEntries,
   messageRecordToUiMessage,
   parseClarificationRequest,
+  parseToolStatus,
   parseTodos,
 } from "./use-chat-stream-helpers";
 
@@ -33,6 +34,7 @@ export type {
   ChatTodo,
   ChatTodoStatus,
   ChatUiMessage,
+  ChatToolStatus,
   ChatUiMessageRole,
   ChatUiMessageStatus,
 } from "./use-chat-stream-helpers";
@@ -431,6 +433,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
           }
 
+          if (streamEvent.event === "tool.status") {
+            const toolStatus = parseToolStatus(streamEvent.data);
+            if (toolStatus) {
+              patchAssistant(assistantMessageId, {
+                compressionStarted: false,
+                toolStatus,
+              });
+            }
+          }
+
           if (streamEvent.event === "clarification.requested") {
             flushPendingAssistantDeltas();
             const clarification = parseClarificationRequest(streamEvent.data);
@@ -476,6 +488,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             setError(message);
             patchAssistant(assistantMessageId, {
               compressionStarted: false,
+              toolStatus: undefined,
               status: "error",
             });
           }
@@ -485,11 +498,13 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         if (controller.signal.aborted) {
           patchAssistant(assistantMessageId, {
             compressionStarted: false,
+            toolStatus: undefined,
             status: "cancelled",
           });
         } else if (!failed) {
           patchAssistant(assistantMessageId, {
             compressionStarted: false,
+            toolStatus: undefined,
             status: "done",
           });
         }
@@ -500,6 +515,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         if (controller.signal.aborted) {
           patchAssistant(assistantMessageId, {
             compressionStarted: false,
+            toolStatus: undefined,
             status: "cancelled",
           });
           return { accepted, thread: activeThread, artifacts: [] };
@@ -509,6 +525,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         setError(message);
         patchAssistant(assistantMessageId, {
           compressionStarted: false,
+          toolStatus: undefined,
           status: "error",
         });
         return { accepted, thread: activeThread, artifacts: [] };

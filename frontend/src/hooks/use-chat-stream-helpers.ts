@@ -15,10 +15,20 @@ export type ChatUiMessage = {
   reasoningContent?: string;
   thinkingStarted?: boolean;
   compressionStarted?: boolean;
+  toolStatus?: ChatToolStatus;
   status: ChatUiMessageStatus;
   runId?: string;
   createdAt?: string;
   metadata?: Record<string, unknown>;
+};
+
+export type ChatToolStatusPhase = "starting" | "running" | "completed" | "error";
+
+export type ChatToolStatus = {
+  toolName: string;
+  phase: ChatToolStatusPhase;
+  message: string;
+  command?: string;
 };
 
 export type ChatTodoStatus = "pending" | "in_progress" | "completed";
@@ -110,6 +120,9 @@ export function latestAssistantContent(event: ChatStreamEvent): string | null {
       const role = message.role;
       const content = message.content;
       if (role === "assistant" || role === "ai") {
+        if ((message as Record<string, unknown>).has_tool_calls === true) {
+          continue;
+        }
         if (typeof content === "string") {
           return content;
         }
@@ -173,6 +186,30 @@ export function parseTodos(value: unknown): ChatTodo[] {
     todos.push({ content, status });
   }
   return todos;
+}
+
+export function parseToolStatus(
+  data: Record<string, unknown>,
+): ChatToolStatus | null {
+  const toolName = data.tool_name;
+  const phase = data.phase;
+  const message = data.message;
+  if (
+    typeof toolName !== "string" ||
+    typeof message !== "string" ||
+    (phase !== "starting" &&
+      phase !== "running" &&
+      phase !== "completed" &&
+      phase !== "error")
+  ) {
+    return null;
+  }
+  return {
+    toolName,
+    phase,
+    message,
+    command: typeof data.command === "string" ? data.command : undefined,
+  };
 }
 
 export function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord[] {

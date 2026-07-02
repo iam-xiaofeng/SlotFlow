@@ -69,7 +69,7 @@ streaming.
    pure function called by a node, with order fixed by edges (see topology below).
 4. The graph streams with the **LangGraph v3 projection protocol**; each item is normalized
    by **`chat/agent_adapter/projections.py`** into a SlotFlow `AgentEvent` (`message.delta`
-   with channel `reasoning`/`content`, `state.snapshot`, `tool.delta`,
+   with channel `reasoning`/`content`, `state.snapshot`, `tool.delta`, `tool.status`,
    `clarification.requested`, `todo.updated`, `run.*`).
 
 **Graph topology (node + edge):**
@@ -172,7 +172,9 @@ frontend/src/
   Both `chat/routes.py::select_assistant_content` and
   `hooks/use-chat-stream-helpers.ts::mergeAssistantContent` keep the longer/prefix-compatible
   content so a shorter snapshot cannot make the answer visibly shrink at run end. Reasoning uses
-  the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`.
+  the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
+  assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
+  normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
 - **Chat scroll behavior**: `frontend/src/components/chat/message-list.tsx` scrolls to the latest
   assistant message when output first appears, then auto-follows streaming output only while the
   user stays near the bottom. If the user scrolls upward during generation, auto-follow stops and

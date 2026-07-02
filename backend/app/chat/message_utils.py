@@ -31,6 +31,10 @@ def normalize_message(message: Any) -> dict[str, Any]:
         reasoning = extract_reasoning_text(message)
         if reasoning:
             normalized["reasoning_content"] = reasoning
+        tool_call_count = count_message_tool_calls(message)
+        if tool_call_count:
+            normalized["has_tool_calls"] = True
+            normalized["tool_call_count"] = tool_call_count
         if isinstance(message.get("id"), str):
             normalized["id"] = message["id"]
         if isinstance(message.get("name"), str):
@@ -46,6 +50,10 @@ def normalize_message(message: Any) -> dict[str, Any]:
     reasoning = extract_reasoning_text(message)
     if reasoning:
         normalized["reasoning_content"] = reasoning
+    tool_call_count = count_message_tool_calls(message)
+    if tool_call_count:
+        normalized["has_tool_calls"] = True
+        normalized["tool_call_count"] = tool_call_count
     message_id = getattr(message, "id", None)
     if isinstance(message_id, str):
         normalized["id"] = message_id
@@ -53,6 +61,31 @@ def normalize_message(message: Any) -> dict[str, Any]:
     if isinstance(name, str):
         normalized["name"] = name
     return normalized
+
+
+def count_message_tool_calls(message: Any) -> int:
+    """Return the number of tool calls attached to an assistant message."""
+
+    if isinstance(message, dict):
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            return len(tool_calls)
+        additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict):
+            raw_tool_calls = additional_kwargs.get("tool_calls")
+            if isinstance(raw_tool_calls, list):
+                return len(raw_tool_calls)
+        return 0
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list):
+        return len(tool_calls)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        raw_tool_calls = additional_kwargs.get("tool_calls")
+        if isinstance(raw_tool_calls, list):
+            return len(raw_tool_calls)
+    return 0
 
 
 def normalize_message_content(content: Any) -> str:

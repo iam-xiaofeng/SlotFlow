@@ -23,7 +23,8 @@ from fastapi.testclient import TestClient
 from app.chat.agent_adapter import AgentEvent
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 from app.chat.repository import ChatRepository, SQLiteChatRepository
-from app.chat.routes import select_assistant_content
+from app.chat.sse import BusinessSseEvent
+from app.chat.routes import latest_assistant_content, select_assistant_content
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
@@ -593,6 +594,27 @@ def test_select_assistant_content_keeps_longer_streamed_content_over_short_snaps
     )
 
     assert content == "这段已经通过 message.delta 流式展示给用户，不能被短 snapshot 擦掉。"
+
+
+def test_latest_assistant_content_skips_intermediate_tool_call_messages() -> None:
+    event = BusinessSseEvent(
+        event="state.snapshot",
+        data={
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "我会先调用工具，这段不是最终正文。",
+                    "has_tool_calls": True,
+                },
+                {
+                    "role": "assistant",
+                    "content": "最终答案。",
+                },
+            ]
+        },
+    )
+
+    assert latest_assistant_content(event) == "最终答案。"
 
 
 def test_stream_run_can_reuse_user_message_for_edit_or_retry() -> None:

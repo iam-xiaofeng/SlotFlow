@@ -27,6 +27,7 @@ from app.chat.agent_adapter.projections import (
     is_summarization_item,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
+    tool_status_event_from_tool_call,
 )
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 
@@ -175,6 +176,11 @@ async def iter_projection_agent_events(
                                 await queue.put(make_context_compressing_event(bundle=bundle))
                             continue
                         await queue.put(ProjectionEnvelope(projection=projection, item=message_item))
+                elif projection == "tool_calls":
+                    status_event = tool_status_event_from_tool_call(item, bundle=bundle)
+                    if status_event is not None:
+                        await queue.put(status_event)
+                    await queue.put(ProjectionEnvelope(projection=projection, item=item))
                 else:
                     await queue.put(ProjectionEnvelope(projection=projection, item=item))
         except Exception as exc:  # pragma: no cover - surfaced to caller

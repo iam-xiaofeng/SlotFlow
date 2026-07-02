@@ -26,6 +26,7 @@ SseEventName = Literal[
     "context.compressing",
     "message.delta",
     "tool.delta",
+    "tool.status",
     "clarification.requested",
     "todo.updated",
     "state.snapshot",

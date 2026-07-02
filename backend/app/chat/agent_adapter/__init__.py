@@ -53,6 +53,7 @@ from app.chat.agent_adapter.projections import (
     projection_item_to_agent_event,
     to_jsonable,
     todo_event_from_snapshot,
+    tool_status_event_from_tool_call,
 )
 from app.chat.agent_adapter.streaming import (
     LangGraphEventAgentAdapter,
@@ -103,6 +104,7 @@ __all__ = [
     "projection_item_to_agent_event",
     "to_jsonable",
     "todo_event_from_snapshot",
+    "tool_status_event_from_tool_call",
     "LangGraphEventAgentAdapter",
     "ProjectionEnvelope",
     "drain_message_projection_item",

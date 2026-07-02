@@ -70,6 +70,28 @@ def test_agent_event_to_sse_event_keeps_event_name_and_data() -> None:
     )
 
 
+def test_agent_event_to_sse_event_keeps_tool_status() -> None:
+    event = agent_event_to_sse_event(
+        AgentEvent(
+            event="tool.status",
+            data={
+                "tool_name": "sandbox_exec",
+                "phase": "running",
+                "message": "正在初始化 Docker 沙箱并执行代码",
+            },
+        )
+    )
+
+    assert event == BusinessSseEvent(
+        event="tool.status",
+        data={
+            "tool_name": "sandbox_exec",
+            "phase": "running",
+            "message": "正在初始化 Docker 沙箱并执行代码",
+        },
+    )
+
+
 def test_encode_sse_event_outputs_standard_frame() -> None:
     """业务事件要编码成浏览器能识别的 SSE 文本帧。"""
 

@@ -28,6 +28,7 @@ from app.chat.agent_adapter import (
     normalize_values_snapshot,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
+    tool_status_event_from_tool_call,
 )
 from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
@@ -288,6 +289,40 @@ def test_projection_tool_call_item_becomes_tool_delta_event() -> None:
         event="tool.delta",
         data={"name": "search", "args": {"query": "SlotFlow"}},
     )
+
+
+def test_sandbox_tool_call_becomes_tool_status_event() -> None:
+    """sandbox_exec 开始执行时要给前端一个可见状态，避免 Docker 启动期像卡死。"""
+
+    event = tool_status_event_from_tool_call(
+        {
+            "name": "sandbox_exec",
+            "args": {"command": "python -m pip install pandas && python script.py"},
+        },
+        bundle=_bundle(),
+    )
+
+    assert event == AgentEvent(
+        event="tool.status",
+        data={
+            "thread_id": "thread_test",
+            "run_id": "run_test",
+            "tool_name": "sandbox_exec",
+            "phase": "running",
+            "message": "正在初始化 Docker 沙箱并执行代码",
+            "command": "python -m pip install pandas && python script.py",
+            "source": "slotflow_tool_call_projection",
+        },
+    )
+
+
+def test_non_sandbox_tool_call_does_not_become_tool_status_event() -> None:
+    event = tool_status_event_from_tool_call(
+        {"name": "search", "args": {"query": "SlotFlow"}},
+        bundle=_bundle(),
+    )
+
+    assert event is None
 
 
 def test_normalize_values_snapshot_keeps_thread_and_run_identity() -> None:
@@ -571,6 +606,45 @@ async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_it
         for event in events
         if event.event == "message.delta"
     )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_event_adapter_emits_sandbox_tool_status_before_tool_delta() -> None:
+    class ProjectionChannel:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def iterator():
+                for item in self._items:
+                    yield item
+
+            return iterator()
+
+    class ProjectionOnlyStream:
+        def __init__(self) -> None:
+            self.messages = ProjectionChannel([])
+            self.values = ProjectionChannel([])
+            self.tool_calls = ProjectionChannel(
+                [
+                    {
+                        "name": "sandbox_exec",
+                        "args": {"command": "python -V"},
+                    }
+                ]
+            )
+
+    events = [
+        event
+        async for event in iter_projection_agent_events(
+            ProjectionOnlyStream(),
+            bundle=_bundle(),
+        )
+    ]
+
+    assert [event.event for event in events] == ["tool.status", "tool.delta"]
+    assert events[0].data["message"] == "正在初始化 Docker 沙箱并执行代码"
+    assert events[0].data["command"] == "python -V"
 
 
 @pytest.mark.asyncio

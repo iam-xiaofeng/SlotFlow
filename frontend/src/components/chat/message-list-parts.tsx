@@ -14,10 +14,11 @@ import {
   Pencil,
   RotateCcw,
   SendHorizontal,
+  Terminal,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { type ChatUiMessage } from "@/hooks/use-chat-stream";
+import { type ChatToolStatus, type ChatUiMessage } from "@/hooks/use-chat-stream";
 import {
   type ClarificationOptionRecord,
   type ClarificationRequestRecord,
@@ -94,6 +95,10 @@ function MessageBubbleImpl({
     !clarification &&
     message.status === "streaming" &&
     message.compressionStarted === true;
+  const activeToolStatus =
+    !isUser && !clarification && message.status === "streaming"
+      ? message.toolStatus
+      : undefined;
   const shouldShowThinkingCard =
     !isUser &&
     !clarification &&
@@ -102,14 +107,6 @@ function MessageBubbleImpl({
         message.thinkingStarted === true &&
         !hasAssistantBody &&
         !isCompressingContext));
-  const isAssistantThinking =
-    !isUser &&
-    !clarification &&
-    message.status === "streaming" &&
-    !isCompressingContext &&
-    !hasAssistantBody &&
-    message.thinkingStarted === true &&
-    !message.reasoningContent?.trim();
   const canShowAssistantActions =
     !clarification &&
     isLatestAssistant &&
@@ -158,8 +155,6 @@ function MessageBubbleImpl({
               />
             ) : isCompressingContext ? (
               <ContextCompressingIndicator />
-            ) : isAssistantThinking ? (
-              <AssistantThinkingSummary content="" isStreaming />
             ) : (
               <>
                 {shouldShowThinkingCard ? (
@@ -168,12 +163,15 @@ function MessageBubbleImpl({
                     isStreaming={message.status === "streaming"}
                   />
                 ) : null}
+                {activeToolStatus ? (
+                  <ToolStatusIndicator status={activeToolStatus} />
+                ) : null}
                 {hasAssistantBody ? (
                   <SoftStreamingMarkdown
                     content={assistantContent.body}
                     isStreaming={message.status === "streaming"}
                   />
-                ) : message.status === "streaming" && !shouldShowThinkingCard ? (
+                ) : message.status === "streaming" && !shouldShowThinkingCard && !activeToolStatus ? (
                   <ThinkingIndicator />
                 ) : null}
               </>
@@ -387,6 +385,27 @@ function ContextCompressingIndicator() {
     <div className="flex h-8 items-center gap-2 text-sm text-muted-foreground">
       <span>正在压缩上下文</span>
       <ThinkingDots />
+    </div>
+  );
+}
+
+function ToolStatusIndicator({ status }: { status: ChatToolStatus }) {
+  const label = status.toolName === "sandbox_exec" ? "沙箱" : status.toolName;
+  return (
+    <div className="mb-4 rounded-lg border border-border/70 bg-muted/35 px-3 py-2.5 text-sm text-muted-foreground">
+      <div className="flex min-w-0 items-center gap-2">
+        <Terminal className="size-4 shrink-0" />
+        <span className="shrink-0 font-medium text-foreground">{label}</span>
+        <span className="min-w-0 truncate">{status.message}</span>
+        {status.phase === "running" || status.phase === "starting" ? (
+          <ThinkingDots />
+        ) : null}
+      </div>
+      {status.command ? (
+        <code className="mt-2 block max-h-20 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/80 px-2 py-1.5 text-xs leading-5 text-muted-foreground">
+          {status.command}
+        </code>
+      ) : null}
     </div>
   );
 }
