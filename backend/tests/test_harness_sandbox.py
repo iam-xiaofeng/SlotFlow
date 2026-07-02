@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ from app.harness.sandbox import (
     WorkspacePathError,
     WorkspaceWriteDisabledError,
 )
+from app.harness.sandbox.docker import LazyDockerSandbox
+from app.harness.tools.sandbox import build_sandbox_tools
 
 
 class ToolAwareFakeListChatModel(FakeListChatModel):
@@ -164,6 +167,10 @@ def test_runtime_loads_sandbox_config_from_env(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setenv("SLOTFLOW_WORKSPACE_WRITES_ENABLED", "true")
     monkeypatch.setenv("SLOTFLOW_WORKSPACE_MAX_READ_BYTES", "123")
     monkeypatch.setenv("SLOTFLOW_WORKSPACE_MAX_WRITE_BYTES", "456")
+    monkeypatch.setenv("SLOTFLOW_CODE_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_IMAGE", "python:3.13-slim")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED", "true")
 
     config = load_runtime_config_from_env()
 
@@ -172,6 +179,10 @@ def test_runtime_loads_sandbox_config_from_env(monkeypatch, tmp_path: Path) -> N
         writes_enabled=True,
         max_read_bytes=123,
         max_write_bytes=456,
+        code_execution_enabled=True,
+        docker_image="python:3.13-slim",
+        docker_timeout_seconds=12,
+        docker_network_enabled=True,
     )
 
 
@@ -248,3 +259,65 @@ def test_harness_builder_passes_sandbox_config_to_tool_registry(
     )
 
     assert captured_tools_kwargs["sandbox_config"] is sandbox_config
+
+
+def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
+    """Docker 容器懒加载；uploads/skills 只读，当前 thread artifacts/work 可写回本地。"""
+
+    calls: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    root = tmp_path / "workspace"
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(workspace_root=root, docker_image="python:test"),
+        thread_id="thread-1",
+        skills_root=skills_root,
+        runner=fake_runner,
+    )
+
+    assert sandbox.started is False
+    assert calls == []
+
+    result = sandbox.exec("python -V")
+
+    assert result["ok"] is True
+    assert sandbox.started is True
+    assert calls[0][:2] == ["docker", "run"]
+    assert calls[1][:2] == ["docker", "exec"]
+    run_command = calls[0]
+    assert "--network" in run_command
+    assert "none" in run_command
+    assert "python:test" in run_command
+    mounts = [
+        run_command[index + 1]
+        for index, value in enumerate(run_command)
+        if value == "--mount"
+    ]
+    assert any("/workspace/uploads" in mount and "readonly=true" in mount for mount in mounts)
+    assert any("/workspace/skills" in mount and "readonly=true" in mount for mount in mounts)
+    assert any("/workspace/artifacts" in mount and "readonly" not in mount for mount in mounts)
+    assert any("/workspace/work" in mount and "readonly" not in mount for mount in mounts)
+    assert (root / "artifacts" / "thread-1").is_dir()
+    assert (root / ".sandbox" / "thread-1").is_dir()
+
+
+def test_sandbox_exec_tool_is_disabled_by_config(tmp_path: Path) -> None:
+    """关闭代码执行时不注册 sandbox_exec。"""
+
+    tools = build_sandbox_tools(
+        SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            code_execution_enabled=False,
+        )
+    )
+
+    assert tools == []

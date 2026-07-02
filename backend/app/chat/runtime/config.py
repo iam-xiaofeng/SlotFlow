@@ -295,6 +295,22 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
             "SLOTFLOW_NETWORK_TIMEOUT_SECONDS",
             default=SlotFlowSandboxConfig().network_timeout_seconds,
         ),
+        code_execution_enabled=load_bool_from_env(
+            "SLOTFLOW_CODE_EXECUTION_ENABLED",
+            default=True,
+        ),
+        docker_image=(
+            os.environ.get("SLOTFLOW_DOCKER_SANDBOX_IMAGE", "").strip()
+            or SlotFlowSandboxConfig().docker_image
+        ),
+        docker_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS",
+            default=SlotFlowSandboxConfig().docker_timeout_seconds,
+        ),
+        docker_network_enabled=load_bool_from_env(
+            "SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED",
+            default=False,
+        ),
     )
 
 

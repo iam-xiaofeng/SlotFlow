@@ -121,6 +121,7 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
     assert {
         "ask_clarification",
         "artifact_write",
+        "sandbox_exec",
         "web_search",
         "skill_match",
         "search_skill_repos",
