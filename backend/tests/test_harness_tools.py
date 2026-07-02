@@ -147,6 +147,7 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
         "workspace_read",
         "workspace_tree",
         "workspace_search",
+        "workspace_grep",
         "artifact_list",
     ]
     listing = json.loads(tools["workspace_list"].invoke({"path": "."}))
@@ -220,6 +221,7 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
 
     tree = json.loads(tools["workspace_tree"].invoke({"path": ".", "max_depth": 3}))
     search = json.loads(tools["workspace_search"].invoke({"query": "tools"}))
+    grep = json.loads(tools["workspace_grep"].invoke({"pattern": "SlotFlow"}))
     artifact = json.loads(
         tools["artifact_write"].invoke(
             {"path": "summary.md", "content": "# Summary"}
@@ -229,6 +231,7 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
 
     assert {"path": "docs/guide.md", "kind": "file", "size_bytes": 25} in tree["entries"]
     assert search["matches"][0]["path"] == "docs/guide.md"
+    assert grep["matches"][0]["path"] == "docs/guide.md"
     assert artifact["path"] == "artifacts/summary.md"
     assert artifacts["entries"] == [
         {"path": "artifacts/summary.md", "kind": "file", "size_bytes": 9}
@@ -246,6 +249,7 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
         "workspace_read",
         "workspace_tree",
         "workspace_search",
+        "workspace_grep",
         "artifact_list",
     ]
 
@@ -266,6 +270,7 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
         "workspace_read",
         "workspace_tree",
         "workspace_search",
+        "workspace_grep",
         "artifact_list",
         "artifact_write",
     ]
