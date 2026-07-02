@@ -23,6 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -465,6 +466,11 @@ def _slotflow_tool_safety_wrapper(
         )
     try:
         return handler(request)
+    except GraphBubbleUp:
+        # interrupt() inside a tool (e.g. ask_clarification) raises GraphBubbleUp to pause
+        # the graph for HITL. It MUST propagate — never convert it to a tool_execution_error,
+        # or the graph never pauses and HITL silently dies. Same rule as triage_gate.
+        raise
     except Exception as exc:  # noqa: BLE001
         return build_error_tool_message(
             request.tool_call,
@@ -486,6 +492,9 @@ async def _slotflow_async_tool_safety_wrapper(
         )
     try:
         return await handler(request)
+    except GraphBubbleUp:
+        # See _slotflow_tool_safety_wrapper: interrupt() must propagate, not be swallowed.
+        raise
     except Exception as exc:  # noqa: BLE001
         return build_error_tool_message(
             request.tool_call,

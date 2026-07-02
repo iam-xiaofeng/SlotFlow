@@ -471,3 +471,73 @@ def test_find_skill_repos_on_github_surfaces_fetch_error(monkeypatch: pytest.Mon
 
     assert result["results"] == []
     assert result["error"] == "network tools are disabled"
+
+
+@pytest.mark.asyncio
+async def test_ask_clarification_via_slotflow_tool_node_actually_interrupts() -> None:
+    """Regression: the SlotFlow tool-safety wrapper must NOT swallow GraphBubbleUp.
+
+    ask_clarification pauses via interrupt() which raises GraphBubbleUp (an Exception
+    subclass). The node+edge graph's ToolNode runs tools through the SlotFlow safety
+    wrapper, whose old `except Exception` caught GraphBubbleUp and converted it to a
+    tool_execution_error — so voluntary HITL never paused and the model just continued.
+    This test drives the real build_slotflow_harness_graph so the wrapper is in the path.
+    """
+
+    import app.harness.graph as G
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+
+    async def no_triage(*, messages, model=None, triage_fn=None):
+        return None
+
+    original = G.run_triage
+    G.run_triage = no_triage
+    try:
+        model = ToolAwareFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "ask_clarification",
+                            "args": {
+                                "question": "用哪种格式？",
+                                "clarification_type": "ambiguous_requirement",
+                                "options": ["CSV", "HTML"],
+                            },
+                            "id": "call_reg",
+                        }
+                    ],
+                ),
+                AIMessage(content="好的，用 CSV。"),
+            ]
+        )
+        request = ChatStreamRequest(message="导出", mode="pro")
+        bundle = build_run_config(thread_id="thread_reg", run_id="run_reg", request=request)
+        graph = build_slotflow_harness_graph(
+            model=model,
+            run_context=bundle.context,
+            harness_config=SlotFlowHarnessConfig(
+                system_prompt="你是测试助手。",
+                middleware_config=SlotFlowMiddlewareConfig(),
+            ),
+            checkpointer=InMemorySaver(),
+        )
+        await graph.ainvoke(
+            {"messages": [{"role": "user", "content": "导出"}]},
+            config=bundle.config,
+            context=bundle.context,
+        )
+        state = await graph.aget_state(bundle.config)
+        # The graph MUST be paused on the clarification, not have swallowed the interrupt
+        # into a tool_execution_error and continued.
+        assert state.interrupts, "ask_clarification must pause the graph (wrapper must propagate GraphBubbleUp)"
+        assert state.interrupts[0].value["question"] == "用哪种格式？"
+
+        result = await graph.ainvoke(Command(resume="CSV"), config=bundle.config, context=bundle.context)
+        assert result["messages"][-1].content == "好的，用 CSV。"
+        after = await graph.aget_state(bundle.config)
+        assert not after.interrupts
+    finally:
+        G.run_triage = original
