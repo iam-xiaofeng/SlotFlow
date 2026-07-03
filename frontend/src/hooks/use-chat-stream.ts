@@ -1,10 +1,9 @@
 "use client";
 
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type ChatMode,
-  type ChatStreamEvent,
   type ChatStreamRequest,
   type ThreadRecord,
   type WorkspaceEntryRecord,
@@ -48,7 +47,6 @@ export type UseChatStreamOptions = {
   defaultMode?: ChatMode;
   defaultAgentName?: string;
   defaultMetadata?: Record<string, unknown>;
-  maxEventLogItems?: number;
 };
 
 export type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message"> & {
@@ -65,7 +63,6 @@ const fallbackThreadTitle = "SlotFlow chat";
 const fallbackModelName = "deepseek-v4-pro";
 const fallbackMode: ChatMode = "pro";
 const fallbackAgentName = "default";
-const fallbackMaxEventLogItems = 12;
 const streamingDeltaFlushMs = 80;
 
 export function useChatStream(options: UseChatStreamOptions = {}) {
@@ -75,14 +72,12 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     defaultMode = fallbackMode,
     defaultAgentName = fallbackAgentName,
     defaultMetadata = {},
-    maxEventLogItems = fallbackMaxEventLogItems,
   } = options;
 
   const [thread, setThread] = useState<ThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [todos, setTodos] = useState<ChatTodo[]>([]);
   const [todoRevision, setTodoRevision] = useState(0);
-  const [events, setEvents] = useState<ChatStreamEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -101,18 +96,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       pendingAssistantDeltasRef.current.clear();
     };
   }, []);
-
-  const appendEvent = useCallback(
-    (event: ChatStreamEvent) => {
-      startTransition(() => {
-        setEvents((current) => [
-          ...current.slice(Math.max(0, current.length - maxEventLogItems + 1)),
-          event,
-        ]);
-      });
-    },
-    [maxEventLogItems],
-  );
 
   const replaceTodos = useCallback((nextTodos: ChatTodo[]) => {
     if (nextTodos.length === 0 && !hasTodoListForCurrentRunRef.current) {
@@ -238,32 +221,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     [updateAssistantMessage],
   );
 
-  const startNewThread = useCallback(
-    async (title = defaultThreadTitle): Promise<ThreadRecord | null> => {
-      if (isStreamingRef.current) {
-        return thread;
-      }
-
-      setError(null);
-      try {
-        const nextThread = await createThread(title);
-        setThread(nextThread);
-        setMessages([]);
-        setTodos([]);
-        setTodoRevision(0);
-        hasTodoListForCurrentRunRef.current = false;
-        todoSignatureRef.current = "[]";
-        setEvents([]);
-        return nextThread;
-      } catch (caught) {
-        const message = caught instanceof Error ? caught.message : "create thread failed";
-        setError(message);
-        return null;
-      }
-    },
-    [defaultThreadTitle, thread],
-  );
-
   const resetThread = useCallback((): boolean => {
     if (isStreamingRef.current) {
       return false;
@@ -275,7 +232,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     setTodoRevision(0);
     hasTodoListForCurrentRunRef.current = false;
     todoSignatureRef.current = "[]";
-    setEvents([]);
     setError(null);
     return true;
   }, []);
@@ -298,7 +254,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       setTodoRevision(0);
       hasTodoListForCurrentRunRef.current = false;
       todoSignatureRef.current = "[]";
-      setEvents([]);
       return true;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "load thread failed";
@@ -405,8 +360,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
           signal: controller.signal,
         })) {
-          appendEvent(streamEvent);
-
           if (streamEvent.event === "run.prepared") {
             const runId = streamEvent.data.run_id;
             if (typeof runId === "string") {
@@ -539,7 +492,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     },
     [
       appendAssistantDelta,
-      appendEvent,
       defaultAgentName,
       defaultMetadata,
       defaultMode,
@@ -562,11 +514,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     messages,
     todos,
     todoRevision,
-    events,
     isStreaming,
     error,
     sendMessage,
-    startNewThread,
     cancelStream,
     resetThread,
     removeMessage,

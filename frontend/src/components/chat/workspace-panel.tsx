@@ -60,11 +60,17 @@ const panelWidthVariable = "--slotflow-artifact-panel-width";
 
 type WorkspacePanelMode = "files" | "terminal";
 
+export type WorkspacePanelRequest = {
+  mode: WorkspacePanelMode;
+  nonce: number;
+};
+
 type WorkspacePanelProps = {
   open: boolean;
   selectedPath?: string | null;
   width: number;
   refreshKey?: number;
+  requestedMode?: WorkspacePanelRequest | null;
   onClose: () => void;
   onOpenFile?: (threadId: string, file: WorkspaceEntryRecord) => void;
   onWidthChange: (width: number) => void;
@@ -77,6 +83,7 @@ export function WorkspacePanel({
   selectedPath: externalSelectedPath,
   width,
   refreshKey,
+  requestedMode,
   onClose,
   onOpenFile,
   onWidthChange,
@@ -113,6 +120,17 @@ export function WorkspacePanel({
       void refresh();
     }
   }, [open, refreshKey, refresh]);
+
+  // 外部(如聊天区顶部的终端按钮)请求切换面板模式;nonce 保证重复点击也能重新生效。
+  useEffect(() => {
+    if (!requestedMode) {
+      return;
+    }
+    if (requestedMode.mode === "terminal") {
+      setTerminalEnabled(true);
+    }
+    setPanelMode(requestedMode.mode);
+  }, [requestedMode]);
 
   useEffect(() => {
     setViewMode("preview");

@@ -9,7 +9,9 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { PanelRightOpen, SquareTerminal } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarInset,
@@ -30,7 +32,6 @@ import {
   type ThreadRecord,
   type UploadedFileRecord,
   type WorkspaceEntryRecord,
-  type WorkspaceReadRecord,
   createHttpMcpServer,
   createMemory,
   deleteArtifact,
@@ -40,7 +41,6 @@ import {
   deleteThread,
   installSkill,
   listThreads,
-  readArtifact,
   reorderMcpServers,
   reorderSkills,
   setMcpServerEnabled,
@@ -52,7 +52,7 @@ import {
   uploadSkillFolder,
 } from "@/lib/chat-stream";
 
-import { WorkspacePanel } from "./workspace-panel";
+import { WorkspacePanel, type WorkspacePanelRequest } from "./workspace-panel";
 import { WorkspaceDirectoryModal } from "./workspace-directory-modal";
 import {
   defaultModelName,
@@ -96,12 +96,10 @@ export function ChatApp() {
   const [selectedThinkingEnabled, setSelectedThinkingEnabled] = useState(
     defaultMode !== "flash",
   );
-  const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
-  const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
-  const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
   const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
   const [isWorkspaceDirectoryOpen, setIsWorkspaceDirectoryOpen] = useState(false);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
+  const [panelRequest, setPanelRequest] = useState<WorkspacePanelRequest | null>(null);
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(680);
   const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -133,7 +131,6 @@ export function ChatApp() {
     defaultMetadata: {
       source: "chat-ui",
     },
-    maxEventLogItems: 10,
   });
 
   const { isLoadingModels, selectedModelName, setSelectedModelName, modelOptions } =
@@ -281,7 +278,7 @@ export function ChatApp() {
         }
         const newArtifact = newArtifacts[0];
         if (newArtifact) {
-          void handlePreviewArtifact(newArtifact);
+          handlePreviewArtifact(newArtifact);
           setWorkspaceRefreshKey((current) => current + 1);
         }
       } else if (options.restoreAttachments) {
@@ -704,25 +701,15 @@ export function ChatApp() {
     }
   }
 
-  async function handlePreviewArtifact(artifact: WorkspaceEntryRecord) {
+  function handlePreviewArtifact(artifact: WorkspaceEntryRecord) {
     if (artifact.kind !== "file") {
       return;
     }
 
+    // 只负责选路径+开面板;文件内容由 WorkspacePanel 自行拉取,这里不再重复请求一次。
     setSelectedArtifactPath(artifact.path);
     setIsArtifactPanelOpen(true);
-    setIsLoadingArtifactPreview(true);
-    setArtifactPreviewError(null);
-    try {
-      setArtifactPreview(await readArtifact(artifact.path));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "read artifact failed";
-      setArtifactPreview(null);
-      setArtifactPreviewError(message);
-      toast.error(message);
-    } finally {
-      setIsLoadingArtifactPreview(false);
-    }
+    setPanelRequest({ mode: "files", nonce: Date.now() });
   }
 
   async function handleOpenWorkspaceFile(threadId: string, file: WorkspaceEntryRecord) {
@@ -742,6 +729,14 @@ export function ChatApp() {
         return;
       }
 
+      const confirmed = window.confirm(
+        `该文件属于另一个对话「${targetThread.title || "未命名会话"}」。\n` +
+          "切换过去查看吗？当前未发送的附件与排队消息会被清空。",
+      );
+      if (!confirmed) {
+        return;
+      }
+
       const loaded = await loadThread(targetThread);
       if (!loaded) {
         toast.error("打开对应对话失败");
@@ -753,16 +748,19 @@ export function ChatApp() {
     }
 
     setSelectedArtifactPath(file.path);
-    setArtifactPreview(null);
-    setArtifactPreviewError(null);
-    setIsLoadingArtifactPreview(false);
     setIsArtifactPanelOpen(true);
+    setPanelRequest({ mode: "files", nonce: Date.now() });
     setWorkspaceRefreshKey((current) => current + 1);
   }
 
-  function handleOpenArtifactPanel() {
+  function handleOpenWorkspaceDirectory() {
     setIsWorkspaceDirectoryOpen(true);
     setWorkspaceRefreshKey((current) => current + 1);
+  }
+
+  function handleOpenWorkspacePanel(mode: "files" | "terminal") {
+    setIsArtifactPanelOpen(true);
+    setPanelRequest({ mode, nonce: Date.now() });
   }
 
   async function handleDeleteArtifact(artifact: WorkspaceEntryRecord) {
@@ -775,10 +773,8 @@ export function ChatApp() {
       const nextArtifacts = await refreshArtifacts();
       setWorkspaceRefreshKey((current) => current + 1);
       setThreadArtifactPaths((current) => removeArtifactPathFromThreadIndex(current, artifact.path));
-      if (selectedArtifactPath === artifact.path || artifactPreview?.path === artifact.path) {
+      if (selectedArtifactPath === artifact.path) {
         setSelectedArtifactPath(null);
-        setArtifactPreview(null);
-        setArtifactPreviewError(null);
         const nextFile = thread
           ? filterThreadArtifacts(
               thread.id,
@@ -788,7 +784,7 @@ export function ChatApp() {
             )[0]
           : undefined;
         if (nextFile && isArtifactPanelOpen) {
-          void handlePreviewArtifact(nextFile);
+          handlePreviewArtifact(nextFile);
         } else if (!nextFile) {
           setIsArtifactPanelOpen(false);
         }
@@ -805,20 +801,15 @@ export function ChatApp() {
       return;
     }
 
-    if (selectedArtifactPath || artifactPreview?.path) {
+    if (selectedArtifactPath) {
       return;
     }
 
     const firstFile = activeThreadArtifactFiles[0];
     if (firstFile) {
-      void handlePreviewArtifact(firstFile);
+      handlePreviewArtifact(firstFile);
     }
-  }, [
-    activeThreadArtifactFiles,
-    artifactPreview?.path,
-    isArtifactPanelOpen,
-    selectedArtifactPath,
-  ]);
+  }, [activeThreadArtifactFiles, isArtifactPanelOpen, selectedArtifactPath]);
 
   async function handleCopyMessage(content: string) {
     if (!content.trim()) {
@@ -962,8 +953,8 @@ export function ChatApp() {
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
           onInstallSkill={handleInstallSkillFromRegistry}
           onNewThread={handleNewThread}
-          onOpenArtifacts={handleOpenArtifactPanel}
-          onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
+          onOpenWorkspaceDirectory={handleOpenWorkspaceDirectory}
+          onPreviewArtifact={handlePreviewArtifact}
           onQueryChange={setThreadQuery}
           onPinMcpServer={(server, pinned) => void handlePinMcpServer(server, pinned)}
           onPinSkill={(skill, pinned) => void handlePinSkill(skill, pinned)}
@@ -978,7 +969,31 @@ export function ChatApp() {
 
       <SidebarInset className="h-dvh min-h-0 overflow-hidden">
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <section className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            {!isArtifactPanelOpen ? (
+              <div className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border bg-background/95 p-0.5 shadow-sm">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="打开工作区面板"
+                  onClick={() => handleOpenWorkspacePanel("files")}
+                >
+                  <PanelRightOpen className="size-4" />
+                  <span className="sr-only">打开工作区面板</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="打开终端"
+                  onClick={() => handleOpenWorkspacePanel("terminal")}
+                >
+                  <SquareTerminal className="size-4" />
+                  <span className="sr-only">打开终端</span>
+                </Button>
+              </div>
+            ) : null}
             {messages.length === 0 ? (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 pb-16 sm:px-6">
                 <div className="w-full max-w-3xl -translate-y-10">
@@ -1013,6 +1028,7 @@ export function ChatApp() {
             selectedPath={selectedArtifactPath}
             width={artifactPanelWidth}
             refreshKey={workspaceRefreshKey}
+            requestedMode={panelRequest}
             onClose={() => setIsArtifactPanelOpen(false)}
             onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
             onWidthChange={setArtifactPanelWidth}

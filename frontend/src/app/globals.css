@@ -264,3 +264,54 @@
   overflow-y: hidden;
   padding: 0.25rem 0;
 }
+
+/* --- SlotFlow 活动指示动效(思考扫光 / 运行均衡条) --- */
+@keyframes slotflow-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.slotflow-shimmer-text {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: slotflow-shimmer 1.8s linear infinite;
+}
+
+@keyframes slotflow-eq {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.slotflow-eq-bar {
+  transform-origin: center;
+  animation: slotflow-eq 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slotflow-shimmer-text {
+    animation: none;
+    background: none;
+    color: var(--muted-foreground);
+  }
+  .slotflow-eq-bar {
+    animation: none;
+    transform: none;
+  }
+}

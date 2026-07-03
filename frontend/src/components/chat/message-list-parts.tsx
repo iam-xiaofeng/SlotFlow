@@ -365,26 +365,50 @@ function AssistantMessageActions({
   );
 }
 
-function ThinkingIndicator() {
+function useElapsedSeconds(): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return seconds;
+}
+
+/** 思考/等待态的扫光文字;耗时超过 3s 后附带计秒,回答很快时不打扰。 */
+function ThinkingIndicator({ label = "思考中" }: { label?: string }) {
+  const seconds = useElapsedSeconds();
   return (
-    <div className="flex h-8 items-center gap-1.5 text-muted-foreground">
-      <span className="sr-only">思考中</span>
+    <div className="flex h-8 items-center gap-2">
+      <span className="slotflow-shimmer-text text-sm font-medium">{label}</span>
+      {seconds >= 3 ? (
+        <span className="text-xs tabular-nums text-muted-foreground/70">{seconds}s</span>
+      ) : null}
+    </div>
+  );
+}
+
+/** 运行态的三根细均衡条,替代通用的弹跳圆点。 */
+function ActivityGlyph() {
+  return (
+    <span className="inline-flex h-3.5 shrink-0 items-center gap-[3px]" aria-hidden>
       {[0, 1, 2].map((index) => (
         <span
           key={index}
-          className="size-2 rounded-full bg-current opacity-60 animate-bounce"
-          style={{ animationDelay: `${index * 120}ms` }}
+          className="slotflow-eq-bar h-full w-[2px] rounded-full bg-current opacity-70"
+          style={{ animationDelay: `${index * 140}ms` }}
         />
       ))}
-    </div>
+    </span>
   );
 }
 
 function ContextCompressingIndicator() {
   return (
-    <div className="flex h-8 items-center gap-2 text-sm text-muted-foreground">
-      <span>正在压缩上下文</span>
-      <ThinkingDots />
+    <div className="flex h-8 items-center gap-2">
+      <span className="slotflow-shimmer-text text-sm font-medium">正在压缩上下文</span>
     </div>
   );
 }
@@ -398,7 +422,7 @@ function ToolStatusIndicator({ status }: { status: ChatToolStatus }) {
         <span className="shrink-0 font-medium text-foreground">{label}</span>
         <span className="min-w-0 truncate">{status.message}</span>
         {status.phase === "running" || status.phase === "starting" ? (
-          <ThinkingDots />
+          <ActivityGlyph />
         ) : null}
       </div>
       {status.command ? (
@@ -795,7 +819,11 @@ function AssistantThinkingSummary({
     >
       <summary className="flex h-9 cursor-pointer list-none items-center gap-2 px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
         <ChevronDown className="size-3.5 transition-transform group-open/thinking:rotate-180" />
-        <span>{isStreaming && !hasContent ? "思考中" : "隐藏步骤"}</span>
+        {isStreaming && !hasContent ? (
+          <span className="slotflow-shimmer-text">思考中</span>
+        ) : (
+          <span>隐藏步骤</span>
+        )}
       </summary>
       <div className="px-4 pb-4 pt-1">
         <div className="max-h-[30rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]">
@@ -826,8 +854,11 @@ function AssistantThinkingSummary({
                 <Lightbulb className="size-3" />
               </span>
               <div className="flex min-h-8 items-center gap-2 text-[0.82rem] leading-6 text-muted-foreground">
-                <span>{isStreaming ? "思考中..." : "已完成思考，模型未返回可展示的思考内容。"}</span>
-                {isStreaming ? <ThinkingDots /> : null}
+                {isStreaming ? (
+                  <span className="slotflow-shimmer-text">正在整理思路</span>
+                ) : (
+                  <span>已完成思考，模型未返回可展示的思考内容。</span>
+                )}
               </div>
             </div>
           )}
@@ -856,20 +887,6 @@ function splitThinkingSteps(content: string): string[] {
     .map((step) => step.trim())
     .filter(Boolean);
   return lineSteps.length > 1 ? lineSteps : [normalized];
-}
-
-function ThinkingDots() {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {[0, 1, 2].map((index) => (
-        <span
-          key={index}
-          className="size-1.5 rounded-full bg-current opacity-60 animate-bounce"
-          style={{ animationDelay: `${index * 120}ms` }}
-        />
-      ))}
-    </span>
-  );
 }
 
 function MessageAttachments({ files }: { files: MessageFile[] }) {

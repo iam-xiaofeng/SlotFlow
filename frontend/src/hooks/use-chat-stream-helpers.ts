@@ -173,7 +173,8 @@ export function parseTodos(value: unknown): ChatTodo[] {
       continue;
     }
     const record = item as Record<string, unknown>;
-    const content = typeof record.content === "string" ? record.content : record.text;
+    // 后端 write_todos 工具与 adapter 投影层都已把 text 归一为 content,这里只认 content。
+    const content = record.content;
     if (typeof content !== "string" || !content.trim()) {
       continue;
     }

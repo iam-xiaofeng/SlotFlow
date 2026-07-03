@@ -230,21 +230,6 @@ export async function searchThreads(
   return response.json() as Promise<ThreadSearchResultRecord[]>;
 }
 
-export async function getThread(
-  threadId: string,
-  options: ChatRequestOptions = {},
-): Promise<ThreadRecord> {
-  const response = await fetch(`/api/chat/threads/${threadId}`, {
-    signal: options.signal,
-  });
-
-  if (!response.ok) {
-    throw new Error(`get thread failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ThreadRecord>;
-}
-
 export async function deleteThread(
   threadId: string,
   options: ChatRequestOptions = {},
@@ -748,7 +733,7 @@ export async function* streamThreadRun(
   }
 }
 
-export function resolveChatStreamUrl(path: string): string {
+function resolveChatStreamUrl(path: string): string {
   return joinBaseUrl(resolveChatStreamBaseUrl(), path);
 }
 
