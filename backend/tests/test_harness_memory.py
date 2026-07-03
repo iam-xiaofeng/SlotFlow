@@ -18,10 +18,10 @@ from app.harness.memory import SlotFlowMemoryStore
 from app.harness.memory.extractor import SlotFlowMemoryExtractor, parse_extracted_facts
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.steps.long_term_memory import (
+    aexplicit_save_update,
     append_memory_system_message,
     build_extraction_conversation,
     build_turn_memory_candidate,
-    explicit_save_update,
     retrieve_memories,
 )
 from app.harness.tools.memory import build_memory_tools
@@ -55,7 +55,9 @@ def test_memory_store_adds_lists_searches_and_dedupes_by_run(tmp_path: Path) -> 
     assert store.search_memories(query="怎么回答更简洁", thread_id="thread_b")[0].id == first.id
 
 
-def test_memory_store_canonicalizes_common_user_facts(tmp_path: Path) -> None:
+def test_memory_store_normalization_is_hygiene_only(tmp_path: Path) -> None:
+    """store 只做卫生化(剥指令前缀/压空白/补句号);语义改写是 LLM 抽取器的职责。"""
+
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
 
     profile = store.add_memory(
@@ -70,16 +72,16 @@ def test_memory_store_canonicalizes_common_user_facts(tmp_path: Path) -> None:
         kind="fact",
         content="再记住:农历9月30日是我的生日",
     )
-    # 只提及学历/专业词汇、没有显式"职业是/专业是"表述时，不再靠硬编码推断发明字段。
+    # 不做任何字段推断/前缀强加——存什么就是什么(卫生化后)。
     implicit = store.add_memory(
         kind="profile",
         content="控制工程硕士在读",
     )
 
-    assert profile.content == "用户的姓名是肖峰。用户的职业是研究生。用户的专业是控制工程。"
-    assert preference.content == "用户的偏好是：以后回答更简洁。"
-    assert birthday.content == "用户的生日是农历9月30日。"
-    assert implicit.content == "用户资料：控制工程硕士在读。"
+    assert profile.content == "我叫肖峰，职业是研究生，专业是控制工程。"
+    assert preference.content == "我希望以后回答更简洁。"
+    assert birthday.content == "农历9月30日是我的生日。"
+    assert implicit.content == "控制工程硕士在读。"
 
 
 def test_memory_store_touches_existing_kind_content_instead_of_adding(tmp_path: Path) -> None:
@@ -105,10 +107,12 @@ def test_memory_store_touches_existing_kind_content_instead_of_adding(tmp_path: 
     assert [item.id for item in store.list_memories(limit=10)] == [first.id]
 
 
-def test_explicit_save_update_saves_latest_turn(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_explicit_save_update_saves_latest_turn(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
 
-    update = explicit_save_update(
+    # extractor 未提供 → 回退保存剥掉指令前缀的原文（显式请求绝不丢失）。
+    update = await aexplicit_save_update(
         messages=[
             HumanMessage(content="记住我喜欢中文"),
             AIMessage(content="我会记住。"),
@@ -120,17 +124,42 @@ def test_explicit_save_update_saves_latest_turn(tmp_path: Path) -> None:
     saved = update["slotflow"]["long_term_memory_saved"]
     assert saved["thread_id"] == "thread_memory"
     assert saved["kind"] == "preference"
-    assert saved["content"] == "用户的偏好是：喜欢中文。"
+    assert saved["content"] == "我喜欢中文。"
+    assert saved["metadata"]["extraction"] == "heuristic_fallback"
     assert store.list_memories(thread_id="thread_memory")[0].id == saved["id"]
 
 
-def test_explicit_save_update_skips_after_memory_save_tool(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_explicit_save_update_rewrites_via_extractor_model(tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    model = FakeListChatModel(
+        responses=['[{"kind": "preference", "content": "用户偏好简洁的中文回答。"}]']
+    )
+
+    update = await aexplicit_save_update(
+        messages=[
+            HumanMessage(content="记住我喜欢简洁的中文回答"),
+            AIMessage(content="我会记住。"),
+        ],
+        context=_context(),
+        memory_store=store,
+        extractor=SlotFlowMemoryExtractor(model),
+    )
+
+    saved = update["slotflow"]["long_term_memory_saved"]
+    assert saved["kind"] == "preference"
+    assert saved["content"] == "用户偏好简洁的中文回答。"
+    assert saved["metadata"]["extraction"] == "llm_rewrite"
+
+
+@pytest.mark.asyncio
+async def test_explicit_save_update_skips_after_memory_save_tool(tmp_path: Path) -> None:
     store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
     context = _context()
     tools = {item.name: item for item in build_memory_tools(memory_store=store, run_context=context)}
     tool_result = tools["memory_save"].invoke({"content": "我喜欢中文", "kind": "preference"})
 
-    update = explicit_save_update(
+    update = await aexplicit_save_update(
         messages=[
             HumanMessage(content="记住我喜欢中文"),
             ToolMessage(content=tool_result, name="memory_save", tool_call_id="call_memory_save"),
@@ -143,7 +172,7 @@ def test_explicit_save_update_skips_after_memory_save_tool(tmp_path: Path) -> No
     assert update is None
     records = store.list_memories(thread_id="thread_memory")
     assert len(records) == 1
-    assert records[0].content == "用户的偏好是：喜欢中文。"
+    assert records[0].content == "我喜欢中文。"
 
 
 def test_append_memory_system_message_injects_relevant_memories(tmp_path: Path) -> None:
@@ -166,7 +195,7 @@ def test_append_memory_system_message_injects_relevant_memories(tmp_path: Path) 
     system_content = system_message.content
     assert "base system" in system_content
     assert "<slotflow-long-term-memory>" in system_content
-    assert "用户记录：用户喜欢简洁回答。" in system_content
+    assert "用户喜欢简洁回答。" in system_content
 
 
 def test_append_memory_system_message_injects_capability_prompt_without_matches(tmp_path: Path) -> None:
@@ -295,8 +324,8 @@ def test_memory_tools_save_and_list_memories(tmp_path: Path) -> None:
     save_result = tools["memory_save"].invoke({"content": "用户喜欢中文回答"})
     list_result = tools["memory_list"].invoke({"query": "中文", "limit": 5})
 
-    assert "用户记录：用户喜欢中文回答。" in save_result
-    assert "用户记录：用户喜欢中文回答。" in list_result
+    assert "用户喜欢中文回答。" in save_result
+    assert "用户喜欢中文回答。" in list_result
 
 
 def test_build_memory_tools_returns_four_tools(tmp_path: Path) -> None:
@@ -324,7 +353,7 @@ def test_memory_api_create_update_and_delete(tmp_path: Path) -> None:
     )
 
     assert update_response.status_code == 200
-    assert update_response.json()["content"] == "用户资料：喜欢更简洁的中文回答。"
+    assert update_response.json()["content"] == "用户喜欢更简洁的中文回答。"
     assert update_response.json()["kind"] == "profile"
     assert client.get("/api/memory").json()[0]["id"] == memory_id
 

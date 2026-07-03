@@ -230,12 +230,19 @@ async def aextract_and_save(
             continue
 
 
-def explicit_save_update(
+async def aexplicit_save_update(
     *,
     messages: list[Any],
     context: RunContext,
     memory_store: SlotFlowMemoryStore,
+    extractor: SlotFlowMemoryExtractor | None = None,
 ) -> dict[str, Any] | None:
+    """显式"请记住X"的保存：正则只负责探测显式指令，判定与改写交给小模型。
+
+    抽取器可用时把本轮用户原话交给小模型改写成规范的第三人称事实（可拆多条）；
+    小模型不可用或改写失败时回退保存剥掉指令前缀的原文，显式请求绝不丢失。
+    """
+
     if context is None:
         return None
     if memory_save_tool_used_for_run(messages, run_id=context.run_id):
@@ -243,17 +250,37 @@ def explicit_save_update(
     candidate = build_turn_memory_candidate(messages)
     if candidate is None:
         return None
-    memory = memory_store.add_memory(
-        thread_id=context.thread_id,
-        source_run_id=context.run_id,
-        kind=candidate.kind,
-        content=candidate.content,
-        metadata={
-            "source": "slotflow_long_term_memory_middleware",
-            "extraction": "heuristic",
-        },
-    )
-    return {"slotflow": {"long_term_memory_saved": memory.model_dump(mode="json")}}
+
+    facts: list[dict[str, str]] = []
+    extraction = "heuristic_fallback"
+    if extractor is not None and extractor.available:
+        rewritten = await extractor.aextract(f"User: {latest_user_message_text(messages)}")
+        if rewritten:
+            facts = rewritten
+            extraction = "llm_rewrite"
+    if not facts:
+        facts = [{"kind": candidate.kind, "content": candidate.content}]
+
+    saved: list[dict[str, Any]] = []
+    for index, fact in enumerate(facts):
+        try:
+            memory = memory_store.add_memory(
+                thread_id=context.thread_id,
+                # source_run_id 有唯一约束：首条携带 run 去重键，其余条不带。
+                source_run_id=context.run_id if index == 0 else None,
+                kind=fact["kind"],
+                content=fact["content"],
+                metadata={
+                    "source": "slotflow_long_term_memory_step",
+                    "extraction": extraction,
+                },
+            )
+        except Exception:  # noqa: BLE001 - 单条失败不拖垮其余条目
+            continue
+        saved.append(memory.model_dump(mode="json"))
+    if not saved:
+        return None
+    return {"slotflow": {"long_term_memory_saved": saved[0] if len(saved) == 1 else saved}}
 
 
 def tool_message_name(message: Any) -> str | None:

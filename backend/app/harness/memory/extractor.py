@@ -19,6 +19,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.harness.memory.models import MEMORY_KINDS, MemoryKind
+from app.harness.utils import message_content_text
 
 
 _EXTRACT_SYSTEM = (
@@ -32,7 +33,10 @@ _EXTRACT_SYSTEM = (
     "uploaded-file events, or anything only relevant to this single turn. "
     "When in doubt, prefer to save a clearly durable fact rather than miss it, but return an "
     "EMPTY array if the turn contains nothing durable. Each `content` must be a concise, "
-    "standalone sentence understandable without the conversation. "
+    "standalone sentence understandable without the conversation. Write each `content` in "
+    "Chinese, third person, subject 用户 (e.g. 用户的职业是研究生。/ 用户偏好简洁的中文回答。"
+    "/ 用户正在开发SlotFlow项目。) — you are the ONLY rewriter; storage keeps your wording "
+    "verbatim.\n"
     "Respond with ONLY a compact JSON array, no prose, no markdown fences:\n"
     '[{"kind": "preference|profile|topic|fact", "content": "<concise standalone fact>"}]'
 )
@@ -61,7 +65,7 @@ class SlotFlowMemoryExtractor:
             )
         except Exception:  # noqa: BLE001 - background best-effort; never raise
             return []
-        return parse_extracted_facts(_message_text(getattr(response, "content", "")))
+        return parse_extracted_facts(message_content_text(getattr(response, "content", "")))
 
 
 def parse_extracted_facts(text: str) -> list[dict[str, str]]:
@@ -96,17 +100,3 @@ def _coerce_kind(value: Any) -> MemoryKind:
     if isinstance(value, str) and value in MEMORY_KINDS:
         return value  # type: ignore[return-value]
     return "fact"
-
-
-def _message_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts)
-    return ""

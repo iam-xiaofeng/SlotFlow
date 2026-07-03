@@ -49,8 +49,8 @@ from app.harness.steps.clarify_gate import (
 )
 from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.long_term_memory import (
+    aexplicit_save_update,
     append_memory_system_message,
-    explicit_save_update,
     maybe_schedule_extraction,
     retrieve_memories,
 )
@@ -451,20 +451,24 @@ def make_finalize_node(inputs: _GraphInputs):
         # long-term memory explicit save + background extraction (after_agent)
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             messages = list(state.get("messages") or [])
-            save_update = explicit_save_update(
+            extractor = _build_extractor(inputs)
+            save_update = await aexplicit_save_update(
                 messages=messages,
                 context=ctx,
                 memory_store=inputs.memory_store,
+                extractor=extractor,
             )
             if save_update is not None:
                 slotflow.update(save_update.get("slotflow") or {})
-            maybe_schedule_extraction(
-                messages=messages,
-                context=ctx,
-                extractor=_build_extractor(inputs),
-                memory_store=inputs.memory_store,
-                proactive_extraction_enabled=flags.proactive_memory_extraction_enabled,
-            )
+            else:
+                # 显式保存已发生时跳过后台抽取，避免同一轮产生近似重复记忆。
+                maybe_schedule_extraction(
+                    messages=messages,
+                    context=ctx,
+                    extractor=extractor,
+                    memory_store=inputs.memory_store,
+                    proactive_extraction_enabled=flags.proactive_memory_extraction_enabled,
+                )
 
         updates["slotflow"] = slotflow
         return updates
