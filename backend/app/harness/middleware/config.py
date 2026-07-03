@@ -15,8 +15,6 @@ class SlotFlowMiddlewareConfig:
     """Feature switches for the SlotFlow harness graph nodes."""
 
     runtime_summary_enabled: bool = True
-    dangling_tool_call_enabled: bool = True
-    tool_safety_enabled: bool = True
     artifact_discovery_enabled: bool = True
     summarization_enabled: bool = True
     summarization_trigger_tokens: int = 600000

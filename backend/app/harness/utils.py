@@ -21,7 +21,7 @@ _NamedT = TypeVar("_NamedT", bound=_Named)
 
 
 def dedupe_by_name(items: list[_NamedT]) -> list[_NamedT]:
-    """按 `.name` 去重，保留更早出现的元素。tools 和 middleware 都有 `name`。"""
+    """按 `.name` 去重，保留更早出现的元素（tools 等注册表条目都有 `name`）。"""
 
     seen: set[str] = set()
     unique: list[_NamedT] = []

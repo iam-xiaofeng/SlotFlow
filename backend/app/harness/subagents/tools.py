@@ -142,8 +142,6 @@ class SubagentTaskRunner:
                 skills_config_store=None,
                 config_flags=SlotFlowMiddlewareConfig(
                     runtime_summary_enabled=False,
-                    dangling_tool_call_enabled=True,
-                    tool_safety_enabled=True,
                     artifact_discovery_enabled=False,
                     summarization_enabled=False,
                     long_term_memory_enabled=False,

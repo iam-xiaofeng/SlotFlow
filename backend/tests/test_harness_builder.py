@@ -222,8 +222,6 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
             system_prompt="base prompt",
             middleware_config=SlotFlowMiddlewareConfig(
                 runtime_summary_enabled=False,
-                dangling_tool_call_enabled=False,
-                tool_safety_enabled=False,
                 artifact_discovery_enabled=False,
                 summarization_enabled=False,
                 skills_preflight_enabled=False,
@@ -237,8 +235,6 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
     # all behavior toggles disabled via config_flags
     flags = captured["config_flags"]
     assert not flags.runtime_summary_enabled
-    assert not flags.dangling_tool_call_enabled
-    assert not flags.tool_safety_enabled
     assert not flags.artifact_discovery_enabled
     assert not flags.summarization_enabled
     assert not flags.skills_preflight_enabled

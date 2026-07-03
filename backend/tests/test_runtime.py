@@ -90,7 +90,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_CONFIG_JSON", raising=False)
     monkeypatch.delenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", raising=False)
-    monkeypatch.delenv("SLOTFLOW_TOOL_SAFETY_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUMMARIZATION_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_LONG_TERM_MEMORY_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_MEMORY_SQLITE_PATH", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_ROOT", raising=False)
@@ -459,13 +459,13 @@ def test_load_runtime_config_from_env_reads_middleware_config(monkeypatch: pytes
     """Runtime reads middleware switches but does not instantiate middleware."""
 
     monkeypatch.setenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", "false")
-    monkeypatch.setenv("SLOTFLOW_TOOL_SAFETY_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_MIDDLEWARE", "false")
 
     config = load_runtime_config_from_env()
 
     assert config.middleware_config == SlotFlowMiddlewareConfig(
         runtime_summary_enabled=False,
-        tool_safety_enabled=False,
+        summarization_enabled=False,
     )
 
 

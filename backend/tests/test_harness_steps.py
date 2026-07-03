@@ -187,7 +187,6 @@ def test_skills_preflight_stores_result_without_mutating_user_message() -> None:
     update = skills_preflight_update(
         state={"messages": [message]},
         finder=fake_finder,
-        uses_default_finder=False,
     )
     assert calls == [("请分析股票数据并生成图表报告", 5)]
     assert update is not None

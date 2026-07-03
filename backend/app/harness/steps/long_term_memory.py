@@ -1,9 +1,7 @@
 """Step: long-term memory retrieval / injection / explicit-save / background extraction.
 
-Extracted from ``SlotFlowLongTermMemoryMiddleware``. These pure functions implement the
-retrieval prompt building, explicit ``请记住X`` synchronous save, and the background LLM
-extraction schedule. The thin middleware keeps the ``wrap_model_call`` surface (it needs the
-ModelRequest handler signature) but delegates the data work here.
+纯函数集合：检索提示构建、显式 ``请记住X`` 同步保存、后台 LLM 提取调度。
+由 graph 的 ``prepare``（检索）、``pre_model``（注入）、``finalize``（保存/提取）节点调用。
 """
 
 from __future__ import annotations
@@ -51,14 +49,12 @@ def retrieve_memories(
 
 
 def append_memory_system_message(
-    system_message: SystemMessage | None,
+    system_message: SystemMessage,
     *,
     memories: list[MemoryRecord],
     tools_enabled: bool = True,
 ) -> SystemMessage:
     section = build_memory_prompt(memories, tools_enabled=tools_enabled)
-    if system_message is None:
-        return SystemMessage(content=section)
     base_content = message_text(system_message)
     content = f"{base_content}\n\n{section}" if base_content else section
     return SystemMessage(content=content)
@@ -135,12 +131,6 @@ def build_extraction_conversation(messages: list[Any]) -> str:
 
 
 
-
-def build_turn_memory_content(messages: list[Any]) -> str | None:
-    """Backward-compatible helper returning only the extracted memory content."""
-
-    candidate = build_turn_memory_candidate(messages)
-    return candidate.content if candidate is not None else None
 
 def extract_explicit_memory(text: str) -> MemoryCandidate | None:
     match = re.search(r"(?:请)?(?:记住|保存到记忆|加入记忆|长期记忆[:：]?)(.*)", text)

@@ -63,7 +63,6 @@ def skills_preflight_update(
     skills_root: Any = None,
     skills_config_store: Any = None,
     finder: SkillFinder | None = None,
-    uses_default_finder: bool = True,
     max_results: int = 5,
 ) -> dict[str, Any] | None:
     messages = list(state.get("messages") or [])
@@ -76,16 +75,13 @@ def skills_preflight_update(
     if SKILLS_PREFLIGHT_BLOCK_START in user_text:
         return None
 
-    if uses_default_finder:
-        result = finder(
-            user_text,
-            max_results,
-            sandbox_config,
-            skills_root,
-            skills_config_store,
-        )
-    else:
-        result = finder(user_text, max_results, sandbox_config)
+    result = finder(
+        user_text,
+        max_results,
+        sandbox_config,
+        skills_root,
+        skills_config_store,
+    )
     slotflow = dict(state.get("slotflow") or {})
     slotflow["skills_preflight"] = result
     return {"slotflow": slotflow}

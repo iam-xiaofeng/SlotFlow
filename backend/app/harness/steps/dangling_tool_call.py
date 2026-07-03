@@ -1,8 +1,8 @@
 """Step: repair dangling tool calls before the next model invocation.
 
-Extracted from ``SlotFlowDanglingToolCallMiddleware`` / ``repair_dangling_tool_calls``. The
-pure message-repair function already exists and is widely imported; this module re-exports it
-from the canonical location and keeps the middleware as a thin wrapper.
+纯消息修复函数：模型发出 tool_call 却没有等到对应 ToolMessage（中断、崩溃、限流等）时，
+在下一次模型调用前补上合成的 error ToolMessage，避免 OpenAI 兼容 API 直接拒绝请求。
+由 ``graph.pre_model`` 每步调用。
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents.middleware import ModelRequest
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from app.harness.steps.tool_safety import (
@@ -27,13 +26,6 @@ SLOTFLOW_DANGLING_TOOL_CALL_SOURCE = "slotflow_dangling_tool_call"
 class PendingToolCall:
     call_id: str
     name: str
-
-
-def repair_model_request(request: ModelRequest) -> ModelRequest:
-    repaired_messages = repair_dangling_tool_calls(request.messages)
-    if repaired_messages == request.messages:
-        return request
-    return request.override(messages=repaired_messages)
 
 
 def repair_dangling_tool_calls(messages: Sequence[AnyMessage]) -> list[AnyMessage]:

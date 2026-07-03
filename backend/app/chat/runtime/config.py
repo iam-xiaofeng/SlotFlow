@@ -149,14 +149,6 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE",
             default=True,
         ),
-        dangling_tool_call_enabled=load_bool_from_env(
-            "SLOTFLOW_DANGLING_TOOL_CALL_MIDDLEWARE",
-            default=True,
-        ),
-        tool_safety_enabled=load_bool_from_env(
-            "SLOTFLOW_TOOL_SAFETY_MIDDLEWARE",
-            default=True,
-        ),
         artifact_discovery_enabled=load_bool_from_env(
             "SLOTFLOW_ARTIFACT_DISCOVERY_MIDDLEWARE",
             default=True,

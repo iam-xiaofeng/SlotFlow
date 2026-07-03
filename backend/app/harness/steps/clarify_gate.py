@@ -1,8 +1,7 @@
 """Step: deterministic clarify gate for pro/ultra runs (first model step).
 
-Extracted from ``SlotFlowClarifyGateMiddleware``. The triage + interrupt + answer-injection
-logic lives here so a graph ``triage_gate`` node can call it directly. The thin middleware keeps
-the same ``abefore_model`` surface for backward-compatible tests.
+triage + interrupt + answer-injection 纯函数，由 graph 的 ``triage_gate`` 节点直接调用。
+HITL 暂停用 LangGraph 原生 ``interrupt()``；恢复经 ``Command(resume=...)``。
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from hashlib import sha256
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
 from app.chat.models import RunContext
@@ -242,7 +240,6 @@ def _clean(value: Any) -> str:
 
 
 __all__ = [
-    "GraphBubbleUp",
     "clarify_mode_enabled",
     "is_fresh_user_turn",
     "already_clarified",

@@ -20,7 +20,7 @@ from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.steps.long_term_memory import (
     append_memory_system_message,
     build_extraction_conversation,
-    build_turn_memory_content,
+    build_turn_memory_candidate,
     explicit_save_update,
     retrieve_memories,
 )
@@ -180,8 +180,8 @@ def test_append_memory_system_message_injects_capability_prompt_without_matches(
     assert "本轮没有检索到相关长期记忆" in system_content
 
 
-def test_build_turn_memory_content_ignores_generic_turns() -> None:
-    content = build_turn_memory_content(
+def test_build_turn_memory_candidate_ignores_generic_turns() -> None:
+    candidate = build_turn_memory_candidate(
         [
             HumanMessage(content="old"),
             AIMessage(content="old answer"),
@@ -190,30 +190,31 @@ def test_build_turn_memory_content_ignores_generic_turns() -> None:
         ]
     )
 
-    assert content is None
+    assert candidate is None
 
 
-def test_build_turn_memory_content_ignores_implicit_preference() -> None:
+def test_build_turn_memory_candidate_ignores_implicit_preference() -> None:
     # Implicit preferences are now handled by the background LLM extractor, not this sync path.
-    content = build_turn_memory_content(
+    candidate = build_turn_memory_candidate(
         [
             HumanMessage(content="我希望以后回答更简洁"),
             AIMessage(content="好的。"),
         ]
     )
 
-    assert content is None
+    assert candidate is None
 
 
-def test_build_turn_memory_content_extracts_explicit_remember() -> None:
-    content = build_turn_memory_content(
+def test_build_turn_memory_candidate_extracts_explicit_remember() -> None:
+    candidate = build_turn_memory_candidate(
         [
             HumanMessage(content="请记住我希望以后回答更简洁"),
             AIMessage(content="好的。"),
         ]
     )
 
-    assert content == "我希望以后回答更简洁"
+    assert candidate is not None
+    assert candidate.content == "我希望以后回答更简洁"
 
 
 def test_build_extraction_conversation_renders_latest_turn() -> None:

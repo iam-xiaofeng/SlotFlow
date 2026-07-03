@@ -163,7 +163,6 @@ def make_prepare_node(inputs: _GraphInputs):
                 skills_root=inputs.skills_root,
                 skills_config_store=inputs.skills_config_store,
                 finder=default_find_skills,
-                uses_default_finder=True,
             )
             if preflight is not None:
                 slotflow.update(preflight.get("slotflow") or {})
@@ -344,7 +343,6 @@ def make_summarization_node(inputs: _GraphInputs):
 
 def make_agent_node(inputs: _GraphInputs):
     bound_model = inputs.model.bind_tools(inputs.tools) if inputs.tools else inputs.model
-    base_system = SystemMessage(content=inputs.system_prompt)
 
     async def agent(
         state: SlotFlowAgentState,
@@ -353,8 +351,9 @@ def make_agent_node(inputs: _GraphInputs):
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
         system_text = state.get("system_prompt") or inputs.system_prompt
-        system_message = SystemMessage(content=system_text) if system_text else base_system
-        response = await bound_model.ainvoke([system_message, *messages], config)
+        response = await bound_model.ainvoke(
+            [SystemMessage(content=system_text), *messages], config
+        )
         response.name = "slotflow"
         return {"messages": [response]}
 
@@ -365,8 +364,9 @@ def make_agent_node(inputs: _GraphInputs):
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
         system_text = state.get("system_prompt") or inputs.system_prompt
-        system_message = SystemMessage(content=system_text) if system_text else base_system
-        response = bound_model.invoke([system_message, *messages], config)
+        response = bound_model.invoke(
+            [SystemMessage(content=system_text), *messages], config
+        )
         response.name = "slotflow"
         return {"messages": [response]}
 
@@ -542,7 +542,7 @@ def make_tools_node(tools: list[BaseTool]) -> ToolNode:
 
 def build_slotflow_graph(
     *,
-    model: str | BaseChatModel,
+    model: BaseChatModel,
     tools: list[BaseTool],
     system_prompt: str,
     run_context: RunContext,
