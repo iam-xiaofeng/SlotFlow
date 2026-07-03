@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import RemoveMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -235,16 +235,6 @@ def make_triage_gate_node(inputs: _GraphInputs):
 
 def make_pre_model_node(inputs: _GraphInputs):
     flags = inputs.config_flags
-    (
-        build_summarization_middleware(
-            inputs.model,
-            trigger_tokens=flags.summarization_trigger_tokens,
-            keep_messages=flags.summarization_keep_messages,
-            trim_tokens_to_summarize=flags.summarization_trim_tokens,
-        )
-        if flags.summarization_enabled
-        else None
-    )
 
     async def pre_model(
         state: SlotFlowAgentState,
@@ -258,12 +248,16 @@ def make_pre_model_node(inputs: _GraphInputs):
             reminder = todo_reminder_update(state=state)
             if reminder is not None:
                 updates["messages"] = reminder["messages"]
+                # The reminder must reach the model THIS step, so it belongs in the
+                # projection below too (the reducer append alone is invisible to `agent`
+                # whenever `llm_input_messages` is set).
+                messages = messages + list(reminder["messages"])
 
-        # dangling tool call repair (wrap_model_call) -> reflected in llm_input_messages
-        repaired = repair_dangling_tool_calls(messages)
-        if repaired != messages:
-            updates["llm_input_messages"] = repaired
-            messages = repaired
+        # Model-input projection (official pre_model_hook convention): recompute from the
+        # canonical `messages` on EVERY step. `llm_input_messages` is a plain last-write
+        # channel that `agent` prefers over `messages`; writing it only on some steps
+        # left a checkpointed stale snapshot that hid later tool results and user turns.
+        updates["llm_input_messages"] = repair_dangling_tool_calls(messages)
 
         # Compose the final system prompt for this step: base + memory section.
         system_sections: list[str] = [inputs.system_prompt]
@@ -330,7 +324,15 @@ def make_summarization_node(inputs: _GraphInputs):
         summarized = summary_update.get("messages")
         if summarized is None:
             return {}
-        return {"messages": summarized, "llm_input_messages": summarized}
+        # The middleware speaks the add_messages reducer protocol: its list starts with a
+        # RemoveMessage(REMOVE_ALL_MESSAGES) sentinel. Only the `messages` channel has that
+        # reducer. `llm_input_messages` is a plain channel fed verbatim to the model by
+        # `agent`, and provider payload conversion raises TypeError on RemoveMessage
+        # (verified on the OpenAI-compatible path, incl. DeepSeek) — so strip sentinels here.
+        model_input = [
+            message for message in summarized if not isinstance(message, RemoveMessage)
+        ]
+        return {"messages": summarized, "llm_input_messages": model_input}
 
     return summarize
 
