@@ -2,6 +2,12 @@
 
 Guidance for AI agents (and humans) working in the SlotFlow repository.
 
+> **🔄 2026-07-03 进行中(跨系统)**:Windows 侧 Claude 正基于对话 `13a9eb55` 的 subagent
+> 审计执行全库大扫除。审计结论与批次计划见
+> [`SUBAGENT_AUDIT_REPORT_20260703.md`](SUBAGENT_AUDIT_REPORT_20260703.md);
+> 实时进度与断点续传指引见
+> [`HANDOFF_CROSS_SESSION_20260703.md`](HANDOFF_CROSS_SESSION_20260703.md) — 若接手,先读后者。
+
 > **Rule: every code change must update this file in the same change.** If you touch
 > behavior, architecture, conventions, or commands, reflect it here so AGENTS.md stays an
 > accurate map of the repo. Keeping it current is part of "done", not an afterthought.
@@ -107,6 +113,8 @@ absorbs every provider/version quirk into clean `AgentEvent`s.
 ## Layout
 
 ```
+bootstrap.sh            first-run setup for Makefile prerequisites, uv, Node/pnpm, and deps
+Makefile                root developer commands (`verify`, `dev`, `kill`)
 backend/app/
   chat/                 chat API, Pydantic models, SQLite repository, run config, SSE
   chat/runtime/         per-run assembly: env · config · models · checkpointer · adapter
@@ -133,6 +141,13 @@ frontend/src/
 
 ## Key conventions & invariants
 
+- **First-run setup**: `./bootstrap.sh` is the root setup entry for machines that cannot yet run
+  `make`, `uv`, or frontend dependency commands. It installs/validates system Makefile
+  prerequisites (`make`, `curl`, `git`, Python/build tools, `fuser` via `psmisc` where available),
+  installs `uv`, installs Node plus the `packageManager` pnpm version from `frontend/package.json`
+  (Volta fallback for user-local Node), then runs `uv sync` in `backend/` and `pnpm install
+  --frozen-lockfile` in `frontend/`. Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package
+  installation when sudo/package-manager changes are not desired.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
