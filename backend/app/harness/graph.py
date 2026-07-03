@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import RemoveMessage, SystemMessage
@@ -28,7 +28,6 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolCallRequest
-from langgraph._internal._runnable import RunnableCallable
 from langgraph.runtime import Runtime
 
 from app.chat.models import RunContext
@@ -346,7 +345,6 @@ def make_agent_node(inputs: _GraphInputs):
 
     async def agent(
         state: SlotFlowAgentState,
-        runtime: Runtime[RunContext],
         config: RunnableConfig | None = None,
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
@@ -359,7 +357,6 @@ def make_agent_node(inputs: _GraphInputs):
 
     def agent_sync(
         state: SlotFlowAgentState,
-        runtime: Runtime[RunContext],
         config: RunnableConfig | None = None,
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
@@ -578,7 +575,7 @@ def build_slotflow_graph(
     graph.add_node("pre_model", make_pre_model_node(inputs))
     graph.add_node(SUMMARIZATION_NODE_NAME, make_summarization_node(inputs))
     agent_async, agent_sync = make_agent_node(inputs)
-    graph.add_node("agent", RunnableCallable(agent_sync, agent_async, name="agent"))
+    graph.add_node("agent", RunnableLambda(agent_sync, afunc=agent_async, name="agent"))
     graph.add_node("post_model", make_post_model_node(inputs))
     graph.add_node("tools", make_tools_node(tools))
     graph.add_node("finalize", make_finalize_node(inputs))
