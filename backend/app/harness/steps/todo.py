@@ -17,6 +17,7 @@ from langgraph.types import Command
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.harness.state import SlotFlowAgentState
+from app.harness.utils import message_content_text
 
 TODO_ENFORCER_MESSAGE_NAME = "slotflow_todo_enforcer"
 TODO_REMINDER_MESSAGE_NAME = "slotflow_todo_reminder"
@@ -296,9 +297,7 @@ def _all_todos_completed(todos: list[dict[str, Any]]) -> bool:
 def _latest_user_text(messages: list[Any]) -> str:
     for message in reversed(messages):
         if isinstance(message, HumanMessage) and getattr(message, "name", None) is None:
-            content = getattr(message, "content", "")
-            text = content if isinstance(content, str) else str(content)
-            return _strip_slotflow_injected_context(text)
+            return _strip_slotflow_injected_context(message_content_text(message.content))
     return ""
 
 

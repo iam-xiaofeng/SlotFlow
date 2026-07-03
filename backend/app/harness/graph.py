@@ -44,7 +44,6 @@ from app.harness.steps.clarify_gate import (
     clarify_mode_enabled,
     clarify_via_interrupt,
     is_fresh_user_turn,
-    latest_user_text,
     run_triage,
     should_skip_triage_model_call,
 )
@@ -74,6 +73,7 @@ from app.harness.steps.tool_safety import (
     build_unknown_tool_error_message,
 )
 from app.harness.steps.uploads import uploads_update
+from app.harness.utils import latest_user_message_text
 
 if TYPE_CHECKING:
     from langgraph.types import Checkpointer
@@ -215,7 +215,7 @@ def make_triage_gate_node(inputs: _GraphInputs):
             return {}
         if already_clarified(messages):
             return {}
-        if should_skip_triage_model_call(latest_user_text(messages)):
+        if should_skip_triage_model_call(latest_user_message_text(messages)):
             return {}
         triage = await run_triage(messages=messages, model=inputs.model)
         if triage is None:

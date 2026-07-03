@@ -60,7 +60,7 @@ def test_memory_store_canonicalizes_common_user_facts(tmp_path: Path) -> None:
 
     profile = store.add_memory(
         kind="profile",
-        content="中记住事实:我叫肖峰 控制工程硕士",
+        content="请在你的长期记忆中记住事实:我叫肖峰，职业是研究生，专业是控制工程",
     )
     preference = store.add_memory(
         kind="preference",
@@ -70,10 +70,16 @@ def test_memory_store_canonicalizes_common_user_facts(tmp_path: Path) -> None:
         kind="fact",
         content="再记住:农历9月30日是我的生日",
     )
+    # 只提及学历/专业词汇、没有显式"职业是/专业是"表述时，不再靠硬编码推断发明字段。
+    implicit = store.add_memory(
+        kind="profile",
+        content="控制工程硕士在读",
+    )
 
     assert profile.content == "用户的姓名是肖峰。用户的职业是研究生。用户的专业是控制工程。"
     assert preference.content == "用户的偏好是：以后回答更简洁。"
     assert birthday.content == "用户的生日是农历9月30日。"
+    assert implicit.content == "用户资料：控制工程硕士在读。"
 
 
 def test_memory_store_touches_existing_kind_content_instead_of_adding(tmp_path: Path) -> None:

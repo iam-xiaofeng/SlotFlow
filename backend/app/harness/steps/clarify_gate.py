@@ -19,6 +19,11 @@ from app.harness.clarification import (
     build_clarification_payload,
     clarification_answer_text,
 )
+from app.harness.utils import (
+    latest_user_message_text,
+    message_content_text,
+    message_role,
+)
 
 TriageFn = Callable[[str], dict[str, Any] | None]
 
@@ -93,7 +98,7 @@ def clarify_mode_enabled(mode: str | None) -> bool:
 def is_fresh_user_turn(messages: list[Any]) -> bool:
     if not messages:
         return False
-    return _is_human(messages[-1])
+    return message_role(messages[-1]) in ("user", "human")
 
 
 def already_clarified(messages: list[Any]) -> bool:
@@ -132,7 +137,7 @@ async def run_triage(
     model: Any = None,
     triage_fn: TriageFn | None = None,
 ) -> dict[str, Any] | None:
-    user_text = latest_user_text(messages)
+    user_text = latest_user_message_text(messages)
     if not user_text:
         return None
     if triage_fn is not None:
@@ -149,7 +154,7 @@ async def run_triage(
         )
     except Exception:  # noqa: BLE001 - triage failure must fail open
         return None
-    return parse_triage(_message_text(getattr(response, "content", "")))
+    return parse_triage(message_content_text(getattr(response, "content", "")))
 
 
 def clarify_via_interrupt(
@@ -193,34 +198,6 @@ def parse_triage(text: str) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def latest_user_text(messages: list[Any]) -> str:
-    for message in reversed(messages):
-        if _is_human(message):
-            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
-            return _message_text(content)
-    return ""
-
-
-def _is_human(message: Any) -> bool:
-    if isinstance(message, HumanMessage):
-        return True
-    return isinstance(message, dict) and message.get("role") in ("user", "human")
-
-
-def _message_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts)
-    return ""
-
-
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -246,6 +223,5 @@ __all__ = [
     "run_triage",
     "clarify_via_interrupt",
     "parse_triage",
-    "latest_user_text",
     "should_skip_triage_model_call",
 ]

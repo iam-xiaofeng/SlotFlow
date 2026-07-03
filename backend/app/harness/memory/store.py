@@ -342,9 +342,8 @@ def strip_memory_command_prefix(content: str) -> str:
         return ""
 
     prefixes = [
-        r"^(?:请)?(?:再)?(?:记住|保存到记忆|加入记忆|长期记忆|记录一下)[:：]?",
-        r"^(?:在)?(?:你的|用户的)?长期记忆中(?:记住|记录)?(?:事实|偏好|资料)?[:：]?",
-        r"^中(?:记住|记录)?(?:事实|偏好|资料)?[:：]?",
+        r"^(?:请)?(?:再)?(?:帮我)?(?:记住|保存到记忆|加入记忆|记录一下)[:：]?",
+        r"^(?:请)?(?:再)?(?:帮我)?(?:在)?(?:你的|用户的)?长期记忆(?:中|里)?(?:记住|记录)?(?:事实|偏好|资料)?[:：]?",
         r"^(?:事实|偏好|资料|近期|手动)[:：]",
     ]
     cleaned = compact
@@ -412,8 +411,6 @@ def canonicalize_profile_memory(content: str) -> str:
             r"(?:职业是|工作是|身份是|用户的职业是)([^，。；;、]{1,30})",
         ],
     )
-    if not profession and re.search(r"(研究生|硕士|博士)", content):
-        profession = "研究生"
     if profession:
         fields.append(f"用户的职业是{strip_subject_prefix(profession)}")
 
@@ -423,8 +420,6 @@ def canonicalize_profile_memory(content: str) -> str:
             r"(?:专业是|专业为|用户的专业是)([^，。；;、]{1,30})",
         ],
     )
-    if not major and "控制工程" in content:
-        major = "控制工程"
     if major:
         fields.append(f"用户的专业是{strip_subject_prefix(major)}")
 
@@ -530,11 +525,13 @@ def tokenize_memory_text(value: str) -> set[str]:
 def row_to_memory(row: sqlite3.Row) -> MemoryRecord:
     metadata = json.loads(row["metadata_json"] or "{}")
     kind = validate_memory_kind(row["kind"] or "manual")
+    # 规范化只发生在写入边界(add/update);读取返回存储原文,避免规则演进时
+    # 每次读取都用新规则改写旧数据的呈现。
     return MemoryRecord(
         id=row["id"],
         thread_id=row["thread_id"],
         kind=kind,
-        content=normalize_memory_content(row["content"], kind=kind),
+        content=row["content"],
         source_run_id=row["source_run_id"],
         metadata=metadata if isinstance(metadata, dict) else {},
         created_at=row["created_at"],

@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.state import SlotFlowAgentState
 from app.harness.tools.customization import find_relevant_skills
+from app.harness.utils import message_text
 
 SKILLS_PREFLIGHT_BLOCK_START = "<slotflow-skills-preflight>"
 SKILLS_PREFLIGHT_BLOCK_END = "</slotflow-skills-preflight>"
@@ -69,7 +70,7 @@ def skills_preflight_update(
     if not messages or not isinstance(messages[-1], HumanMessage):
         return None
     last_message = messages[-1]
-    user_text = _message_text(last_message.content)
+    user_text = message_text(last_message)
     if not should_run_preflight(user_text):
         return None
     if SKILLS_PREFLIGHT_BLOCK_START in user_text:
@@ -135,17 +136,3 @@ def format_preflight(result: dict[str, Any]) -> str:
         f"{json.dumps(result, ensure_ascii=False)}\n"
         f"{SKILLS_PREFLIGHT_BLOCK_END}"
     )
-
-
-def _message_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts)
-    return ""

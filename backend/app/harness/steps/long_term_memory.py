@@ -16,7 +16,8 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from app.chat.models import RunContext
 from app.harness.memory import MemoryKind, MemoryRecord, SlotFlowMemoryStore
 from app.harness.memory.extractor import SlotFlowMemoryExtractor
-from app.harness.utils import message_role
+from app.harness.memory.store import strip_memory_command_prefix
+from app.harness.utils import latest_user_message_text, message_role, message_text
 
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -40,7 +41,7 @@ def retrieve_memories(
     memory_store: SlotFlowMemoryStore,
     max_results: int = 5,
 ) -> list[MemoryRecord]:
-    query = latest_user_text(messages)
+    query = latest_user_message_text(messages)
     return memory_store.search_memories(
         query=query,
         thread_id=context.thread_id,
@@ -132,11 +133,20 @@ def build_extraction_conversation(messages: list[Any]) -> str:
 
 
 
+_EXPLICIT_MEMORY_TRIGGER_RE = re.compile(
+    # 完整吞掉"(请)(在)(你的)长期记忆(中/里)(记住/记录)(事实/偏好/资料)(:)"整个指令短语，
+    # 避免旧写法从"长期记忆"处截断、把残余的"中记住事实:"漏进记忆内容
+    # (下游曾为此打过 ^中 开头的补丁正则，根因在这里)。
+    r"(?:请)?(?:再)?(?:帮我)?(?:在)?(?:你的|用户的)?长期记忆(?:中|里)?(?:记住|记录)?(?:事实|偏好|资料)?[:：]?"
+    r"|(?:请)?(?:再)?(?:帮我)?(?:记住|保存到记忆|加入记忆|记录一下)[:：]?"
+)
+
+
 def extract_explicit_memory(text: str) -> MemoryCandidate | None:
-    match = re.search(r"(?:请)?(?:记住|保存到记忆|加入记忆|长期记忆[:：]?)(.*)", text)
+    match = _EXPLICIT_MEMORY_TRIGGER_RE.search(text)
     if match is None:
         return None
-    content = normalize_memory_sentence(match.group(1) or text)
+    content = normalize_memory_sentence(text[match.end():] or text)
     if not content:
         return None
     kind: MemoryKind = "fact"
@@ -150,7 +160,7 @@ def extract_explicit_memory(text: str) -> MemoryCandidate | None:
 
 
 def normalize_memory_sentence(text: str) -> str:
-    content = re.sub(r"^(请)?(记住|保存到记忆|加入记忆|长期记忆[:：]?)", "", text).strip(" ：:")
+    content = strip_memory_command_prefix(text)
     return content[:800].strip()
 
 
@@ -268,33 +278,6 @@ def parse_json_object(value: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def message_text(message: Any) -> str:
-    if isinstance(message, dict):
-        return content_to_text(message.get("content"))
-    return content_to_text(getattr(message, "content", ""))
-
-
-def content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(part.strip() for part in parts if part.strip())
-    return str(content).strip() if content is not None else ""
-
-
-def latest_user_text(messages: list[Any]) -> str:
-    index = latest_message_index(messages, roles={"user", "human"})
-    return message_text(messages[index]) if index is not None else ""
 
 
 def latest_message_index(messages: list[Any], *, roles: set[str]) -> int | None:

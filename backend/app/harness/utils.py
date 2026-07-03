@@ -55,3 +55,45 @@ def message_role(message: Any) -> str | None:
         return str(role) if role is not None else None
     role = getattr(message, "role", None) or getattr(message, "type", None)
     return str(role) if role is not None else None
+
+
+def message_text(message: Any) -> str:
+    """Best-effort 取一条消息（LangChain 对象或 dict）的纯文本内容。"""
+
+    if isinstance(message, dict):
+        return message_content_text(message.get("content"))
+    return message_content_text(getattr(message, "content", ""))
+
+
+def message_content_text(content: Any) -> str:
+    """把消息 content（str / content-block 列表 / dict）拍平成纯文本。
+
+    这是 harness 侧唯一的消息拍平实现（clarify_gate / skills_preflight /
+    long_term_memory / todo / title_generation 共用）。注意 SSE 投影层的
+    ``projections.normalize_message_content`` 语义不同（未知 dict 走 repr 兜底、
+    跳过 reasoning 块），面向前端展示，不要与本函数合并。
+    """
+
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text.strip()
+        nested = content.get("content")
+        if nested is not None:
+            return message_content_text(nested)
+        return ""
+    if isinstance(content, list):
+        parts = [message_content_text(item) for item in content]
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def latest_user_message_text(messages: list[Any]) -> str:
+    """取最近一条用户消息的纯文本；没有用户消息时返回空串。"""
+
+    for message in reversed(messages):
+        if message_role(message) in ("user", "human"):
+            return message_text(message)
+    return ""
