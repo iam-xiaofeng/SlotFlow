@@ -242,7 +242,7 @@ def test_summarization_projection_delta_is_filtered_by_langgraph_node() -> None:
     event = projection_item_to_agent_event(
         projection="messages",
         item=SimpleNamespace(
-            _node="SlotFlowSummarizationMiddleware.before_model",
+            _node="SlotFlowSummarizationMiddleware",
             content="Summary for next model call",
         ),
         bundle=_bundle(),
@@ -712,7 +712,7 @@ async def test_langgraph_event_adapter_drains_summarization_substream_without_le
             return iterator()
 
     class SummarizationSubstream:
-        _node = "SlotFlowSummarizationMiddleware.before_model"
+        _node = "SlotFlowSummarizationMiddleware"
 
         def __aiter__(self):
             async def iterator():

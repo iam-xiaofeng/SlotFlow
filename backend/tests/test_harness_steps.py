@@ -14,7 +14,7 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from app.chat.models import ChatStreamRequest, RunContext, UploadedFileContext
+from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
 from app.harness.features import features_from_run_context
 from app.harness.graph import route_after_model
@@ -56,19 +56,6 @@ from app.harness.steps.uploads import uploads_update
 def _bundle():
     request = ChatStreamRequest(message="解释 steps", mode="ultra", files=["upload_a"])
     return build_run_config(thread_id="thread_steps", run_id="run_steps", request=request)
-
-
-def _ctx(mode: str = "ultra") -> RunContext:
-    return RunContext(
-        thread_id="t",
-        run_id="r",
-        model_name="m",
-        mode=mode,
-        agent_name="slotflow",
-        thinking_enabled=True,
-        is_plan_mode=mode in ("pro", "ultra"),
-        subagent_enabled=mode == "ultra",
-    )
 
 
 # --- runtime summary --------------------------------------------------------

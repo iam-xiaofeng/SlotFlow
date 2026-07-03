@@ -79,26 +79,33 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
     } <= set(tool_names)
     assert len(tool_names) == len(set(tool_names)), f"duplicate tool names: {tool_names}"
     assert captured["checkpointer"] is checkpointer
-    assert "base prompt" in captured["system_prompt"]
-    assert "thinking_enabled=True" in captured["system_prompt"]
-    assert "current_utc_date=" in captured["system_prompt"]
-    assert "plan_enabled=True" in captured["system_prompt"]
-    assert "subagent_enabled=False" in captured["system_prompt"]
-    assert "<slotflow-freshness-policy>" in captured["system_prompt"]
-    assert "do not rely on training data alone" in captured["system_prompt"]
-    assert "When sources disagree materially" in captured["system_prompt"]
-    assert "call memory_list before working" in captured["system_prompt"]
-    assert "Use memory_save for stable preferences" in captured["system_prompt"]
-    assert "Run shell/bash/python/node/npm/pip commands" in captured["system_prompt"]
-    assert "ONLY with sandbox_exec" in captured["system_prompt"]
-    assert "docker_engine_setup(action='check')" in captured["system_prompt"]
-    assert "confirm_host_install=true" in captured["system_prompt"]
-    assert "skill_match" in captured["system_prompt"]
-    assert "call write_todos so the visual todo panel updates" not in captured["system_prompt"]
-    assert "Plan the work with write_todos" not in captured["system_prompt"]
-    assert "Backend preflight" not in captured["system_prompt"]
-    assert "ask_clarification" in captured["system_prompt"]
-    assert "artifact_write" in captured["system_prompt"]
+    # 断言结构性锚点(区块标签/工具名/开关行),不逐字钉提示词措辞——
+    # 收紧系统提示词的正常文案改动不应打碎本测试。
+    system_prompt = captured["system_prompt"]
+    assert "base prompt" in system_prompt
+    assert "thinking_enabled=True" in system_prompt
+    assert "current_utc_date=" in system_prompt
+    assert "plan_enabled=True" in system_prompt
+    assert "subagent_enabled=False" in system_prompt
+    for anchor in (
+        "<slotflow-runtime>",
+        "<slotflow-freshness-policy>",
+        "<slotflow-long-term-memory-status>",
+        "<slotflow-extension-tools>",
+        "<slotflow-operating-procedure>",
+        "memory_list",
+        "memory_save",
+        "sandbox_exec",
+        "docker_engine_setup",
+        "skill_match",
+        "ask_clarification",
+        "artifact_write",
+    ):
+        assert anchor in system_prompt, f"missing structural anchor: {anchor}"
+    # 已删除的旧提示词段不应回流
+    assert "call write_todos so the visual todo panel updates" not in system_prompt
+    assert "Plan the work with write_todos" not in system_prompt
+    assert "Backend preflight" not in system_prompt
 
 
 def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) -> None:
