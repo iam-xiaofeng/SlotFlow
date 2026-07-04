@@ -25,7 +25,9 @@ from app.chat.agent_adapter import (
     extract_message_delta_parts,
     flatten_message_projection_items,
     iter_projection_agent_events,
+    normalize_message_content,
     normalize_values_snapshot,
+    strip_slotflow_context_blocks,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
     tool_status_event_from_tool_call,
@@ -874,3 +876,30 @@ async def test_message_projection_flattening_preserves_parent_metadata() -> None
             {"metadata": {"lc_source": "summarization"}},
         )
     ]
+
+
+def test_normalize_message_content_reasoning_only_returns_empty() -> None:
+    """纯 reasoning 块消息的正文必须是空串——曾被 repr 成
+    \"[{type: reasoning, ...}]\" 直接当回复展示(2026-07-04 真机踩坑)。"""
+
+    content = [{"type": "reasoning", "reasoning": "内部思考过程", "index": 0}]
+
+    assert normalize_message_content(content) == ""
+
+
+def test_normalize_message_content_unknown_payload_never_reprs() -> None:
+    assert normalize_message_content({"weird": {"nested": 1}}) == ""
+    assert normalize_message_content(12345) == ""
+
+
+def test_normalize_message_content_strips_slotflow_context_blocks() -> None:
+    """模型复读的 <slotflow-*> 内部标签块不得进入用户可见正文。"""
+
+    text = (
+        "答案开头<slotflow-todo-reminder>\n内部提醒内容\n</slotflow-todo-reminder>答案结尾"
+    )
+
+    assert normalize_message_content(text) == "答案开头答案结尾"
+    assert strip_slotflow_context_blocks("<slotflow-runtime>x</slotflow-runtime>好") == "好"
+    assert strip_slotflow_context_blocks("无标签正文不受影响") == "无标签正文不受影响"
+    assert strip_slotflow_context_blocks("孤立标签<slotflow-todo-enforcer>也剥") == "孤立标签也剥"

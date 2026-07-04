@@ -31,6 +31,7 @@ import {
   getMessageFiles,
   displayFileName,
   isImageFile,
+  stripSlotflowBlocks,
   type MessageFile,
 } from "./chat-format";
 import { MarkdownContent } from "./markdown-content";
@@ -79,7 +80,8 @@ function MessageBubbleImpl({
 }) {
   const isUser = message.role === "user";
   const files = getMessageFiles(message);
-  const content = message.content;
+  // <slotflow-*> 是注入给模型的内部上下文协议;模型偶尔复读,渲染前一律剥离。
+  const content = isUser ? message.content : stripSlotflowBlocks(message.content);
   const clarification = getClarificationRequest(message);
   const assistantContent =
     isUser || clarification

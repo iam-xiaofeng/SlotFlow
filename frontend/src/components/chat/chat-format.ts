@@ -130,3 +130,14 @@ export function filterThreadArtifacts(
       messageText.includes(artifact.path.replace(/^artifacts\//, "")),
   );
 }
+
+const slotflowBlockPattern = /<slotflow-[a-z0-9-]+>[\s\S]*?<\/slotflow-[a-z0-9-]+>\s*/g;
+const slotflowTagPattern = /<\/?slotflow-[a-z0-9-]+>/g;
+
+/** 剥离模型复读出来的 SlotFlow 内部上下文标签块;它们绝不该出现在用户可见正文里。 */
+export function stripSlotflowBlocks(text: string): string {
+  if (!text.includes("<slotflow-") && !text.includes("</slotflow-")) {
+    return text;
+  }
+  return text.replace(slotflowBlockPattern, "").replace(slotflowTagPattern, "");
+}

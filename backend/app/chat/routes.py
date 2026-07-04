@@ -35,6 +35,7 @@ from app.chat.models import (
     UploadedFileContext,
 )
 from app.chat.model_catalog import discover_model_catalog
+from app.chat.agent_adapter import strip_slotflow_context_blocks
 from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotFoundError
 from app.chat.run_config import build_run_config, request_thinking_enabled
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
@@ -328,9 +329,9 @@ def select_assistant_content(
 ) -> str:
     """Choose persisted assistant content without letting short snapshots erase live text."""
 
-    streamed = streamed_content.strip()
+    streamed = strip_slotflow_context_blocks(streamed_content).strip()
     snapshot = (
-        snapshot_message_content.strip()
+        strip_slotflow_context_blocks(snapshot_message_content).strip()
         if isinstance(snapshot_message_content, str)
         else ""
     )

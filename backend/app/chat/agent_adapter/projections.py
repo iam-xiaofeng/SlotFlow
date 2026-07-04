@@ -9,6 +9,7 @@ content block、summarization 内部消息等差异都在这里被吸收，异�
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -533,29 +534,51 @@ def count_message_tool_calls(message: Any) -> int:
     return 0
 
 
+_SLOTFLOW_BLOCK_RE = re.compile(r"<slotflow-[a-z0-9-]+>[\s\S]*?</slotflow-[a-z0-9-]+>\s*")
+_SLOTFLOW_TAG_RE = re.compile(r"</?slotflow-[a-z0-9-]+>")
+
+
+def strip_slotflow_context_blocks(text: str) -> str:
+    """去掉泄漏进模型回复的 SlotFlow 内部上下文标签块。
+
+    <slotflow-todo-reminder> 等注入块是给模型看的内部协议;模型偶尔会在回复里
+    原样复读,这些内容绝不应出现在用户可见正文中(2026-07-04 真机实测踩坑)。
+    """
+
+    if "<slotflow-" not in text and "</slotflow-" not in text:
+        return text
+    cleaned = _SLOTFLOW_BLOCK_RE.sub("", text)
+    cleaned = _SLOTFLOW_TAG_RE.sub("", cleaned)
+    return cleaned
+
+
 def normalize_message_content(content: Any) -> str:
-    """把消息内容压成前端和 SSE 都容易消费的纯文本。"""
+    """把消息内容压成前端和 SSE 都容易消费的纯文本。
+
+    注意:本函数的输出是用户可见的正文通道,绝不允许 repr 兜底——
+    纯 reasoning 块的消息(模型把回答全部写进思考、正文为空)曾被
+    repr 成 "[{'type': 'reasoning', ...}]" 直接当回复展示(2026-07-04
+    真机实测踩坑)。抽不出文本就返回空串,reasoning 由专门的
+    reasoning_content 通道承载。
+    """
 
     if isinstance(content, str):
-        return content
+        return strip_slotflow_context_blocks(content)
 
     if isinstance(content, dict):
         text = content.get("text")
         if isinstance(text, str):
-            return text
+            return strip_slotflow_context_blocks(text)
         nested = content.get("content")
         if nested is not None:
             return normalize_message_content(nested)
-        return repr(to_jsonable(content))
+        return ""
 
     if isinstance(content, list):
         parts = [extract_text_block_text(item) for item in content]
-        text = "".join(part for part in parts if part)
-        if text:
-            return text
-        return repr(to_jsonable(content))
+        return strip_slotflow_context_blocks("".join(part for part in parts if part))
 
-    return repr(to_jsonable(content))
+    return ""
 
 
 def extract_text_block_text(item: Any) -> str:
