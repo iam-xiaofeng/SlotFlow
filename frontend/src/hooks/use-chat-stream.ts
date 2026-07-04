@@ -357,6 +357,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         };
 
         let discoveredArtifacts: WorkspaceEntryRecord[] = [];
+        let toolStatusVisible = false;
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
           signal: controller.signal,
         })) {
@@ -377,6 +378,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
               const channel = streamEvent.data.channel;
               if (channel === "reasoning") {
                 patchAssistant(assistantMessageId, { thinkingStarted: true });
+              } else if (toolStatusVisible) {
+                // 工具已执行完、模型恢复输出正文:清掉状态芯片,别让"running"一直挂着骗人。
+                toolStatusVisible = false;
+                patchAssistant(assistantMessageId, { toolStatus: undefined });
               }
               appendAssistantDelta(
                 assistantMessageId,
@@ -389,6 +394,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           if (streamEvent.event === "tool.status") {
             const toolStatus = parseToolStatus(streamEvent.data);
             if (toolStatus) {
+              toolStatusVisible = true;
               patchAssistant(assistantMessageId, {
                 compressionStarted: false,
                 toolStatus,

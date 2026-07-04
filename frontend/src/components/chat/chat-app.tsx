@@ -339,6 +339,7 @@ export function ChatApp() {
     if (loaded) {
       setAttachments([]);
       setQueuedMessages([]);
+      setSelectedArtifactPath(null);
       clearError();
     }
   }
@@ -347,6 +348,7 @@ export function ChatApp() {
     if (resetThread()) {
       setAttachments([]);
       setQueuedMessages([]);
+      setSelectedArtifactPath(null);
     }
   }
 
@@ -369,6 +371,7 @@ export function ChatApp() {
         resetThread();
         setAttachments([]);
         setQueuedMessages([]);
+        setSelectedArtifactPath(null);
       }
       setThreadArtifactPaths((current) => {
         if (!(targetThread.id in current)) {

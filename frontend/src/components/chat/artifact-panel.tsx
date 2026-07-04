@@ -55,7 +55,7 @@ export function ArtifactStage({
   if (!preview) {
     return (
       <div className="grid min-h-0 flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
-        点击产物文件开始浏览
+        从上方选择一个工作区文件开始浏览
       </div>
     );
   }

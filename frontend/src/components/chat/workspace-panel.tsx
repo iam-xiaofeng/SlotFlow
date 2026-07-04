@@ -157,15 +157,16 @@ export function WorkspacePanel({
     void selectFile(externalSelectedPath);
   }, [externalSelectedPath, open, selectFile, selectedPath]);
 
+  // 外部选中被清空(切换/新建对话)时,同步清掉面板内的选中与预览,
+  // 避免新对话里还看到上一个对话的产物。
   useEffect(() => {
-    if (!open || selectedPath || externalSelectedPath || !threads) {
+    if (externalSelectedPath) {
       return;
     }
-    const firstFile = threads.flatMap((item) => [...item.generated, ...item.uploads])[0];
-    if (firstFile?.kind === "file") {
-      void selectFile(firstFile.path);
-    }
-  }, [externalSelectedPath, open, selectFile, selectedPath, threads]);
+    setSelectedPath(null);
+    setPreview(null);
+    setPreviewError(null);
+  }, [externalSelectedPath]);
 
   function beginResize(event: PointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -234,7 +235,7 @@ export function WorkspacePanel({
         <span className="absolute left-1/2 top-1/2 h-16 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border opacity-0 shadow-sm transition-opacity group-hover/resize-handle:opacity-100" />
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-background shadow-lg">
+      <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-background shadow-sm">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-muted/40 px-2">
             {panelMode === "files" ? (
@@ -350,10 +351,12 @@ export function WorkspacePanel({
               <span className="sr-only">关闭工作区面板</span>
             </Button>
           </div>
-          <div className={cn("min-h-0 flex-1", panelMode !== "terminal" && "hidden")}>
+          {/* 两个内容区都必须自己是 flex 容器,否则内部 flex-1 失去高度约束:
+              文件预览无法滚动、终端只占一半,都是这一处的锅。 */}
+          <div className={cn("min-h-0 flex-1 flex-col", panelMode === "terminal" ? "flex" : "hidden")}>
             <TerminalView active={open && panelMode === "terminal"} terminal={terminal} />
           </div>
-          <div className={cn("min-h-0 flex-1", panelMode !== "files" && "hidden")}>
+          <div className={cn("min-h-0 flex-1 flex-col", panelMode === "files" ? "flex" : "hidden")}>
             <ArtifactStage
               preview={preview}
               previewError={previewError}
@@ -579,7 +582,7 @@ function TerminalView({ active, terminal }: { active: boolean; terminal: Termina
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#0b1020] text-slate-100">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/10 bg-black/20 px-3 text-xs text-slate-300">
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-white/10 bg-black/20 px-3 text-xs text-slate-400">
         <span
           className={cn(
             "size-2 rounded-full",
@@ -590,10 +593,16 @@ function TerminalView({ active, terminal }: { active: boolean; terminal: Termina
             status === "idle" && "bg-slate-500",
           )}
         />
-        <span className="font-medium">Host terminal</span>
-        <span className="min-w-0 flex-1 truncate" title={cwd || undefined}>
-          {cwd || (status === "idle" ? "未连接" : "连接中…")}
-        </span>
+        {status === "closed" || status === "error" ? (
+          <button
+            type="button"
+            className="rounded px-1.5 py-0.5 text-xs text-slate-300 hover:bg-white/10 hover:text-white"
+            onClick={reconnect}
+          >
+            重连
+          </button>
+        ) : null}
+        <span className="min-w-0 flex-1" title={cwd || undefined} />
         <Button
           type="button"
           variant="ghost"
@@ -623,14 +632,6 @@ function TerminalView({ active, terminal }: { active: boolean; terminal: Termina
         className="min-h-0 flex-1 overflow-hidden px-2 py-2"
         onClick={() => terminalElementRef.current?.focus()}
       />
-      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-t border-white/10 bg-black/25 px-3 text-xs text-slate-400">
-        <span>点击终端区域后直接输入；这是用户手动 Host terminal，不是 agent 工具。</span>
-        {status === "closed" || status === "error" ? (
-          <Button type="button" size="sm" variant="secondary" onClick={reconnect}>
-            重连
-          </Button>
-        ) : null}
-      </div>
     </div>
   );
 }

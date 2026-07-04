@@ -316,13 +316,38 @@ def test_sandbox_tool_call_becomes_tool_status_event() -> None:
     )
 
 
-def test_non_sandbox_tool_call_does_not_become_tool_status_event() -> None:
+def test_generic_tool_call_becomes_tool_status_event() -> None:
+    """所有普通工具执行都要对前端可见,否则用户只看到冻结的思考态。"""
+
     event = tool_status_event_from_tool_call(
-        {"name": "search", "args": {"query": "SlotFlow"}},
+        {"name": "artifact_write", "args": {"path": "hello.html"}},
         bundle=_bundle(),
     )
 
-    assert event is None
+    assert event is not None
+    assert event.event == "tool.status"
+    assert event.data["tool_name"] == "artifact_write"
+    assert event.data["phase"] == "running"
+    assert event.data["message"] == "正在写入产物文件"
+    assert event.data["command"] is None
+
+    unknown = tool_status_event_from_tool_call(
+        {"name": "some_mcp_tool", "args": {}},
+        bundle=_bundle(),
+    )
+    assert unknown is not None
+    assert unknown.data["message"] == "正在调用工具"
+
+
+def test_own_ui_tool_calls_do_not_become_tool_status_event() -> None:
+    """澄清与 todo 工具有专属 UI,不再叠加状态芯片。"""
+
+    for tool_name in ("ask_clarification", "write_todos"):
+        event = tool_status_event_from_tool_call(
+            {"name": tool_name, "args": {}},
+            bundle=_bundle(),
+        )
+        assert event is None, tool_name
 
 
 def test_normalize_values_snapshot_keeps_thread_and_run_identity() -> None:

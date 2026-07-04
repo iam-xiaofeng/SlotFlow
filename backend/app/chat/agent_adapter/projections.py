@@ -59,25 +59,47 @@ def projection_item_to_agent_event(
     return None
 
 
+_TOOL_STATUS_SKIP = {
+    # 这两个工具有自己的专属 UI(澄清选择卡片/todo 面板),再叠一个状态芯片是噪音。
+    "ask_clarification",
+    "write_todos",
+}
+
+_TOOL_STATUS_MESSAGES = {
+    "sandbox_exec": "正在初始化 Docker 沙箱并执行代码",
+    "artifact_write": "正在写入产物文件",
+    "workspace_read": "正在读取工作区文件",
+    "workspace_grep": "正在检索工作区",
+    "web_search": "正在搜索网页",
+    "web_fetch": "正在抓取网页",
+    "task_tool": "正在派发子任务",
+    "memory_save": "正在保存长期记忆",
+    "memory_list": "正在查询长期记忆",
+    "skill_match": "正在匹配技能",
+    "skill_install": "正在安装技能",
+}
+
+
 def tool_status_event_from_tool_call(
     item: Any,
     *,
     bundle: RunConfigBundle,
 ) -> AgentEvent | None:
-    """Create a visible long-running-tool status event from a tool-call projection.
+    """Create a visible tool status event from a tool-call projection.
 
     LangGraph v3 currently exposes model tool calls through the ``tool_calls`` projection,
     but custom ``get_stream_writer()`` payloads are not exposed as a projection channel.
-    For sandbox work this tool-call boundary is the earliest stable point where the UI can
-    show "Docker is starting / code is running" before the ToolNode blocks on Docker.
+    The tool-call boundary is the earliest stable point where the UI can show what the
+    agent is doing — without this, every tool run (artifact_write / web_search / ...)
+    is invisible and the user only sees a frozen "thinking" indicator.
     """
 
     tool_call = normalize_mapping(item)
     tool_name = extract_tool_call_name(tool_call)
-    if tool_name != "sandbox_exec":
+    if tool_name is None or tool_name in _TOOL_STATUS_SKIP:
         return None
 
-    command = extract_sandbox_command(tool_call)
+    command = extract_sandbox_command(tool_call) if tool_name == "sandbox_exec" else None
     return AgentEvent(
         event="tool.status",
         data={
@@ -85,7 +107,7 @@ def tool_status_event_from_tool_call(
             "run_id": bundle.context.run_id,
             "tool_name": tool_name,
             "phase": "running",
-            "message": "正在初始化 Docker 沙箱并执行代码",
+            "message": _TOOL_STATUS_MESSAGES.get(tool_name, "正在调用工具"),
             "command": truncate_status_text(command, 240) if command else None,
             "source": "slotflow_tool_call_projection",
         },
