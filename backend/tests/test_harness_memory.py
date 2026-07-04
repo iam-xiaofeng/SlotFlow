@@ -15,7 +15,11 @@ from app.chat.runtime import SlotFlowRuntimeConfig
 from app.harness.builder import build_slotflow_harness_graph
 from app.harness.config import SlotFlowHarnessConfig
 from app.harness.memory import SlotFlowMemoryStore
-from app.harness.memory.extractor import SlotFlowMemoryExtractor, parse_extracted_facts
+from app.harness.memory.extractor import (
+    SlotFlowMemoryExtractor,
+    looks_like_assistant_instruction,
+    parse_extracted_facts,
+)
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.steps.long_term_memory import (
     aexplicit_save_update,
@@ -250,6 +254,30 @@ def test_build_turn_memory_candidate_extracts_explicit_remember() -> None:
 
     assert candidate is not None
     assert candidate.content == "我希望以后回答更简洁"
+
+
+def test_looks_like_assistant_instruction_marks_tool_directives() -> None:
+    """提及内部工具名/助手指令的内容不是用户事实,混入记忆会跨对话串台。"""
+
+    assert looks_like_assistant_instruction("用户要求必须使用 sandbox_exec 执行代码。")
+    assert looks_like_assistant_instruction("不要使用工具，用一句中文短句回答：你好。")
+    assert looks_like_assistant_instruction("用 write_todos 直接在界面展示任务。")
+    assert not looks_like_assistant_instruction("用户偏好简洁的中文回答。")
+    assert not looks_like_assistant_instruction("用户的研究方向是小目标检测与跟踪。")
+
+
+@pytest.mark.asyncio
+async def test_extractor_drops_tool_directive_memories() -> None:
+    model = FakeListChatModel(
+        responses=[
+            '[{"kind": "preference", "content": "用户要求必须使用 sandbox_exec 执行代码。"},'
+            ' {"kind": "preference", "content": "用户偏好简洁的中文回答。"}]'
+        ]
+    )
+
+    facts = await SlotFlowMemoryExtractor(model).aextract("User: 测试")
+
+    assert [fact["content"] for fact in facts] == ["用户偏好简洁的中文回答。"]
 
 
 def test_build_extraction_conversation_renders_latest_turn() -> None:

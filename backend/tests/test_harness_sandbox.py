@@ -304,13 +304,15 @@ def test_harness_builder_passes_sandbox_config_to_tool_registry(
 
 
 def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
-    """Docker 容器懒加载；uploads/skills 只读，当前 thread artifacts/work 可写回本地。"""
+    """容器懒加载为持久具名容器(无 --rm);uploads/skills 只读,artifacts/work 可写。"""
 
     FakeTimer.instances = []
     calls: list[list[str]] = []
 
     def fake_runner(args, **kwargs):
         calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
         if args[:2] == ["docker", "run"]:
             return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
         if args[:2] == ["docker", "exec"]:
@@ -339,12 +341,19 @@ def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     assert sandbox.started is True
-    assert calls[0][:2] == ["docker", "run"]
-    assert calls[1][:2] == ["docker", "exec"]
+    assert calls[0][:2] == ["docker", "inspect"]
+    assert calls[1][:2] == ["docker", "run"]
+    assert calls[2][:2] == ["docker", "exec"]
     assert result["idle_timeout_seconds"] == 42
     assert FakeTimer.instances[-1].interval == 42
     assert FakeTimer.instances[-1].started is True
-    run_command = calls[0]
+    run_command = calls[1]
+    # 持久容器:具名、不 --rm、常驻 sleep infinity
+    assert "--name" in run_command
+    assert sandbox.container_name in run_command
+    assert sandbox.container_name.startswith("slotflow-sandbox-")
+    assert "--rm" not in run_command
+    assert run_command[-2:] == ["sleep", "infinity"]
     assert "--init" in run_command
     assert "--network" in run_command
     assert "bridge" in run_command
@@ -360,23 +369,41 @@ def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
     assert any("/workspace/skills" in mount and "readonly=true" in mount for mount in mounts)
     assert any("/workspace/artifacts" in mount and "readonly" not in mount for mount in mounts)
     assert any("/workspace/work" in mount and "readonly" not in mount for mount in mounts)
+    # exec 以线程隔离的工作目录运行,容器按名字引用
+    exec_command = calls[2]
+    assert "/workspace/work/thread-1" in exec_command
+    assert sandbox.container_name in exec_command
     assert (root / "artifacts" / "thread-1").is_dir()
     assert (root / ".sandbox" / "thread-1").is_dir()
 
 
-def test_lazy_docker_sandbox_closes_after_idle_timeout(tmp_path: Path) -> None:
+def test_lazy_docker_sandbox_stops_after_idle_and_restarts_same_container(tmp_path: Path) -> None:
+    """空闲只 stop 不 rm;再次使用 docker start 同一容器,内容(已装依赖)保留。"""
+
     FakeTimer.instances = []
     calls: list[list[str]] = []
+    container_exists = {"value": False}
+    container_running = {"value": False}
 
     def fake_runner(args, **kwargs):
         calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            if not container_exists["value"]:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
+            running = "true" if container_running["value"] else "false"
+            return subprocess.CompletedProcess(args, 0, stdout=f"{running}\n", stderr="")
         if args[:2] == ["docker", "run"]:
-            container_number = sum(1 for call in calls if call[:2] == ["docker", "run"])
-            return subprocess.CompletedProcess(args, 0, stdout=f"container{container_number}\n", stderr="")
+            container_exists["value"] = True
+            container_running["value"] = True
+            return subprocess.CompletedProcess(args, 0, stdout="container1\n", stderr="")
+        if args[:2] == ["docker", "start"]:
+            container_running["value"] = True
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "stop"]:
+            container_running["value"] = False
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if args[:2] == ["docker", "exec"]:
             return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
-        if args[:3] == ["docker", "rm", "-f"]:
-            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     sandbox = LazyDockerSandbox(
@@ -396,12 +423,15 @@ def test_lazy_docker_sandbox_closes_after_idle_timeout(tmp_path: Path) -> None:
     first_timer.fire()
 
     assert sandbox.started is False
-    assert ["docker", "rm", "-f", "container1"] in calls
+    assert ["docker", "stop", sandbox.container_name] in calls
+    assert not any(call[:2] == ["docker", "rm"] for call in calls)
 
     assert sandbox.exec("python -V")["ok"] is True
 
     run_calls = [call for call in calls if call[:2] == ["docker", "run"]]
-    assert len(run_calls) == 2
+    start_calls = [call for call in calls if call[:2] == ["docker", "start"]]
+    assert len(run_calls) == 1, "同一容器只应创建一次"
+    assert len(start_calls) == 1, "空闲停止后应 start 复用,而不是重建"
 
 
 def test_sandbox_exec_tool_is_disabled_by_config(tmp_path: Path) -> None:
@@ -530,6 +560,8 @@ def test_lazy_docker_sandbox_uses_no_network_when_disabled(tmp_path: Path) -> No
 
     def fake_runner(args, **kwargs):
         calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
         if args[:2] == ["docker", "run"]:
             return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
         if args[:2] == ["docker", "exec"]:
@@ -546,7 +578,8 @@ def test_lazy_docker_sandbox_uses_no_network_when_disabled(tmp_path: Path) -> No
 
     sandbox.exec("python -V")
 
-    assert "none" in calls[0]
+    run_command = next(call for call in calls if call[:2] == ["docker", "run"])
+    assert "none" in run_command
 
 
 def test_sandbox_exec_tool_returns_structured_error_without_docker(
@@ -580,6 +613,14 @@ def test_lazy_docker_sandbox_runs_real_container_when_docker_is_available(tmp_pa
 
     if shutil.which("docker") is None:
         pytest.skip("Docker CLI is not installed in this environment")
+    daemon_probe = subprocess.run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if daemon_probe.returncode != 0:
+        pytest.skip("Docker daemon is not reachable in this environment")
 
     sandbox = LazyDockerSandbox(
         config=SlotFlowSandboxConfig(
@@ -596,6 +637,13 @@ def test_lazy_docker_sandbox_runs_real_container_when_docker_is_available(tmp_pa
         )
     finally:
         sandbox.close()
+        # 测试用 tmp workspace 的容器名是一次性的,测试后彻底清掉,不留垃圾容器。
+        subprocess.run(
+            ["docker", "rm", "-f", sandbox.container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     assert result["ok"] is True, result
     assert "Python 3.12" in result["stdout"]

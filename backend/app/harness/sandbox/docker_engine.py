@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,23 @@ Which = Callable[[str], str | None]
 
 SUPPORTED_INSTALL_MANAGERS = {"apt", "dnf", "pacman"}
 
+# 依次尝试的守护进程启动方式:systemd 主机 → sysvinit 包装 → 无 init 管理的
+# WSL 等环境直接后台拉起 dockerd。全部 `sudo -n` 非交互,失败即跳下一种。
+_DAEMON_START_COMMANDS: list[tuple[str, list[str]]] = [
+    ("systemctl", ["sudo", "-n", "systemctl", "start", "docker"]),
+    ("service", ["sudo", "-n", "service", "docker", "start"]),
+    (
+        "dockerd",
+        [
+            "sudo",
+            "-n",
+            "sh",
+            "-c",
+            "nohup dockerd > /var/log/slotflow-dockerd.log 2>&1 &",
+        ],
+    ),
+]
+
 
 @dataclass(slots=True)
 class DockerEngineSetup:
@@ -29,6 +47,7 @@ class DockerEngineSetup:
     runner: Runner = subprocess.run
     which: Which = shutil.which
     os_release_path: Path = Path("/etc/os-release")
+    sleep: Callable[[float], None] = time.sleep
 
     def run(
         self,
@@ -39,6 +58,8 @@ class DockerEngineSetup:
         normalized = action.strip().lower()
         if normalized == "check":
             return self.check()
+        if normalized == "start":
+            return self.ensure_daemon()
         if normalized == "install_script":
             return self.install_script()
         if normalized == "install":
@@ -46,7 +67,7 @@ class DockerEngineSetup:
         return {
             "ok": False,
             "error": f"unsupported action: {action!r}",
-            "allowed_actions": ["check", "install_script", "install"],
+            "allowed_actions": ["check", "start", "install_script", "install"],
             "source": "slotflow_docker_engine_setup",
         }
 
@@ -63,20 +84,28 @@ class DockerEngineSetup:
                 "host": host,
                 "source": "slotflow_docker_engine_setup",
             }
-        result = self.runner(
-            ["docker", "info", "--format", "{{.ServerVersion}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode == 0:
+        server_version = self._server_version()
+        if server_version is not None:
             return {
                 "ok": True,
                 "installed": True,
                 "daemon_running": True,
                 "docker_path": docker_path,
-                "server_version": result.stdout.strip(),
+                "server_version": server_version,
+                "host": host,
+                "source": "slotflow_docker_engine_setup",
+            }
+        # 已安装但守护进程没起(WSL 无 systemd 的典型死角):自动尝试拉起,
+        # 不再把"跑一条 systemctl"甩给用户。
+        started = self.ensure_daemon()
+        if started.get("ok"):
+            return {
+                "ok": True,
+                "installed": True,
+                "daemon_running": True,
+                "daemon_autostarted_via": started.get("method"),
+                "docker_path": docker_path,
+                "server_version": self._server_version(),
                 "host": host,
                 "source": "slotflow_docker_engine_setup",
             }
@@ -85,11 +114,96 @@ class DockerEngineSetup:
             "installed": True,
             "daemon_running": False,
             "docker_path": docker_path,
-            "error": _truncate_text(result.stderr or result.stdout, 4000),
-            "hint": "Docker CLI exists, but the daemon is not reachable. Start Docker with `sudo systemctl enable --now docker` or restart Docker Desktop.",
+            "error": started.get("error") or "docker daemon is not reachable",
+            "autostart_attempts": started.get("attempts"),
+            "hint": "Docker CLI exists but the daemon could not be started automatically. Check `sudo dockerd` output or restart Docker Desktop.",
             "host": host,
             "source": "slotflow_docker_engine_setup",
         }
+
+    def ensure_daemon(self) -> dict[str, Any]:
+        """确保 dockerd 可达;不可达时按三级回退自动拉起并轮询等待。"""
+
+        if self._daemon_reachable():
+            return {
+                "ok": True,
+                "already_running": True,
+                "source": "slotflow_docker_engine_setup",
+            }
+        if self.which("docker") is None:
+            return {
+                "ok": False,
+                "error": "docker_cli_missing",
+                "source": "slotflow_docker_engine_setup",
+            }
+
+        attempts: list[dict[str, Any]] = []
+        for method, command in _DAEMON_START_COMMANDS:
+            try:
+                result = self.runner(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                attempts.append({"method": method, "error": str(exc)})
+                continue
+            attempts.append(
+                {
+                    "method": method,
+                    "returncode": result.returncode,
+                    "stderr": _truncate_text(result.stderr, 500),
+                }
+            )
+            # 启动命令本身成功与否都轮询一下:dockerd 分支即使命令返回也需等待就绪。
+            if self._wait_for_daemon(seconds=12):
+                return {
+                    "ok": True,
+                    "method": method,
+                    "attempts": attempts,
+                    "source": "slotflow_docker_engine_setup",
+                }
+        return {
+            "ok": False,
+            "error": "failed to start docker daemon automatically",
+            "attempts": attempts,
+            "source": "slotflow_docker_engine_setup",
+        }
+
+    def _daemon_reachable(self) -> bool:
+        try:
+            result = self.runner(
+                ["docker", "info", "--format", "{{.ServerVersion}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    def _wait_for_daemon(self, *, seconds: int) -> bool:
+        for _ in range(max(1, seconds)):
+            if self._daemon_reachable():
+                return True
+            self.sleep(1)
+        return False
+
+    def _server_version(self) -> str | None:
+        try:
+            result = self.runner(
+                ["docker", "info", "--format", "{{.ServerVersion}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
 
     def install_script(self) -> dict[str, Any]:
         host = self.host_info()

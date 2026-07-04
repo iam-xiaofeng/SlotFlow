@@ -71,7 +71,10 @@ def build_sandbox_tools(
         """Check or install the host Docker Engine needed by sandbox_exec.
 
         This is a controlled host setup tool, not a shell. Use action="check"
-        when sandbox_exec reports Docker is unavailable. Use action="install_script"
+        when sandbox_exec reports Docker is unavailable — check now also tries to
+        AUTO-START an installed-but-stopped daemon (systemctl/service/dockerd via
+        non-interactive sudo), so a stopped daemon usually self-heals here.
+        Use action="start" to only start the daemon. Use action="install_script"
         to return the exact manual install script for the detected Linux host. Use action="install"
         only after the user explicitly asks to install Docker Engine; it runs a fixed
         package-manager install flow for supported Linux hosts and works only when
