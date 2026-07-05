@@ -1,8 +1,14 @@
 # 跨系统交接与进度日志(HANDOFF)
 
-> **本文件用途**:Windows 侧的 Claude Code(Fable 5)正通过 `wsl.exe` 跨系统在本仓库干活。
-> 若该对话意外中断,在 WSL 里启动 claude 并把本文件给它,它即可从"下一步"继续,无需重建上下文。
-> **维护规则**:每完成一步操作,立即更新本文件的"操作日志"与"下一步"。
+> **当前状态(2026-07-04):全部工作完成,等待用户人工验证前端;验证通过后由用户
+> 放行提 PR(分支 cleanup/audit-20260703,基于 refactor/langgraph-node-edge-graph)。**
+> 最终交付:`docs/cleanup-2026-07-03-report.md`(改动+问题总览)、
+> `docs/api-call-chains.md`(API 链路)、`HARNESS_NOTES.md` §32(工程细节)、
+> `SUBAGENT_AUDIT_REPORT_20260703.md`(审计原始报告)。
+> 最终验证:make verify 全绿(321 passed+前端编译);真机探针 46/46
+> (`cd backend && uv run uvicorn app.main:app --env-file ./.env --port 8010` 后
+> `uv run python ../scratch/harness/probe_full_chain.py --base http://127.0.0.1:8010`)。
+> **⚠️ 多个 Claude 会话不可同时写本仓库(踩踏事故见 HARNESS_NOTES §32.7)。**
 
 ---
 

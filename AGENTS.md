@@ -2,11 +2,16 @@
 
 Guidance for AI agents (and humans) working in the SlotFlow repository.
 
-> **🔄 2026-07-03 进行中(跨系统)**:Windows 侧 Claude 正基于对话 `13a9eb55` 的 subagent
-> 审计执行全库大扫除。审计结论与批次计划见
-> [`SUBAGENT_AUDIT_REPORT_20260703.md`](SUBAGENT_AUDIT_REPORT_20260703.md);
-> 实时进度与断点续传指引见
-> [`HANDOFF_CROSS_SESSION_20260703.md`](HANDOFF_CROSS_SESSION_20260703.md) — 若接手,先读后者。
+> **✅ 2026-07-04 大扫除完成,等待人工验证后提 PR**(分支 `cleanup/audit-20260703`)。
+> 改动与问题总览:[`docs/cleanup-2026-07-03-report.md`](docs/cleanup-2026-07-03-report.md);
+> API 调用链路:[`docs/api-call-chains.md`](docs/api-call-chains.md);
+> 工程细节:`HARNESS_NOTES.md` §32;断点续传:
+> [`HANDOFF_CROSS_SESSION_20260703.md`](HANDOFF_CROSS_SESSION_20260703.md)。
+> 行为要点:摘要哨兵/输入冻结两个 P0 已修;tool.status 现挂消息子流 tool_calls 投影
+> (所有工具执行前端可见);记忆保存由 LLM 唯一改写(store 只做卫生);Docker 沙箱为
+> **持久具名共享容器**(空闲只停不删,线程目录隔离),守护进程可自动拉起。
+> **⚠️ 多个 Claude 会话不可同时写本仓库**(踩踏事故见 HARNESS_NOTES §32.7)。
+
 
 > **Rule: every code change must update this file in the same change.** If you touch
 > behavior, architecture, conventions, or commands, reflect it here so AGENTS.md stays an

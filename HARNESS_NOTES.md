@@ -1715,3 +1715,95 @@ SlotFlow 之前只有 agent 工具和产物预览：
 - `tests/test_terminal.py::test_terminal_helpers_resolve_cwd_and_shell_command` 覆盖 cwd/shell helper。
 - `tests/test_terminal.py::test_terminal_input_message_writes_to_fd` 覆盖 input 消息写入 fd。
 - `tests/test_terminal.py::test_terminal_websocket_sends_ready_event` 覆盖 FastAPI WebSocket ready 事件。
+
+## 32. 迭代 24(2026-07-03~04):审计驱动的全库大扫除+真机链路验证
+
+> 背景:对话 13a9eb55 派出的 4 个审计 subagent 多数死于 429,其发现由跨系统会话
+> 从过程记录法证式重建为 `SUBAGENT_AUDIT_REPORT_20260703.md`,随后按批次实施。
+> 本节按"问题→机制→修法→验证"记录 harness 相关的全部变更。进度与断点见
+> `HANDOFF_CROSS_SESSION_20260703.md`。
+
+### 32.1 P0×2:摘要哨兵泄漏 + llm_input_messages 冻结(e0b1c55)
+
+- **机制1**:summarize 节点把官方 SummarizationMiddleware 返回的
+  `[RemoveMessage(REMOVE_ALL_MESSAGES), *summary, *preserved]` 原样写进
+  `llm_input_messages`。该哨兵协议只有 `messages` 通道的 add_messages reducer 懂;
+  `llm_input_messages` 是普通 last-write 通道,agent 节点原样喂模型 →
+  OpenAI 兼容序列化(含 DeepSeek)遇 RemoveMessage 抛 TypeError,摘要一触发即崩。
+  离线测试全用 fake model 不做消息格式转换,所以从未暴露。
+- **机制2**:`llm_input_messages` 只在 dangling 修复/摘要触发时偶发写入,无人清理,
+  且被 checkpoint 持久化;一旦置位,agent 永远读旧快照,新工具结果与新用户消息
+  全部对模型隐身(官方 pre_model_hook 约定是每步发射,这里只偶发写)。
+- **修法**:pre_model 每步从 messages 重算投影(todo 提醒同帧并入);summarize
+  写 llm_input_messages 前剥离哨兵。回归测试 2 例,先对修复前代码验证为红。
+
+### 32.2 记忆链路 LLM 化(d6c1056 + 0e216d4 增强)
+
+- 决策(用户委托):前置澄清已是小模型(run_triage),正则只作省调用快通道——保持;
+  检索不加阻塞式前置判定(为省几百 token 注入多花一次首 token 前 LLM 调用不划算),
+  保持"top-5 相关记忆注入 + memory_list/search 工具自取";保存侧 LLM 是唯一语义
+  改写者。
+- store 删除整个正则语义改写层(约120行:字段化/强加前缀/抢主语/抽生日)——它们会把
+  memory_save 工具与后台抽取器里 LLM 已写好的内容再揉一遍("用户是控制工程硕士"
+  被揉成"用户资料:是控制工程硕士。")。normalize 收窄为剥指令前缀+压空白+补句号+限长。
+- 显式"请记住X":正则只负责探测显式指令,内容交小模型改写(可拆多条,首条携带
+  source_run_id 去重键);模型不可用回退存剥前缀原文,显式请求绝不丢失;显式保存
+  发生时跳过同轮后台抽取防近似重复。真机验证:extraction=llm_rewrite,
+  "请记住:我喜欢简洁的中文回答。"→"用户喜欢简洁的中文回答。"
+- (并行会话增强)抽取提示词禁止保存"对助手的指令/内部工具名",后置
+  _INSTRUCTION_MARKERS 硬过滤,防测试指令串台进长期记忆。
+
+### 32.3 tool.status 的 live 真相(ed39d9b + 08679ae)
+
+- 探针发现 artifact_write 执行对前端完全隐形;推广 tool_status_event_from_tool_call
+  到全部工具后 live 依旧为零 → 逐层排查:**v3 顶层 run_stream.tool_calls 投影通道
+  在 live 从不产出**(既往 sandbox_exec 的"Docker 启动中"提示在 live 也从未真正
+  出现过;单测走的是注入该通道的假流)。
+- 修法:工具调用的 live 唯一来源是每条消息的 `.tool_calls` 子投影
+  (AsyncChatModelStream typed projection)。typed_message_delta_channels 增加第三路泵,
+  messages 分支拦截合成 tool.status;ToolCallChunk 逐分片产出(一次调用几十片),
+  按"每条消息每工具名一次"去重;ask_clarification/write_todos 有专属 UI 跳过。
+  顶层通道分支保留兼容测试注入。
+- FE 配套:工具后正文恢复流式时清除滞留 running 芯片(此前会挂到 run 结束)。
+
+### 32.4 Docker 沙箱:本机根因与持久容器重设计(0e216d4 + 环境)
+
+- **用户实测"agent 硬是用不了 docker 也装不了"的根因链**:本 WSL 无 systemd
+  (PID1 非 systemd)→ docker.service enabled 但永远没人拉起 → check 提示
+  `sudo systemctl enable --now docker` 在此环境死路 → install 流程同样卡在
+  systemctl 步骤;外加 Docker Hub 直连超时(网络),镜像也拉不动。
+- **代码**:DockerEngineSetup 新增 ensure_daemon()(systemctl→service→直接
+  `sudo -n nohup dockerd` 三级回退+就绪轮询),check 在"已装未跑"时自动尝试拉起,
+  新增 action="start";LazyDockerSandbox 重写为**持久具名共享容器**
+  `slotflow-sandbox-<workspace哈希>`:无 --rm、sleep infinity、空闲只 stop 不 rm
+  (内容/已装依赖跨对话保留,磁盘最省),stopped→docker start 秒级复用,
+  守护进程不可达时先 ensure_daemon 再重试一次;线程隔离:exec 锁定
+  `-w /workspace/work/<thread>` 并注入 HOME 与 SLOTFLOW_THREAD_ARTIFACTS,
+  防对话串台(用户确认目录级隔离足够)。
+- **环境(本机一次性)**:/etc/wsl.conf 启用 [boot] systemd=true(重启后守护进程
+  自启);/etc/docker/daemon.json 配置三个国内 registry mirror;python:3.12 预拉取。
+- 真机:真实容器测试通过;探针沙箱轮 `python -c "print(6*7)"` → 42 回传 ✓。
+
+### 32.5 流式正文两处真机踩坑(a008ca3,WSL 会话)
+
+- 纯 reasoning 消息(模型把回答全写进思考、正文为空)曾被 repr 成
+  `[{type: reasoning, ...}]` 直接当回复展示 → normalize_message_content
+  的正文通道禁止 repr 兜底,抽不出文本返回空串。
+- `<slotflow-todo-reminder>` 等内部注入块被模型复读进回复 →
+  strip_slotflow_context_blocks 在正文通道剥内部标签块(routes 持久化侧同剥)。
+
+### 32.6 真机探针方法论(scratch/harness/probe_full_chain.py)
+
+- 模拟前端每步:目录→建线程→SSE 逐帧(事件名契约/唯一 run.finished/finished 后
+  无事件/prepared 最前)→流式与落库一致性(前缀关系)→思考不漏正文→标题→多轮
+  可见上一轮→显式记忆(llm_rewrite)→artifact 工具链(文件落盘+可读)→沙箱
+  (容器执行回传)→澄清门(触发/选项/选择后完成)。**46/46 全 PASS**。
+- 已知误报陷阱:workspace 列表接口是逐层目录需下钻;模型目录按 providers[].models。
+
+### 32.7 并行会话事故与规约
+
+- WSL 侧续起的会话(6c2f006b)与 Windows 会话同时写同一棵树:它把对方未提交的
+  沙箱改动连同自己的增强提交(0e216d4/a008ca3),随后另一方基于陈旧内容的写入
+  又踩掉其增强;靠 `git checkout HEAD -- <files>` + 关键符号核验恢复共存。
+- **规约:同一时间只允许一个会话写这棵树**;交接一律经
+  HANDOFF_CROSS_SESSION_*.md,接手前先 `git log` 对时间线。
