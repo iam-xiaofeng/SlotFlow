@@ -150,9 +150,14 @@ frontend/src/
   `make`, `uv`, or frontend dependency commands. It installs/validates system Makefile
   prerequisites (`make`, `curl`, `git`, Python/build tools, `fuser` via `psmisc` where available),
   installs `uv`, installs Node plus the `packageManager` pnpm version from `frontend/package.json`
-  (Volta fallback for user-local Node), then runs `uv sync` in `backend/` and `pnpm install
-  --frozen-lockfile` in `frontend/`. Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package
-  installation when sudo/package-manager changes are not desired.
+  (Volta fallback for user-local Node), runs `uv sync` in `backend/` and `pnpm install
+  --frozen-lockfile` in `frontend/`, then prepares the **Docker sandbox** end to end:
+  installs Docker Engine if missing, adds the user to the `docker` group, enables systemd in
+  `/etc/wsl.conf` on WSL hosts without it, starts the daemon (systemctl → service → direct
+  `dockerd` fallback, mirroring `docker_engine.py::ensure_daemon`), falls back to CN registry
+  mirrors only when a direct Docker Hub pull times out, and pre-pulls the sandbox image
+  (`SLOTFLOW_DOCKER_IMAGE`, default `python:3.12`). Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip
+  OS package installation and `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic

@@ -8,6 +8,10 @@ FRONTEND_DIR="$ROOT_DIR/frontend"
 NODE_VERSION="${SLOTFLOW_NODE_VERSION:-22}"
 PNPM_VERSION="${SLOTFLOW_PNPM_VERSION:-}"
 SKIP_SYSTEM_PACKAGES="${SLOTFLOW_SKIP_SYSTEM_PACKAGES:-0}"
+SKIP_DOCKER="${SLOTFLOW_SKIP_DOCKER:-0}"
+DOCKER_IMAGE="${SLOTFLOW_DOCKER_IMAGE:-python:3.12}"
+# 空格分隔的 registry mirror 列表;默认仅在直连 Docker Hub 拉取失败时才写入这组国内源。
+DOCKER_REGISTRY_MIRRORS="${SLOTFLOW_DOCKER_REGISTRY_MIRRORS:-https://docker.1ms.run https://docker.m.daocloud.io https://dockerproxy.net}"
 
 log() {
   printf '\033[1;34m[slotflow-bootstrap]\033[0m %s\n' "$*"
@@ -258,6 +262,133 @@ install_frontend_dependencies() {
   fi
 }
 
+# --- Docker 沙箱(sandbox_exec 的底层执行环境) --------------------------------
+
+docker_daemon_reachable() {
+  run_as_root docker info --format '{{.ServerVersion}}' >/dev/null 2>&1
+}
+
+start_docker_daemon() {
+  if docker_daemon_reachable; then
+    return 0
+  fi
+  # 与 app/harness/sandbox/docker_engine.py::ensure_daemon 相同的三级回退:
+  # systemd 主机 → sysvinit 包装 → 无 init 管理(典型 WSL)直接后台拉起 dockerd。
+  run_as_root systemctl start docker >/dev/null 2>&1 || true
+  docker_daemon_reachable && return 0
+  run_as_root service docker start >/dev/null 2>&1 || true
+  docker_daemon_reachable && return 0
+  run_as_root sh -c 'nohup dockerd > /var/log/slotflow-dockerd.log 2>&1 &' || true
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    docker_daemon_reachable && return 0
+    sleep 1
+  done
+  return 1
+}
+
+write_docker_registry_mirrors() {
+  if [ -f /etc/docker/daemon.json ]; then
+    warn "/etc/docker/daemon.json already exists; not overwriting. Add registry-mirrors manually if pulls keep timing out."
+    return 1
+  fi
+  log "Configuring Docker registry mirrors (direct pull from Docker Hub failed)..."
+  local mirrors_json=""
+  local mirror
+  for mirror in $DOCKER_REGISTRY_MIRRORS; do
+    mirrors_json="${mirrors_json:+$mirrors_json, }\"$mirror\""
+  done
+  run_as_root mkdir -p /etc/docker
+  printf '{\n  "registry-mirrors": [%s]\n}\n' "$mirrors_json" \
+    | run_as_root tee /etc/docker/daemon.json >/dev/null
+  # 重启守护进程使镜像源生效
+  run_as_root systemctl restart docker >/dev/null 2>&1 \
+    || run_as_root service docker restart >/dev/null 2>&1 \
+    || { run_as_root pkill dockerd >/dev/null 2>&1 || true; sleep 2; start_docker_daemon; }
+}
+
+enable_wsl_systemd() {
+  # WSL 且 PID1 非 systemd:启用 [boot] systemd=true,下次 wsl --shutdown 后
+  # docker.service 随发行版自启,不再依赖手动拉起。
+  if ! grep -qi microsoft /proc/version 2>/dev/null; then
+    return
+  fi
+  if [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ]; then
+    return
+  fi
+  if run_as_root grep -q '^\[boot\]' /etc/wsl.conf 2>/dev/null; then
+    return
+  fi
+  log "Enabling systemd in /etc/wsl.conf (takes effect after 'wsl --shutdown')..."
+  printf '\n[boot]\nsystemd=true\n' | run_as_root tee -a /etc/wsl.conf >/dev/null
+}
+
+install_docker_cli() {
+  if has_cmd docker; then
+    log "Docker CLI already installed: $(docker --version 2>/dev/null || echo docker)"
+    return
+  fi
+  if [ "$SKIP_SYSTEM_PACKAGES" = "1" ]; then
+    warn "Docker CLI missing but SLOTFLOW_SKIP_SYSTEM_PACKAGES=1; skipping install. sandbox_exec will not work."
+    return 1
+  fi
+  if has_cmd apt-get; then
+    log "Installing Docker Engine with apt-get..."
+    run_as_root apt-get update
+    run_as_root apt-get install -y docker.io docker-compose-v2
+  elif has_cmd dnf; then
+    log "Installing Docker Engine with dnf..."
+    run_as_root dnf install -y moby-engine docker-compose-plugin
+  elif has_cmd pacman; then
+    log "Installing Docker Engine with pacman..."
+    run_as_root pacman -Sy --needed --noconfirm docker docker-compose
+  else
+    warn "No supported package manager for automatic Docker install. Install Docker Engine manually; sandbox_exec needs it."
+    return 1
+  fi
+}
+
+setup_docker_sandbox() {
+  if [ "$SKIP_DOCKER" = "1" ]; then
+    warn "Skipping Docker sandbox setup because SLOTFLOW_SKIP_DOCKER=1."
+    return
+  fi
+
+  install_docker_cli || return 0
+  has_cmd docker || return 0
+
+  # 当前用户加入 docker 组(重新登录后免 sudo 使用;本脚本内经 root 通道操作不受影响)
+  if [ "$(id -u)" -ne 0 ] && ! id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    run_as_root usermod -aG docker "$USER" >/dev/null 2>&1 \
+      && warn "Added $USER to the docker group; log out and back in for non-sudo docker." \
+      || true
+  fi
+
+  enable_wsl_systemd
+
+  if ! start_docker_daemon; then
+    warn "Docker daemon could not be started automatically. Check /var/log/slotflow-dockerd.log; sandbox_exec will retry at runtime."
+    return
+  fi
+  log "Docker daemon is running."
+
+  if run_as_root docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+    log "Sandbox image $DOCKER_IMAGE already present."
+    return
+  fi
+
+  log "Pre-pulling sandbox image $DOCKER_IMAGE (first pull may take a few minutes)..."
+  if run_as_root docker pull "$DOCKER_IMAGE"; then
+    log "Sandbox image ready."
+    return
+  fi
+  if write_docker_registry_mirrors && start_docker_daemon && run_as_root docker pull "$DOCKER_IMAGE"; then
+    log "Sandbox image ready (via registry mirrors)."
+    return
+  fi
+  warn "Could not pre-pull $DOCKER_IMAGE. sandbox_exec will pull on first use; configure registry mirrors or a proxy if pulls keep failing."
+}
+
 print_next_steps() {
   cat <<EOF
 
@@ -267,6 +398,12 @@ You can now run:
   make verify
   make dev
   make kill
+
+Docker sandbox (sandbox_exec):
+  - image: $DOCKER_IMAGE (pre-pulled when possible); persistent container is created on first use
+  - if this is WSL and systemd was just enabled, run 'wsl --shutdown' once from Windows so the
+    Docker daemon auto-starts on boot (until then SlotFlow starts it on demand)
+  - skip all Docker setup with SLOTFLOW_SKIP_DOCKER=1
 
 If this shell still cannot find uv/pnpm after the script exits, start a new terminal or run:
   export PATH="\$HOME/.local/bin:\$HOME/.volta/bin:\$PATH"
@@ -281,6 +418,7 @@ main() {
   install_node_and_pnpm
   install_backend_dependencies
   install_frontend_dependencies
+  setup_docker_sandbox
   print_next_steps
 }
 
