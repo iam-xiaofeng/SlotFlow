@@ -248,7 +248,25 @@ async def main() -> int:
             ok_read = read.status_code == 200 and "SlotFlow" in (read.json().get("content") or "")
             check(ok_read, "产物轮: 文件可读且内容正确", str(read.status_code))
 
-        # 7) 澄清门(ultra 模式、短且欠指定的创作请求)
+        # 7) 沙箱工具链(真实 Docker:守护进程自动拉起+持久容器+线程隔离)
+        sbx_thread = (await client.post("/api/chat/threads", json={"title": "probe 沙箱"})).json()
+        events_sbx = await sse_run(
+            client,
+            sbx_thread["id"],
+            "请用 sandbox_exec 工具运行这条命令并把输出原样告诉我: python -c \"print(6*7)\"",
+            model_name=model_name,
+            timeout=420.0,
+        )
+        validate_common_stream("沙箱轮", events_sbx)
+        sbx_tools = [
+            e["data"].get("tool_name")
+            for e in events_sbx
+            if e["event"] == "tool.status"
+        ]
+        check("sandbox_exec" in sbx_tools, "沙箱轮: sandbox_exec 的 tool.status 可见", str(sbx_tools))
+        check("42" in streamed_content(events_sbx), "沙箱轮: 容器执行结果正确回传", streamed_content(events_sbx)[:120])
+
+        # 8) 澄清门(ultra 模式、短且欠指定的创作请求)
         if not args.skip_clarify:
             cl_thread = (await client.post("/api/chat/threads", json={"title": "probe 澄清"})).json()
             events5 = await sse_run(

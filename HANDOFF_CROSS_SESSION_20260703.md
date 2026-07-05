@@ -32,33 +32,36 @@
 
 ## 操作日志(倒序)
 
-- [x] **审计报告已落盘:`SUBAGENT_AUDIT_REPORT_20260703.md`**(P0 bug×2 / 后端死码与假开关 /
-      langchain 内置映射 / 前端死码与终端不可达根源 / 测试套件问题 / 8 批次执行计划)
-- [x] 榨取主会话中期综合:协调者已亲手验证两个 graph.py P0 bug(RemoveMessage 哨兵崩溃、
-      llm_input_messages 被 checkpoint 冻结);确认分支 refactor/langgraph-node-edge-graph、make verify
-- [x] 通读全部证据:langchain 完整报告 + 后端/前端/测试三份蒸馏摘要
-- [x] 蒸馏五份子代理记录→ /tmp/subagent_digests/
-- [x] 核查今晨会话:b5080cab 全 429 零产出、6c2f006b 为副本零写入 → 无重复劳动风险
-- [x] 发现仅 ae5e6eb0 有完整最终报告,其余三大审计死于 429、需从过程记录重建
-- [x] 建立本交接文件;AGENTS.md 顶部已加指向
-- [x] 解析主会话 302 行:任务原文、429 中断史、用户反复要求"先出子代理存档"
+- [x] **⚠️ 并行会话调和(2026-07-04)**:发现 WSL 侧续起的会话(6c2f006b)与本会话
+  同时在改同一棵树——它把本会话未提交的沙箱改动连同它自己的增强一起提交为
+  0e216d4(沙箱持久容器+守护进程自动拉起+线程目录隔离+记忆抽取防指令串台),
+  又提交 a008ca3(修 reasoning repr 泄漏为正文+slotflow 内部标签漏进回复,
+  连带 routes/adapter/chat-format);本会话后续的陈旧写入一度踩掉其增强,
+  已用 `git checkout HEAD` 恢复五个代码文件,双方成果现已全部共存
+  (核验:_TOOL_STATUS_MESSAGES/strip_slotflow_context_blocks/_INSTRUCTION_MARKERS/
+  container_name/shimmer 全在)。**接手者注意:同一时间只允许一个会话写这棵树!**
+- [x] **Docker 环境根治(本机)**:根因=WSL 无 systemd,dockerd 从未被拉起,
+  agent 卡死在"已装但不可达";网络直连 Docker Hub 超时导致镜像拉不动。
+  已做:/etc/wsl.conf 启用 [boot] systemd=true(下次 WSL 重启后自启);
+  /etc/docker/daemon.json 配三个国内镜像源;手动拉起 dockerd 验证 OK;
+  python:3.12 镜像已拉取;真实容器测试通过
+- [x] **调和后全绿**:321 passed(含真实容器用例)/ ruff clean / typecheck+build 绿
+- [x] **ed39d9b**:前端修三个实测bug(面板 flex 断裂致预览不可滚+终端半高、
+  新对话见旧产物、终端外壳精简)+工具执行可见化(tool.status 推广到全部工具)
+- [x] 批次5 012a06e / RunnableLambda 2f64a44 / 批次4 d6c1056 / 批次3 651d462 /
+  批次2 27b9206 / 批次1 e0b1c55 / 批次6 e406f2f / 文档 63b8f31
 
-## 下一步(=报告 §6 批次,当前:批次 0)
+## ⚠️ 收尾流程(用户要求)
 
-0. **[进行中]** 重跑 pytest 基线 `cd backend && uv run pytest -q -k "not live"`,结果记录到此处
-1. 修两个 P0 bug + 回归测试 → commit `fix(harness): …`
-2. 死代码/假开关/遗留分支/docstring 群改 → commit `chore(backend): …`
-3. 文本拍平五合一 + 记忆库去硬编码(连带测试重写)→ commit `refactor(backend): …`
-4. 内置替换(RunnableLambda / ToolNode error handling / 官方 write_todos+text别名)→ commit
-5. 前端:死码删除 + 右侧面板常驻开关空态终端 + 命名/跨线程确认 → commit(门:typecheck+build)
-6. 测试整备:conftest 收敛 / 删重复用例 / 修脆弱断言 → commit
-7. 链路探针脚本 + 两份最终文档(改动总结 / API 调用链路)→ commit(门:make verify)
-8. 从 refactor/langgraph-node-edge-graph 切分支提 PR
+**全部做完后不要提 PR、不要结束对话**:用 AskUserQuestion 中断等用户手动验证前端;
+验证通过用户会让提 PR,有问题继续修。**并行的 WSL 会话请用户先停掉再继续任何一边。**
 
-⚠️ 实施注意(报告内 ❓ 项,动手前先核):hasTodoListForCurrentRunRef 是否真无引用;
-parseTodos 的 text 兜底删除前确认事件流已归一;test_agent_adapter 的
-"SlotFlowSummarizationMiddleware.before_model" 节点名与 graph 实际名对照;
-test_harness_steps._ctx 未用(别删成 test_clarify_gate 的同名)。
+## 下一步
+
+7. 重启 uvicorn(调和后代码)复跑探针(期望 39/39,artifact_write 有 tool.status)
+   +新增沙箱 live 用例;补 HARNESS_NOTES §15;产出 改动总结.md+API调用链路.md;
+   AGENTS.md 按仓库铁规同步(沙箱行为/记忆链路);make verify → commit
+8. AskUserQuestion 中断等人工验证 →(放行后)提 PR
 
 ## 环境备忘
 
