@@ -1,6 +1,14 @@
 "use client";
 
-import { LoaderCircle } from "lucide-react";
+import {
+  FileArchive,
+  FileSpreadsheet,
+  FileText,
+  FileWarning,
+  LoaderCircle,
+  Presentation,
+  Workflow,
+} from "lucide-react";
 
 import {
   type WorkspaceReadRecord,
@@ -13,10 +21,14 @@ import { formatFileSize } from "./chat-format";
 
 export type ArtifactViewMode = "code" | "preview";
 type ArtifactPreviewType = {
+  hasTextContent: boolean;
   isHtml: boolean;
   isImage: boolean;
+  isDiagram: boolean;
   isMarkdown: boolean;
+  isOfficeLike: boolean;
   isPdf: boolean;
+  isSourceText: boolean;
   canSwitchView: boolean;
 };
 
@@ -61,9 +73,18 @@ export function ArtifactStage({
   }
 
   const rawUrl = resolveArtifactRawUrl(preview.path);
-  const { isHtml, isImage, isMarkdown, isPdf } = getArtifactPreviewType(preview);
+  const previewType = getArtifactPreviewType(preview);
+  const {
+    hasTextContent,
+    isHtml,
+    isImage,
+    isDiagram,
+    isMarkdown,
+    isOfficeLike,
+    isPdf,
+  } = previewType;
 
-  if ((isHtml || isMarkdown) && viewMode === "code") {
+  if (viewMode === "code" && hasTextContent) {
     return <CodePreview preview={preview} />;
   }
 
@@ -100,11 +121,11 @@ export function ArtifactStage({
 
   if (isImage) {
     return (
-      <div className="grid min-h-0 flex-1 place-items-center overflow-auto p-3">
+      <div className="grid min-h-0 flex-1 place-items-center overflow-auto bg-[radial-gradient(circle_at_1px_1px,var(--border)_1px,transparent_0)] bg-[length:18px_18px] p-3">
         <img
           src={rawUrl}
           alt={preview.path.replace(/^artifacts\//, "")}
-          className="max-h-full max-w-full rounded-md border object-contain"
+          className="max-h-full max-w-full rounded-md border bg-background object-contain shadow-sm"
         />
       </div>
     );
@@ -124,6 +145,14 @@ export function ArtifactStage({
         )}
       </div>
     );
+  }
+
+  if (isOfficeLike || isDiagram) {
+    return <StructuredFilePreview preview={preview} />;
+  }
+
+  if (preview.kind === "binary") {
+    return <FileDetailPreview preview={preview} />;
   }
 
   return <CodePreview preview={preview} />;
@@ -151,18 +180,169 @@ function CodePreview({ preview }: { preview: WorkspaceReadRecord }) {
   );
 }
 
+function StructuredFilePreview({ preview }: { preview: WorkspaceReadRecord }) {
+  const title = structuredPreviewTitle(preview);
+  const Icon = structuredPreviewIcon(preview);
+  const metadataEntries = Object.entries(preview.metadata ?? {}).filter(
+    ([, value]) => value !== null && value !== undefined && value !== "",
+  );
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-muted/15">
+      <div className="shrink-0 border-b bg-background/85 px-4 py-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="grid size-10 shrink-0 place-items-center rounded-md border bg-muted/40 text-muted-foreground">
+            <Icon className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h2 className="truncate text-sm font-semibold">{title}</h2>
+              <span className="rounded-md border bg-background px-1.5 py-0.5 text-[11px] uppercase text-muted-foreground">
+                {formatFileSize(preview.size_bytes)}
+              </span>
+            </div>
+            <p className="mt-1 truncate text-xs text-muted-foreground" title={preview.path}>
+              {preview.path}
+            </p>
+          </div>
+        </div>
+        {metadataEntries.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {metadataEntries.slice(0, 8).map(([key, value]) => (
+              <span
+                key={key}
+                className="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground"
+              >
+                {key}: {metadataValueLabel(value)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {preview.warning ? (
+          <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-800 dark:text-amber-200">
+            <FileWarning className="mt-0.5 size-4 shrink-0" />
+            <span>{preview.warning}</span>
+          </div>
+        ) : null}
+      </div>
+      {preview.content?.trim() ? (
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5">
+          {preview.content}
+        </pre>
+      ) : (
+        <div className="grid min-h-0 flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
+          未提取到可预览文本，可使用打开或下载查看原文件。
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileDetailPreview({ preview }: { preview: WorkspaceReadRecord }) {
+  const metadataEntries = Object.entries(preview.metadata ?? {}).filter(
+    ([, value]) => value !== null && value !== undefined && value !== "",
+  );
+
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-muted/15 p-5">
+      <div className="w-full max-w-md rounded-lg border bg-background p-4 shadow-sm">
+        <div className="flex items-start gap-3">
+          <span className="grid size-10 shrink-0 place-items-center rounded-md border bg-muted/40 text-muted-foreground">
+            <FileArchive className="size-5" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold" title={preview.path}>
+              {preview.path.replace(/^artifacts\//, "")}
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {preview.media_type} · {formatFileSize(preview.size_bytes)}
+            </p>
+          </div>
+        </div>
+        {preview.warning ? (
+          <div className="mt-4 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-800 dark:text-amber-200">
+            {preview.warning}
+          </div>
+        ) : null}
+        {metadataEntries.length > 0 ? (
+          <dl className="mt-4 grid gap-2 text-xs">
+            {metadataEntries.map(([key, value]) => (
+              <div key={key} className="flex min-w-0 items-center justify-between gap-3">
+                <dt className="shrink-0 text-muted-foreground">{key}</dt>
+                <dd className="min-w-0 truncate font-mono">{metadataValueLabel(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function getArtifactPreviewType(preview: WorkspaceReadRecord): ArtifactPreviewType {
   const path = preview.path;
   const mediaType = preview.media_type;
+  const hasTextContent = Boolean(preview.content?.trim());
   const isHtml = mediaType.includes("html") || /\.html?$/i.test(path);
   const isMarkdown = mediaType.includes("markdown") || /\.(md|markdown)$/i.test(path);
+  const isDiagram = preview.kind === "diagram" || /\.(drawio)$/i.test(path);
+  const isOfficeLike =
+    preview.kind === "document" ||
+    preview.kind === "spreadsheet" ||
+    preview.kind === "presentation";
+  const isSourceText =
+    preview.kind === "text" ||
+    /\.(css|csv|graphql|jsx?|json|log|mjs|sql|toml|tsx?|ya?ml)$/i.test(path);
+  const isImage = preview.kind === "image" || /\.(png|jpe?g|gif|webp|svg)$/i.test(path);
   return {
+    hasTextContent,
     isHtml,
     isMarkdown,
-    isImage: preview.kind === "image" || /\.(png|jpe?g|gif|webp)$/i.test(path),
+    isDiagram,
+    isOfficeLike,
+    isImage,
     isPdf: preview.kind === "pdf" || /\.pdf$/i.test(path),
-    canSwitchView: isHtml || isMarkdown,
+    isSourceText,
+    canSwitchView:
+      hasTextContent &&
+      (isHtml || isMarkdown || isDiagram || isOfficeLike || isImage),
   };
+}
+
+function structuredPreviewTitle(preview: WorkspaceReadRecord): string {
+  if (preview.kind === "spreadsheet") {
+    return "Spreadsheet Preview";
+  }
+  if (preview.kind === "presentation") {
+    return "Presentation Preview";
+  }
+  if (preview.kind === "diagram") {
+    return "Diagram Source";
+  }
+  return "Document Preview";
+}
+
+function structuredPreviewIcon(preview: WorkspaceReadRecord) {
+  if (preview.kind === "spreadsheet") {
+    return FileSpreadsheet;
+  }
+  if (preview.kind === "presentation") {
+    return Presentation;
+  }
+  if (preview.kind === "diagram") {
+    return Workflow;
+  }
+  return FileText;
+}
+
+function metadataValueLabel(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.join(", ");
+  }
+  if (typeof value === "object" && value !== null) {
+    return JSON.stringify(value);
+  }
+  return String(value);
 }
 
 function buildHtmlPreviewDocument(content: string, rawUrl: string): string {

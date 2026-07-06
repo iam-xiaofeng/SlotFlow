@@ -120,7 +120,10 @@ function MessageBubbleImpl({
   return (
     <article
       ref={userMessageRef}
-      className={cn("group/message flex", isUser ? "justify-end" : "justify-start")}
+      className={cn(
+        "slotflow-rise-in group/message flex",
+        isUser ? "justify-end" : "justify-start",
+      )}
     >
       <div
         className={cn(
@@ -142,7 +145,9 @@ function MessageBubbleImpl({
           <div
             className={cn(
               "min-w-0 break-words",
-              isUser ? "rounded-2xl bg-muted px-4 py-2.5" : "w-full",
+              isUser
+                ? "rounded-xl border border-border/60 bg-background/88 px-4 py-2.5 shadow-sm backdrop-blur"
+                : "w-full",
             )}
           >
             {isUser ? (
@@ -418,7 +423,7 @@ function ContextCompressingIndicator() {
 function ToolStatusIndicator({ status }: { status: ChatToolStatus }) {
   const label = status.toolName === "sandbox_exec" ? "沙箱" : status.toolName;
   return (
-    <div className="mb-4 rounded-lg border border-border/70 bg-muted/35 px-3 py-2.5 text-sm text-muted-foreground">
+    <div className="slotflow-rise-in mb-4 rounded-lg border border-border/70 bg-background/85 px-3 py-2.5 text-sm text-muted-foreground shadow-sm backdrop-blur">
       <div className="flex min-w-0 items-center gap-2">
         <Terminal className="size-4 shrink-0" />
         <span className="shrink-0 font-medium text-foreground">{label}</span>
@@ -479,7 +484,7 @@ function ClarificationRequestPanel({
   }, [clarification, disabled, onSelect]);
 
   return (
-    <div className="max-w-3xl rounded-lg border bg-background p-4 shadow-sm">
+    <div className="slotflow-rise-in max-w-3xl rounded-lg border bg-background/95 p-4 shadow-sm backdrop-blur">
       {clarification.context ? (
         <p className="mb-2 text-sm leading-6 text-muted-foreground">
           {clarification.context}
@@ -816,7 +821,7 @@ function AssistantThinkingSummary({
 
   return (
     <details
-      className="group/thinking mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground"
+      className="group/thinking slotflow-rise-in mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background/88 text-sm text-muted-foreground shadow-sm backdrop-blur"
       open
     >
       <summary className="flex h-9 cursor-pointer list-none items-center gap-2 px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
@@ -897,7 +902,7 @@ function MessageAttachments({ files }: { files: MessageFile[] }) {
       {files.map((file) => (
         <div
           key={file.id}
-          className="flex max-w-72 items-center gap-3 rounded-lg border border-border bg-card px-2 py-2 text-left shadow-sm"
+          className="slotflow-hover-lift flex max-w-72 items-center gap-3 rounded-lg border border-border bg-card/90 px-2 py-2 text-left shadow-sm"
         >
           {isImageFile(file) ? (
             <img

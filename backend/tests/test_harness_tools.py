@@ -122,6 +122,7 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
         "ask_clarification",
         "artifact_write",
         "sandbox_exec",
+        "sandbox_artifact_copy",
         "web_search",
         "skill_match",
         "search_skill_repos",
@@ -176,7 +177,17 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
     root.mkdir()
     create_docx(root / "note.docx", "Docx hello")
     create_docx(root / "docx", "No suffix docx hello")
+    create_xlsx(root / "table.xlsx")
+    create_xlsx(root / "spreadsheet")
+    create_pptx(root / "slides.pptx")
     create_blank_pdf(root / "blank.pdf")
+    (root / "component.tsx").write_text("export function App() { return <div />; }\n", encoding="utf-8")
+    (root / "flow.drawio").write_text(
+        '<mxfile><diagram name="Page-1"><mxGraphModel /></diagram></mxfile>',
+        encoding="utf-8",
+    )
+    (root / "legacy.xls").write_bytes(b"\xd0\xcf\x11\xe0legacy spreadsheet")
+    (root / "legacy.ppt").write_bytes(b"\xd0\xcf\x11\xe0legacy presentation")
     (root / "photo.jpg").write_bytes(tiny_jpeg_bytes(width=2, height=1))
     tools = {
         item.name: item
@@ -185,6 +196,13 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
 
     docx = json.loads(tools["workspace_read"].invoke({"path": "note.docx"}))
     no_suffix_docx = json.loads(tools["workspace_read"].invoke({"path": "docx"}))
+    xlsx = json.loads(tools["workspace_read"].invoke({"path": "table.xlsx"}))
+    no_suffix_xlsx = json.loads(tools["workspace_read"].invoke({"path": "spreadsheet"}))
+    pptx = json.loads(tools["workspace_read"].invoke({"path": "slides.pptx"}))
+    tsx = json.loads(tools["workspace_read"].invoke({"path": "component.tsx"}))
+    drawio = json.loads(tools["workspace_read"].invoke({"path": "flow.drawio"}))
+    legacy_xls = json.loads(tools["workspace_read"].invoke({"path": "legacy.xls"}))
+    legacy_ppt = json.loads(tools["workspace_read"].invoke({"path": "legacy.ppt"}))
     pdf = json.loads(tools["workspace_read"].invoke({"path": "blank.pdf"}))
     image = json.loads(tools["workspace_read"].invoke({"path": "photo.jpg"}))
 
@@ -195,6 +213,30 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
     assert no_suffix_docx["media_type"] == (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
+    assert xlsx["kind"] == "spreadsheet"
+    assert xlsx["metadata"]["sheet_count"] == 1
+    assert xlsx["metadata"]["sheets"] == ["Sheet One"]
+    assert "Revenue" in xlsx["content"]
+    assert "42" in xlsx["content"]
+    assert no_suffix_xlsx["kind"] == "spreadsheet"
+    assert no_suffix_xlsx["media_type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert pptx["kind"] == "presentation"
+    assert pptx["metadata"]["slides"] == 1
+    assert "Quarterly Plan" in pptx["content"]
+    assert tsx["kind"] == "text"
+    assert tsx["media_type"] == "text/tsx"
+    assert "export function App" in tsx["content"]
+    assert drawio["kind"] == "diagram"
+    assert drawio["media_type"] == "application/vnd.jgraph.mxfile"
+    assert "<mxfile>" in drawio["content"]
+    assert legacy_xls["kind"] == "binary"
+    assert legacy_xls["media_type"] == "application/vnd.ms-excel"
+    assert "unsupported binary" in legacy_xls["warning"]
+    assert legacy_ppt["kind"] == "binary"
+    assert legacy_ppt["media_type"] == "application/vnd.ms-powerpoint"
+    assert "unsupported binary" in legacy_ppt["warning"]
     assert pdf["kind"] == "pdf"
     assert pdf["metadata"]["pages"] == 1
     assert pdf["warning"] == "pdf text extraction returned no text"
@@ -357,6 +399,54 @@ def create_docx(path: Path, text: str) -> None:
     )
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("word/document.xml", document_xml)
+
+
+def create_xlsx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "xl/workbook.xml",
+            (
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<sheets><sheet name="Sheet One" sheetId="1" r:id="rId1"/></sheets>'
+                "</workbook>"
+            ),
+        )
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            (
+                '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                "<si><t>Revenue</t></si><si><t>Notes</t></si>"
+                "</sst>"
+            ),
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            (
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                "<sheetData>"
+                '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row>'
+                '<row r="2"><c r="A2" t="inlineStr"><is><t>Notes</t></is></c></row>'
+                "</sheetData>"
+                "</worksheet>"
+            ),
+        )
+
+
+def create_pptx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ppt/slides/slide1.xml",
+            (
+                '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+                "<p:cSld><p:spTree><p:sp><p:txBody>"
+                "<a:p><a:r><a:t>Quarterly Plan</a:t></a:r></a:p>"
+                "<a:p><a:r><a:t>Ship the preview</a:t></a:r></a:p>"
+                "</p:txBody></p:sp></p:spTree></p:cSld>"
+                "</p:sld>"
+            ),
+        )
 
 
 def create_blank_pdf(path: Path) -> None:

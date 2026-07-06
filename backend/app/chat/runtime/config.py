@@ -173,8 +173,16 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_LONG_TERM_MEMORY_ENABLED",
             default=True,
         ),
+        proactive_memory_extraction_enabled=load_bool_from_env(
+            "SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION",
+            default=True,
+        ),
         skills_preflight_enabled=load_bool_from_env(
             "SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE",
+            default=True,
+        ),
+        clarify_gate_enabled=load_bool_from_env(
+            "SLOTFLOW_CLARIFY_GATE",
             default=True,
         ),
         uploads_enabled=load_bool_from_env(
@@ -184,6 +192,14 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
         todo_enabled=load_bool_from_env(
             "SLOTFLOW_TODO_MIDDLEWARE",
             default=True,
+        ),
+        subagent_limit_enabled=load_bool_from_env(
+            "SLOTFLOW_SUBAGENT_LIMIT",
+            default=True,
+        ),
+        subagent_max_concurrent=load_positive_int_from_env(
+            "SLOTFLOW_SUBAGENT_MAX_CONCURRENT",
+            default=defaults.subagent_max_concurrent,
         ),
     )
 

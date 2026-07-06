@@ -10,7 +10,7 @@
   线程可写)、``/workspace/work``(读写 scratch)、``/workspace/skills``(只读);
   每次 exec 的工作目录仍按线程隔离在 ``/workspace/work/<thread>``。
 - 守护进程不可达时先尝试 ``DockerEngineSetup.ensure_daemon()`` 自动拉起
-  (systemctl → service → 直接 dockerd,均 ``sudo -n`` 非交互),再重试一次。
+  (systemctl → service → rc-service → 直接 dockerd;非 root 时走 ``sudo -n``),再重试一次。
 
 Docker is touched only when a command is actually executed.
 """
@@ -20,10 +20,11 @@ from __future__ import annotations
 import atexit
 import hashlib
 import re
+import shlex
 import subprocess
 import threading
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from app.harness.sandbox.config import SlotFlowSandboxConfig
@@ -172,6 +173,121 @@ class LazyDockerSandbox:
             "container": self.container_name,
             "mounts": self.mount_summary(),
             "source": "slotflow_docker_sandbox",
+        }
+
+    def copy_to_artifacts(
+        self,
+        *,
+        source_path: str,
+        artifact_path: str = "",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Copy one container file into this thread's user-visible artifact folder."""
+
+        if not self.config.code_execution_enabled:
+            return {
+                "ok": False,
+                "error": "code execution sandbox is disabled",
+                "source": "slotflow_docker_artifact_copy",
+            }
+        if not self.config.writes_enabled:
+            return {
+                "ok": False,
+                "error": "workspace writes are disabled",
+                "source": "slotflow_docker_artifact_copy",
+            }
+
+        try:
+            thread_key = _safe_thread_key(self.thread_id)
+            source = _normalize_copy_source_path(
+                source_path,
+                thread_id=self.thread_id,
+                thread_key=thread_key,
+            )
+            destination_tail = _normalize_artifact_destination_tail(
+                artifact_path,
+                source_path=source,
+                thread_id=self.thread_id,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "source": "slotflow_docker_artifact_copy",
+            }
+
+        artifact_root = _container_artifact_root(self.thread_id)
+        destination = f"{artifact_root}/{destination_tail}"
+        script = _copy_artifact_script(
+            source=source,
+            destination=destination,
+            max_bytes=self.config.max_write_bytes,
+            overwrite=overwrite,
+        )
+
+        with self._lock:
+            self._cancel_idle_close_locked()
+            try:
+                self._ensure_started()
+                result = self._runner(
+                    [
+                        "docker",
+                        "exec",
+                        self.container_name,
+                        "sh",
+                        "-lc",
+                        script,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.docker_timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._schedule_idle_close_locked()
+                return {
+                    "ok": False,
+                    "timed_out": True,
+                    "timeout_seconds": self.config.docker_timeout_seconds,
+                    "stdout": _truncate_text(exc.stdout or "", self.config.max_read_bytes),
+                    "stderr": _truncate_text(exc.stderr or "", self.config.max_read_bytes),
+                    "source": "slotflow_docker_artifact_copy",
+                }
+            except OSError as exc:
+                self._schedule_idle_close_locked()
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "hint": "Docker CLI is required for sandbox_artifact_copy.",
+                    "source": "slotflow_docker_artifact_copy",
+                }
+            except DockerSandboxError as exc:
+                self._schedule_idle_close_locked()
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "hint": "Install/start Docker or disable code execution with SLOTFLOW_CODE_EXECUTION_ENABLED=false.",
+                    "source": "slotflow_docker_artifact_copy",
+                }
+            self._schedule_idle_close_locked()
+
+        stdout = (result.stdout or "").strip()
+        bytes_copied = int(stdout) if stdout.isdigit() else None
+        artifact_relative_path = _workspace_artifact_path(
+            destination_tail=destination_tail,
+            thread_id=self.thread_id,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "exit_code": result.returncode,
+            "source_path": source,
+            "path": artifact_relative_path,
+            "bytes_copied": bytes_copied,
+            "stdout": _truncate_text(result.stdout, self.config.max_read_bytes),
+            "stderr": _truncate_text(result.stderr, self.config.max_read_bytes),
+            "container": self.container_name,
+            "mounts": self.mount_summary(),
+            "source": "slotflow_docker_artifact_copy",
         }
 
     def mount_summary(self) -> dict[str, str | None]:
@@ -361,6 +477,138 @@ def _bind_mount(source: Path, target: str, *, readonly: bool) -> str:
 def _safe_thread_key(thread_id: str | None) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", (thread_id or "default").strip())
     return cleaned.strip(".-") or "default"
+
+
+def _container_artifact_root(thread_id: str | None) -> str:
+    cleaned = (thread_id or "").strip().strip("/")
+    return f"/workspace/artifacts/{cleaned}" if cleaned else "/workspace/artifacts"
+
+
+def _workspace_artifact_path(*, destination_tail: str, thread_id: str | None) -> str:
+    cleaned = (thread_id or "").strip().strip("/")
+    return (
+        f"artifacts/{cleaned}/{destination_tail}"
+        if cleaned
+        else f"artifacts/{destination_tail}"
+    )
+
+
+def _normalize_copy_source_path(
+    source_path: str,
+    *,
+    thread_id: str | None,
+    thread_key: str,
+) -> str:
+    raw = source_path.strip()
+    if not raw:
+        raise ValueError("source_path must not be blank")
+    if "\x00" in raw:
+        raise ValueError("source_path contains a null byte")
+    if "\\" in raw:
+        raise ValueError("source_path must use forward slashes")
+
+    path = PurePosixPath(raw)
+    if path.is_absolute():
+        normalized = _normalize_posix_path(path)
+    else:
+        normalized = _normalize_posix_path(
+            PurePosixPath("/workspace/work") / thread_key / path
+        )
+
+    allowed_roots = (f"/workspace/work/{thread_key}", "/tmp")
+    current_artifact_root = _container_artifact_root(thread_id)
+    if not any(
+        root and _is_same_or_child_posix(normalized, root)
+        for root in (*allowed_roots, current_artifact_root)
+    ):
+        raise ValueError(
+            "source_path must be relative to this thread workdir or under "
+            "/workspace/work/<thread>, /tmp, or the current thread artifact folder"
+        )
+    return normalized
+
+
+def _normalize_artifact_destination_tail(
+    artifact_path: str,
+    *,
+    source_path: str,
+    thread_id: str | None,
+) -> str:
+    raw = artifact_path.strip()
+    if not raw:
+        raw = PurePosixPath(source_path).name or "artifact"
+    if "\x00" in raw:
+        raise ValueError("artifact_path contains a null byte")
+    if "\\" in raw:
+        raise ValueError("artifact_path must use forward slashes")
+
+    current_artifact_root = _container_artifact_root(thread_id)
+    if raw.startswith("/"):
+        normalized = _normalize_posix_path(PurePosixPath(raw))
+        if not _is_same_or_child_posix(normalized, current_artifact_root):
+            raise ValueError("absolute artifact_path must stay inside the current thread artifact folder")
+        raw = normalized[len(current_artifact_root) :].lstrip("/")
+    else:
+        raw = raw.lstrip("/")
+        if raw.startswith("artifacts/"):
+            raw = raw[len("artifacts/") :].lstrip("/")
+        cleaned_thread = (thread_id or "").strip().strip("/")
+        if cleaned_thread and (raw == cleaned_thread or raw.startswith(f"{cleaned_thread}/")):
+            raw = raw[len(cleaned_thread) :].lstrip("/")
+
+    tail = _normalize_posix_path(PurePosixPath(raw), require_relative=True)
+    if tail in {"", "."}:
+        raise ValueError("artifact_path must include a file name")
+    return tail
+
+
+def _normalize_posix_path(path: PurePosixPath, *, require_relative: bool = False) -> str:
+    if require_relative and path.is_absolute():
+        raise ValueError("path must be relative")
+    safe_parts: list[str] = []
+    for part in path.parts:
+        if part in {"", ".", "/"}:
+            continue
+        if part == "..":
+            raise ValueError("path must not contain '..'")
+        safe_parts.append(part)
+    if path.is_absolute() and not require_relative:
+        return "/" + "/".join(safe_parts)
+    return "/".join(safe_parts)
+
+
+def _is_same_or_child_posix(path: str, root: str) -> bool:
+    clean_root = root.rstrip("/")
+    return path == clean_root or path.startswith(f"{clean_root}/")
+
+
+def _copy_artifact_script(
+    *,
+    source: str,
+    destination: str,
+    max_bytes: int,
+    overwrite: bool,
+) -> str:
+    quoted_source = shlex.quote(source)
+    quoted_destination = shlex.quote(destination)
+    quoted_max_bytes = shlex.quote(str(max(0, max_bytes)))
+    overwrite_flag = "1" if overwrite else "0"
+    return "\n".join(
+        [
+            "set -eu",
+            f"src={quoted_source}",
+            f"dst={quoted_destination}",
+            f"max_bytes={quoted_max_bytes}",
+            f"overwrite={overwrite_flag}",
+            'if [ ! -f "$src" ]; then echo "source_path is not a file: $src" >&2; exit 11; fi',
+            'size=$(wc -c < "$src" | tr -d " ")',
+            'if [ "$size" -gt "$max_bytes" ]; then echo "source file exceeds max_write_bytes: $size > $max_bytes" >&2; exit 12; fi',
+            'mkdir -p "$(dirname "$dst")"',
+            'if [ -e "$dst" ] && [ "$overwrite" != "1" ]; then echo "artifact_path already exists: $dst" >&2; exit 13; fi',
+            'cp "$src" "$dst"',
+            'printf "%s" "$size"',
+        ]
+    )
 
 
 def _effective_timeout(*, requested: int | None, default: int) -> int:

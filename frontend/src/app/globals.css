@@ -152,6 +152,58 @@
   background: oklch(0.76 0.13 257 / 24%);
 }
 
+.slotflow-app-bg {
+  background:
+    linear-gradient(90deg, oklch(0.72 0.12 205 / 9%), transparent 28%, transparent 72%, oklch(0.74 0.16 145 / 8%)),
+    var(--background);
+}
+
+.slotflow-surface {
+  background:
+    linear-gradient(180deg, oklch(1 0 0 / 92%), oklch(0.985 0.004 230 / 92%)),
+    var(--background);
+}
+
+.dark .slotflow-app-bg {
+  background:
+    linear-gradient(90deg, oklch(0.62 0.14 205 / 10%), transparent 30%, transparent 70%, oklch(0.62 0.14 145 / 8%)),
+    var(--background);
+}
+
+.dark .slotflow-surface {
+  background:
+    linear-gradient(180deg, oklch(0.19 0.01 250 / 94%), oklch(0.15 0.006 250 / 94%)),
+    var(--background);
+}
+
+@keyframes slotflow-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.slotflow-rise-in {
+  animation: slotflow-rise-in 180ms ease-out both;
+}
+
+.slotflow-hover-lift {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.slotflow-hover-lift:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 40px -32px oklch(0.25 0.03 250 / 55%);
+}
+
 .slotflow-markdown {
   overflow-wrap: anywhere;
   line-height: 1.78;
@@ -312,6 +364,15 @@
   }
   .slotflow-eq-bar {
     animation: none;
+    transform: none;
+  }
+
+  .slotflow-rise-in {
+    animation: none;
+  }
+
+  .slotflow-hover-lift,
+  .slotflow-hover-lift:hover {
     transform: none;
   }
 }

@@ -114,7 +114,7 @@ export function ChatApp() {
     thread,
     messages,
     todos,
-    todoRevision,
+    todoListKey,
     isStreaming,
     error,
     sendMessage,
@@ -887,7 +887,7 @@ export function ChatApp() {
     <ChatComposer
       attachments={attachments}
       todos={todos}
-      todoRevision={todoRevision}
+      todoListKey={todoListKey}
       error={error}
       fileInputRef={fileInputRef}
       isStreaming={isStreaming}
@@ -919,7 +919,7 @@ export function ChatApp() {
   );
 
   return (
-    <SidebarProvider className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
+    <SidebarProvider className="slotflow-app-bg h-dvh min-h-0 overflow-hidden text-foreground">
       <input
         ref={skillFolderInputRef}
         type="file"
@@ -970,16 +970,17 @@ export function ChatApp() {
         />
       </Sidebar>
 
-      <SidebarInset className="h-dvh min-h-0 overflow-hidden">
+      <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-transparent">
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <section className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <section className="slotflow-surface relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-border/30">
             {!isArtifactPanelOpen ? (
-              <div className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border bg-background/95 p-0.5 shadow-sm">
+              <div className="slotflow-rise-in absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border bg-background/95 p-0.5 shadow-sm backdrop-blur">
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon-sm"
                   title="打开工作区面板"
+                  className="slotflow-hover-lift"
                   onClick={() => handleOpenWorkspacePanel("files")}
                 >
                   <PanelRightOpen className="size-4" />
@@ -990,6 +991,7 @@ export function ChatApp() {
                   variant="ghost"
                   size="icon-sm"
                   title="打开终端"
+                  className="slotflow-hover-lift"
                   onClick={() => handleOpenWorkspacePanel("terminal")}
                 >
                   <SquareTerminal className="size-4" />
@@ -1019,7 +1021,7 @@ export function ChatApp() {
                     void handleSelectClarification(messageId, clarification, option)
                   }
                 />
-                <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
+                <div className="shrink-0 border-t border-border/35 bg-background/86 px-3 pb-5 pt-3 backdrop-blur sm:px-6">
                   {composer}
                 </div>
               </>

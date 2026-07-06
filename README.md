@@ -57,10 +57,17 @@ think out loud, and produce durable, shareable outputs.
 ```bash
 git clone <your-repository-url>
 cd SlotFlow
+./bootstrap.sh
 ```
 
-Provide provider credentials in `backend/.env`. Secrets and endpoints live in the
-environment; **which model** a conversation uses is chosen in the UI at runtime.
+`./bootstrap.sh` installs/validates the repo prerequisites, backend and frontend
+dependencies, creates `backend/.env` from `backend/.env_example` if it does not already
+exist, and prepares the Docker sandbox on common Linux/WSL hosts. It never overwrites an
+existing `backend/.env`.
+
+Provide provider credentials in `backend/.env`. Start from `backend/.env_example` for the
+full list of feature flags and local paths. Secrets and endpoints live in the environment;
+**which model** a conversation uses is chosen in the UI at runtime.
 
 ```bash
 # Any OpenAI-compatible DeepSeek endpoint (official or third-party gateway)
@@ -87,6 +94,10 @@ SLOTFLOW_WORKSPACE_WRITES_ENABLED=true
 SLOTFLOW_NETWORK_ENABLED=true
 ```
 
+Docker sandbox setup is best-effort across common Linux package managers. If the script
+adds your user to the `docker` group, log out and back in before expecting non-sudo Docker
+access from the backend process.
+
 Only providers whose `*_API_KEY` is set appear in the model selector; a provider whose
 endpoint is unreachable or returns no chat models is shown with an `error` status and
 no models (there are no hard-coded fallback model lists).
@@ -94,14 +105,7 @@ no models (there are no hard-coded fallback model lists).
 ### Running the Application
 
 ```bash
-# Backend
-cd backend
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --env-file .env
-
-# Frontend (another terminal)
-cd frontend
-pnpm install
-pnpm dev
+make dev
 ```
 
 Open <http://localhost:3000>. In local browser development the frontend calls the

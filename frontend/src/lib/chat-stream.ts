@@ -102,7 +102,15 @@ export type WorkspaceEntryRecord = {
 
 export type WorkspaceReadRecord = {
   path: string;
-  kind: "text" | "document" | "pdf" | "image" | "binary";
+  kind:
+    | "text"
+    | "document"
+    | "spreadsheet"
+    | "presentation"
+    | "diagram"
+    | "pdf"
+    | "image"
+    | "binary";
   media_type: string;
   size_bytes: number;
   source: string;

@@ -447,6 +447,83 @@ def test_sandbox_exec_tool_is_disabled_by_config(tmp_path: Path) -> None:
     assert tools == []
 
 
+def test_sandbox_artifact_copy_copies_thread_file_with_guardrails(tmp_path: Path) -> None:
+    """Docker 内生成的 scratch 文件可发布到当前线程产物目录,但不越过路径边界。"""
+
+    FakeTimer.instances = []
+    calls: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="12", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            max_write_bytes=128,
+        ),
+        thread_id="thread-1",
+        runner=fake_runner,
+        timer_factory=FakeTimer,
+    )
+
+    result = sandbox.copy_to_artifacts(
+        source_path="charts/out.html",
+        artifact_path="reports/out.html",
+    )
+
+    assert result["ok"] is True
+    assert result["path"] == "artifacts/thread-1/reports/out.html"
+    assert result["bytes_copied"] == 12
+    exec_command = next(call for call in calls if call[:2] == ["docker", "exec"])
+    script = exec_command[-1]
+    assert "src=/workspace/work/thread-1/charts/out.html" in script
+    assert "dst=/workspace/artifacts/thread-1/reports/out.html" in script
+    assert "max_bytes=128" in script
+    assert "artifact_path already exists" in script
+    assert FakeTimer.instances[-1].started is True
+
+    escaped = sandbox.copy_to_artifacts(
+        source_path="/workspace/uploads/private.txt",
+        artifact_path="../bad.txt",
+    )
+
+    assert escaped["ok"] is False
+    assert "source_path must be relative" in escaped["error"]
+
+
+def test_sandbox_artifact_copy_tool_returns_structured_error_without_docker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """发布工具和 sandbox_exec 一样: Docker 不可用时返回 JSON 错误,不炸 graph。"""
+
+    def unavailable_copy(self, *, source_path: str, artifact_path: str = "", overwrite: bool = False):
+        raise DockerSandboxError("Docker CLI is required for sandbox_artifact_copy")
+
+    monkeypatch.setattr(LazyDockerSandbox, "copy_to_artifacts", unavailable_copy)
+    tools = build_sandbox_tools(SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"))
+    copy_tool = next(tool for tool in tools if tool.name == "sandbox_artifact_copy")
+
+    result = copy_tool.invoke(
+        {
+            "source_path": "out.png",
+            "artifact_path": "out.png",
+        }
+    )
+    payload = json.loads(result)
+
+    assert payload["ok"] is False
+    assert payload["error"] == "Docker CLI is required for sandbox_artifact_copy"
+    assert "Install/start Docker" in payload["hint"]
+
+
 def test_docker_engine_setup_tool_returns_install_script_when_host_install_disabled(
     monkeypatch,
     tmp_path: Path,
@@ -510,6 +587,49 @@ def test_docker_engine_setup_install_script_matches_detected_host(tmp_path: Path
     assert "apt-get" not in result["script"]
 
 
+@pytest.mark.parametrize(
+    ("os_release_text", "expected_manager", "expected_script"),
+    [
+        (
+            'ID=alpine\nPRETTY_NAME="Alpine Linux"\n',
+            "apk",
+            "apk add --no-cache docker docker-cli-compose",
+        ),
+        (
+            'ID=opensuse-leap\nID_LIKE="suse"\n',
+            "zypper",
+            "zypper --non-interactive install docker docker-compose",
+        ),
+        (
+            'ID=centos\nID_LIKE="rhel fedora"\n',
+            "yum",
+            "yum install -y docker docker-compose-plugin",
+        ),
+    ],
+)
+def test_docker_engine_setup_install_script_covers_common_linux_families(
+    tmp_path: Path,
+    os_release_text: str,
+    expected_manager: str,
+    expected_script: str,
+) -> None:
+    """运行时 Docker 安装入口覆盖常见 Linux 包管理器分支。"""
+
+    os_release = tmp_path / "os-release"
+    os_release.write_text(os_release_text, encoding="utf-8")
+    setup = DockerEngineSetup(
+        config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
+        which=lambda name: "/usr/bin/yum" if name == "yum" else None,
+        os_release_path=os_release,
+    )
+
+    result = setup.run(action="install_script")
+
+    assert result["ok"] is True
+    assert result["host"]["install_manager"] == expected_manager
+    assert expected_script in result["script"]
+
+
 def test_docker_engine_setup_install_uses_fixed_commands(
     monkeypatch,
     tmp_path: Path,
@@ -546,7 +666,14 @@ def test_docker_engine_setup_install_uses_fixed_commands(
     assert result["ok"] is True
     assert calls == [
         ["sudo", "-n", "apt-get", "update"],
-        ["sudo", "-n", "apt-get", "install", "-y", "docker.io", "docker-compose-v2"],
+        [
+            "sudo",
+            "-n",
+            "sh",
+            "-c",
+            "apt-get install -y docker.io docker-compose-v2 || "
+            "apt-get install -y docker.io docker-compose-plugin || apt-get install -y docker.io",
+        ],
         ["sudo", "-n", "systemctl", "enable", "--now", "docker"],
         ["sudo", "-n", "usermod", "-aG", "docker", "dell"],
         ["docker", "info", "--format", "{{.ServerVersion}}"],

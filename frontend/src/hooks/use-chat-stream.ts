@@ -65,6 +65,10 @@ const fallbackMode: ChatMode = "pro";
 const fallbackAgentName = "default";
 const streamingDeltaFlushMs = 80;
 
+function todoContentKey(todos: ChatTodo[]): string {
+  return JSON.stringify(todos.map((todo) => todo.content.trim()));
+}
+
 export function useChatStream(options: UseChatStreamOptions = {}) {
   const {
     defaultThreadTitle = fallbackThreadTitle,
@@ -77,13 +81,13 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const [thread, setThread] = useState<ThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [todos, setTodos] = useState<ChatTodo[]>([]);
-  const [todoRevision, setTodoRevision] = useState(0);
+  const [todoListKey, setTodoListKey] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isStreamingRef = useRef(false);
-  const hasTodoListForCurrentRunRef = useRef(false);
   const todoSignatureRef = useRef("[]");
+  const todoListKeyRef = useRef<string | null>(null);
   const pendingAssistantDeltasRef = useRef(new Map<string, PendingAssistantDeltas>());
   const pendingFlushTimerRef = useRef<number | null>(null);
 
@@ -98,19 +102,20 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   }, []);
 
   const replaceTodos = useCallback((nextTodos: ChatTodo[]) => {
-    if (nextTodos.length === 0 && !hasTodoListForCurrentRunRef.current) {
+    if (nextTodos.length === 0 && todoSignatureRef.current === "[]") {
       return;
     }
     const nextSignature = JSON.stringify(nextTodos);
     if (nextSignature === todoSignatureRef.current) {
       return;
     }
+    const nextListKey = nextTodos.length > 0 ? todoContentKey(nextTodos) : null;
     todoSignatureRef.current = nextSignature;
-    if (nextTodos.length > 0) {
-      hasTodoListForCurrentRunRef.current = true;
+    if (nextListKey !== todoListKeyRef.current) {
+      todoListKeyRef.current = nextListKey;
+      setTodoListKey(nextListKey);
     }
     setTodos(nextTodos);
-    setTodoRevision((current) => current + 1);
   }, []);
 
   const updateAssistantMessage = useCallback((
@@ -229,9 +234,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     setThread(null);
     setMessages([]);
     setTodos([]);
-    setTodoRevision(0);
-    hasTodoListForCurrentRunRef.current = false;
+    setTodoListKey(null);
     todoSignatureRef.current = "[]";
+    todoListKeyRef.current = null;
     setError(null);
     return true;
   }, []);
@@ -251,9 +256,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       setThread(targetThread);
       setMessages(storedMessages.map(messageRecordToUiMessage));
       setTodos([]);
-      setTodoRevision(0);
-      hasTodoListForCurrentRunRef.current = false;
+      setTodoListKey(null);
       todoSignatureRef.current = "[]";
+      todoListKeyRef.current = null;
       return true;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "load thread failed";
@@ -298,10 +303,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
       abortControllerRef.current = controller;
       isStreamingRef.current = true;
-      hasTodoListForCurrentRunRef.current = false;
-      todoSignatureRef.current = "[]";
-      setTodos([]);
-      setTodoRevision(0);
       setIsStreaming(true);
       setError(null);
 
@@ -519,7 +520,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     thread,
     messages,
     todos,
-    todoRevision,
+    todoListKey,
     isStreaming,
     error,
     sendMessage,

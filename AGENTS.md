@@ -151,13 +151,20 @@ frontend/src/
   prerequisites (`make`, `curl`, `git`, Python/build tools, `fuser` via `psmisc` where available),
   installs `uv`, installs Node plus the `packageManager` pnpm version from `frontend/package.json`
   (Volta fallback for user-local Node), runs `uv sync` in `backend/` and `pnpm install
-  --frozen-lockfile` in `frontend/`, then prepares the **Docker sandbox** end to end:
-  installs Docker Engine if missing, adds the user to the `docker` group, enables systemd in
-  `/etc/wsl.conf` on WSL hosts without it, starts the daemon (systemctl → service → direct
-  `dockerd` fallback, mirroring `docker_engine.py::ensure_daemon`), falls back to CN registry
-  mirrors only when a direct Docker Hub pull times out, and pre-pulls the sandbox image
-  (`SLOTFLOW_DOCKER_IMAGE`, default `python:3.12`). Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip
-  OS package installation and `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup.
+  --frozen-lockfile` in `frontend/`, copies `backend/.env_example` to `backend/.env` only when
+  no local `.env` exists, then prepares the **Docker sandbox** end to end. Docker setup is
+  best-effort for common Linux families (apt/dnf/yum/pacman/apk/zypper, plus WSL); it installs
+  Docker Engine if missing, adds the user to the `docker` group, enables systemd in
+  `/etc/wsl.conf` on WSL hosts without it, starts the daemon (systemctl → service → rc-service →
+  direct `dockerd` fallback, mirroring `docker_engine.py::ensure_daemon`), merges CN registry
+  mirrors into `/etc/docker/daemon.json` only when a direct Docker Hub pull fails and no existing
+  mirrors are configured, and pre-pulls the sandbox image (`SLOTFLOW_DOCKER_SANDBOX_IMAGE`, with
+  `SLOTFLOW_DOCKER_IMAGE` as a bootstrap-only alias; default `python:3.12`). Adding a non-root
+  user to the docker group still requires a fresh login before non-sudo Docker access is available.
+  Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package installation and
+  `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup. Bootstrap-only knobs:
+  `SLOTFLOW_NODE_VERSION`, `SLOTFLOW_PNPM_VERSION`, `SLOTFLOW_DOCKER_REGISTRY_MIRRORS`,
+  `SLOTFLOW_DOCKER_DAEMON_WAIT_SECONDS`.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
@@ -200,21 +207,26 @@ frontend/src/
   the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
   assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
   normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
-- **Chat scroll behavior**: `frontend/src/components/chat/message-list.tsx` scrolls to the latest
-  assistant message when output first appears, then auto-follows streaming output only while the
-  user stays near the bottom. If the user scrolls upward during generation, auto-follow stops and
-  the completed answer must not force-scroll back to the bottom.
+- **Chat scroll behavior**: `frontend/src/components/chat/message-list.tsx` anchors each newly
+  sent user message near the top of the chat viewport while the assistant response streams below
+  it, so a new turn starts where the user can read from the question downward instead of being
+  pushed to the bottom. A temporary bottom spacer exists only during that streaming turn so the
+  latest user message can reach the top even when there is little assistant output yet; bottom
+  scrolling still targets the real message end, not the spacer. If the user scrolls manually during
+  generation, automatic turn anchoring/auto-follow stops and the completed answer must not force
+  scroll.
 - **Thinking toggle**: `RunContext.thinking_enabled` (flash mode = off). DeepSeek-V4 thinks
   by default, so OFF must send `extra_body={"thinking":{"type":"disabled"}}` explicitly
   (`runtime/models.py`). Anthropic thinking / OpenAI o-series reasoning are enabled only
   when on.
-- **Artifacts & the workspace panel**: `artifact_write` is the ONLY user-facing write tool;
-  it auto-namespaces to `artifacts/<thread_id>/`. There is no `workspace_write`; files written
-  via the filesystem MCP or any other path do NOT appear in the panel. **Boundary**: create an
-  artifact only for SUBSTANTIAL, STANDALONE deliverables (reports, full pages/apps, charts,
-  datasets, long/multi-file code); short answers, small tables, and snippets stay inline.
-  Complex planning workflows with human approval steps should write the final approved plan
-  as an artifact after approval. The sidebar **工作区** button opens
+- **Artifacts & the workspace panel**: user-visible generated files must enter the artifact folder
+  through `artifact_write` (direct text/content writes) or `sandbox_artifact_copy` (one file already
+  generated inside Docker). Both namespace into `artifacts/<thread_id>/`. There is no
+  `workspace_write`; files written via the filesystem MCP or any other path do NOT appear in the
+  panel. **Boundary**: create an artifact only for SUBSTANTIAL, STANDALONE deliverables (reports,
+  full pages/apps, charts, datasets, long/multi-file code); short answers, small tables, and
+  snippets stay inline. Complex planning workflows with human approval steps should write the final
+  approved plan as an artifact after approval. The sidebar **工作区** button opens
   `workspace-directory-modal.tsx`, a centered
   global directory over the same `/api/workspace/threads` data; thread folders are collapsed
   by default (search expands matches), and clicking a file switches to its owning conversation
@@ -228,6 +240,11 @@ frontend/src/
   Legacy files under `artifacts/` that are not namespaced to a known thread are surfaced as
   `未归类产物`, so older outputs remain findable. Read/preview (`/artifacts/read`,
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
+  The reader/preview path handles source/text formats (`.ts`, `.tsx`, `.js`, `.jsx`, `.css`,
+  `.sql`, `.graphql`, `.svg`, etc.), Markdown/HTML/PDF/images, `.docx`, `.xlsx`/`.xlsm`,
+  `.pptx`, and `.drawio`; Office Open XML files are extracted with lightweight ZIP/XML readers,
+  while old binary `.xls`/`.ppt` files get media-type metadata plus a friendly unsupported-binary
+  preview instead of raw JSON in the UI.
   The same right panel also has a **终端** view backed by `terminal/routes.py` at
   `/api/terminal/ws`: it is a user-operated host PTY for manual setup/debugging, not an agent
   tool and not part of model tool schemas. The frontend renders PTY output with `@xterm/xterm`
@@ -251,19 +268,26 @@ frontend/src/
   execution. The container uses bind mounts instead of copy in/out: `/workspace/uploads` is read-only user uploads,
   `/workspace/artifacts` is read-write for the current thread's generated artifacts,
   `/workspace/work` is read-write scratch under `.sandbox/<thread>`, and `/workspace/skills` is
-  read-only installed Skills when configured. Outputs that should appear in the UI must be written
-  under `/workspace/artifacts`; they are already on the host because of the bind mount. Env knobs:
+  read-only installed Skills when configured. Outputs that should appear in the UI should be written
+  directly under `/workspace/artifacts` when possible; files already generated inside Docker under
+  the current thread scratch directory or `/tmp` can be published with `sandbox_artifact_copy`.
+  That tool copies one file inside the container into the current thread's artifact folder, enforces
+  `max_write_bytes`, refuses overwrite unless `overwrite=true`, and rejects source/destination
+  paths outside the current thread boundary. Env knobs:
   `SLOTFLOW_CODE_EXECUTION_ENABLED`, `SLOTFLOW_DOCKER_SANDBOX_IMAGE`,
-  `SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS`, `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED`. When the
+  `SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS`, `SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED`,
+  `SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS`, `SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL`. When the
   model calls `sandbox_exec`, `chat/agent_adapter/streaming.py` emits a `tool.status` SSE event
   from the LangGraph `tool_calls` projection before the blocking ToolNode run, and the frontend
   shows that status on the streaming assistant bubble; this avoids a silent wait while Docker pulls
   or starts the image. `docker_engine_setup` is the only controlled host setup exception: it reads
   `/etc/os-release` to report host OS/package-manager info, checks Docker, returns a fixed
-  per-family Linux install script (apt/dnf/pacman), or runs that fixed package-manager/systemctl/usermod
+  per-family Linux install script (apt/dnf/yum/pacman/apk/zypper), or runs that fixed package-manager/systemctl/usermod
   flow only when `SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL` allows host install (default true) and the
   model passes `confirm_host_install=true` after an explicit user request. It is not a generic host
-  shell; do not add arbitrary command/script parameters to it. Do not replace `tool.status` with
+  shell; do not add arbitrary command/script parameters to it. Its fixed install-script generator
+  covers apt/dnf/yum/pacman/apk/zypper hosts and daemon start tries systemctl/service/rc-service/
+  direct dockerd. Do not replace `tool.status` with
   `get_stream_writer()` unless LangGraph v3 exposes a custom projection channel in the current
   dependency version.
 - **Todo tool availability and enforcement**: `write_todos` is registered in every mode, including
@@ -290,7 +314,12 @@ frontend/src/
   tasks: clarify first via
   `ask_clarification` (interactive picker, not plain-text questions), `skill_match` before
   specialized work, then (gated on `subagent_enabled`) split INDEPENDENT parts to `task_tool`
-  sub-agents. Todo creation/update is enforced by the graph's `post_model` node instead of this
+  sub-agents. When role fit matters, the prompt tells the model to call `subagent_list` first,
+  choose a Layer-1 functional `agent_name`, and usually pass only a Layer-2 `domain` into
+  `task_tool`. If a precise professional role matters, it calls `subagent_role_search(query,
+  domain)` for a short metadata-only Layer-3 shortlist, then passes one returned `role_name`/id into
+  `task_tool`; the full role prompt is loaded only inside that delegated child.
+  Todo creation/update is enforced by the graph's `post_model` node instead of this
   prompt. These fire far more reliably with
   **thinking ON**; with thinking off DeepSeek tends to one-shot.
 - **HITL clarification = LangGraph native `interrupt()`/resume** (rewired 2026-06-21, see
@@ -334,8 +363,9 @@ frontend/src/
     `Exception` subclass) propagate — never swallow it in a fail-open `except Exception`, or the
     pause is defeated. On resume LangGraph replays the node, so triage runs once more (cheap,
     benign). Only the first step is constrained; never gates twice in a thread (anti-loop).
-    Gated by `clarify_gate_enabled` (default on) + `run_context.mode in {pro, ultra}`. Scripted-model
-    graph tests set `clarify_gate_enabled=False`. Live-validated against `deepseek-v4-pro`:
+    Gated by `clarify_gate_enabled` (default on; env `SLOTFLOW_CLARIFY_GATE=false`) +
+    `run_context.mode in {pro, ultra}`. Scripted-model graph tests set `clarify_gate_enabled=False`.
+    Live-validated against `deepseek-v4-pro`:
     underspecified requests clarify, the answer resumes the run, and the clarification does not re-pop.
   - **The same `GraphBubbleUp`-propagation rule applies to the ToolNode path**: the SlotFlow
     tool-safety wrappers (`harness/graph.py::_slotflow_tool_safety_wrapper` /
@@ -359,14 +389,31 @@ frontend/src/
   `store.add_memory` (which dedups by `source_run_id` and `kind+content`). This replaced the old
   brittle Chinese-regex extraction. The extractor reuses the conversation model with
   `config={"callbacks": []}`; latency is hidden because it does not block the run. Gated by
-  `proactive_memory_extraction_enabled` (default on); scripted-model graph tests set it `False`.
+  `proactive_memory_extraction_enabled` (default on; env
+  `SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION=false` disables it); scripted-model graph tests set it `False`.
   Don't reintroduce "the auto-saves" framing in the prompt (it suppresses the model's own
   `memory_save`).
 - **Sub-agent concurrency cap**: the `post_model` graph node (logic in
   `harness/steps/subagent_limit.py::cap_subagent_calls`) truncates excess parallel `task_tool`
   calls on a single model step down to `subagent_max_concurrent` (default 3), a graph-level guard
   that preserves non-`task_tool` calls and the message's `reasoning_content`. Active when
-  `subagent_limit_enabled` + `features.subagent_enabled`.
+  `subagent_limit_enabled` + `features.subagent_enabled`; env
+  `SLOTFLOW_SUBAGENT_LIMIT=false` disables the guard and
+  `SLOTFLOW_SUBAGENT_MAX_CONCURRENT=<positive-int>` adjusts the cap.
+- **Sub-agent role routing**: SlotFlow delegation is three-layered. Layer 1 remains the six
+  built-in functional profiles from `harness/subagents/config.py` (`researcher`, `analyst`,
+  `planner`, `coder`, `reviewer`, `writer`). Layer 2 is the compact domain catalog in
+  `harness/subagents/role_catalog.py` (`engineering`, `design`, `finance`, `market`, `sales`,
+  `product`, `research`, `specialized`). Layer 3 is the file-backed local agency-agents role
+  library under `harness/subagents/agency_agents/roles/` (220 markdown role prompts copied with
+  the upstream MIT license and `divisions.json`). `subagent_list` exposes only functional
+  profiles, domain summaries, counts, and sample role metadata; it does NOT dump all role prompts
+  into the parent model context. `subagent_role_search(query, domain, max_results)` is the narrow
+  lookup path when sample roles are not enough; it returns a bounded metadata-only shortlist and
+  falls back to a stable domain shortlist when a query has no keyword hits, so non-English tasks do
+  not produce an empty role-selection dead end. `task_tool(agent_name, task, ..., domain, role_name)`
+  resolves at most one concrete role template and injects it into the child subagent's system prompt
+  inside `<slotflow-agency-role>`, preserving the parent model's context budget.
 - **Skill discovery (cross-tool, cached)**: `skill_match` → `find-skills` → `search_skill_repos`.
   Skills use the open **SKILL.md** standard shared by Claude Code, OpenAI Codex (`.agents/skills`)
   and GitHub Copilot, so a Skill written for any of them installs into SlotFlow unchanged — there
@@ -393,8 +440,10 @@ frontend/src/
 - **Interaction UI invariants**: `write_todos` updates surface in one place only: the collapsible
   `ComposerTodoPanel` above the chat composer. Do not add a second inline todo panel inside the
   message list; duplicate panels make the single source of truth look inconsistent. The composer
-  panel expands on every distinct todo-list update and stays visible after the run finishes;
-  collapsing it at completion makes users think no visual todo panel was used. `state.snapshot`
+  panel auto-expands only when a genuinely new todo content list appears (`todoListKey` changes);
+  status-only updates and a new streaming answer must not override the user's manual collapsed
+  state. If the model creates a different todo list, clear/replace the old list first so the new
+  list can expand as a new panel state. `state.snapshot`
   todos are also consumed as a frontend fallback in case an intermediate `todo.updated` event is
   missed. Backend streaming emits `todo.updated` for every values snapshot with todos; frontend
   signature dedupe prevents repeated identical events from flickering the panel. Todo items normalize
@@ -405,9 +454,8 @@ frontend/src/
   `ScrollArea` did not reliably wheel-scroll inside the centered dialog. The chat composer should
   not show non-functional placeholder affordances: the lower-left `+` is a direct attachment button,
   there is no voice-input button, and the empty-state prompt chips are removed until they have real
-  behavior. The Skills directory includes a hardcoded "推荐 Skills" section in
-  `directory-modal.tsx`; recommended cards call the existing `/api/skills/install` flow directly
-  with `{package_url, skill_name}` instead of sending hidden chat prompts.
+  behavior. The Skills directory intentionally has no hardcoded recommended-Skills page or cards;
+  it shows installed Skills only, with install/upload actions in the header.
 
 ## Roadmap (next steps)
 

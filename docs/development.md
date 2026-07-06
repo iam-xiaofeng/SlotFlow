@@ -10,6 +10,16 @@ This document covers the local development workflow for SlotFlow.
 - `pnpm`
 - WSL or Linux for the recommended local workflow
 
+For a fresh clone, prefer the root bootstrap script:
+
+```bash
+./bootstrap.sh
+```
+
+It installs or validates the Makefile prerequisites, `uv`, Node/pnpm, backend/frontend
+dependencies, copies `backend/.env_example` to `backend/.env` if missing, and prepares the
+Docker sandbox on common Linux/WSL hosts. It never overwrites an existing `backend/.env`.
+
 ## Backend
 
 Install dependencies and run tests:
@@ -62,6 +72,9 @@ The backend reads provider credentials and runtime infrastructure settings from
 environment variables. The selected chat model and mode are sent by the
 frontend with each request.
 
+Use `backend/.env_example` as the full template for provider keys, feature flags,
+storage paths, MCP, workspace, Docker sandbox, terminal, and title-generation settings.
+
 Common provider variables:
 
 ```bash
@@ -83,6 +96,10 @@ SLOTFLOW_CHAT_SQLITE_PATH=.slotflow/chat.sqlite3
 SLOTFLOW_SKILLS_ROOT=.slotflow/skills
 SLOTFLOW_WORKSPACE_ROOT=.slotflow/workspace
 ```
+
+Docker sandbox setup is best-effort across common apt/dnf/yum/pacman/apk/zypper Linux
+hosts. If bootstrap adds your user to the `docker` group, log out and back in before
+expecting the backend process to use Docker without sudo.
 
 ## Verification
 

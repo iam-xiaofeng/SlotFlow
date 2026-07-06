@@ -63,6 +63,38 @@ def build_sandbox_tools(
             }
         return json.dumps(result, ensure_ascii=False)
 
+    @tool("sandbox_artifact_copy")
+    def sandbox_artifact_copy(
+        source_path: str,
+        artifact_path: str = "",
+        overwrite: bool = False,
+    ) -> str:
+        """Publish a file created inside Docker to the visible artifact panel.
+
+        Use this after sandbox_exec creates a file in the current thread's scratch
+        directory or /tmp and the user should be able to open it. `source_path` may
+        be relative to the current sandbox workdir, under /workspace/work/<thread>,
+        under /tmp, or already inside this thread's /workspace/artifacts folder.
+        `artifact_path` is a destination filename/path relative to this conversation's
+        artifact folder. The tool copies one file only, enforces max_write_bytes, and
+        refuses to overwrite unless overwrite=true.
+        """
+
+        try:
+            result = docker_sandbox.copy_to_artifacts(
+                source_path=source_path,
+                artifact_path=artifact_path,
+                overwrite=overwrite,
+            )
+        except DockerSandboxError as exc:
+            result = {
+                "ok": False,
+                "error": str(exc),
+                "hint": "Install/start Docker or disable code execution with SLOTFLOW_CODE_EXECUTION_ENABLED=false.",
+                "source": "slotflow_docker_artifact_copy",
+            }
+        return json.dumps(result, ensure_ascii=False)
+
     @tool("docker_engine_setup")
     def docker_engine_setup_tool(
         action: str = "check",
@@ -88,4 +120,4 @@ def build_sandbox_tools(
         )
         return json.dumps(result, ensure_ascii=False)
 
-    return [sandbox_exec, docker_engine_setup_tool]
+    return [sandbox_exec, sandbox_artifact_copy, docker_engine_setup_tool]

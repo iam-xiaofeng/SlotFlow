@@ -77,31 +77,23 @@ export const MODE_OPTIONS: Record<ChatMode, { label: string; description: string
 
 export function ComposerTodoPanel({
   todos,
-  todoRevision,
-  isStreaming,
+  todoListKey,
 }: {
   todos: ComposerTodo[];
-  todoRevision: number;
-  isStreaming: boolean;
+  todoListKey: string | null;
 }) {
-  // Auto-expand whenever a todo list exists and keep it visible after completion. The
-  // panel is the primary visual surface for write_todos; collapsing it at run end makes
-  // users think the tool never updated the UI.
+  // Auto-expand only when a genuinely new todo list appears. Status-only updates should
+  // not override the user's manual collapsed state.
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const previousTodoRevisionRef = useRef(todoRevision);
+  const previousTodoListKeyRef = useRef(todoListKey);
 
   useEffect(() => {
-    if (previousTodoRevisionRef.current !== todoRevision && todos.length > 0) {
+    const listChanged = previousTodoListKeyRef.current !== todoListKey;
+    if (listChanged && todoListKey && todos.length > 0) {
       setIsCollapsed(false);
     }
-    previousTodoRevisionRef.current = todoRevision;
-  }, [todoRevision, todos.length]);
-
-  useEffect(() => {
-    if (isStreaming && todos.length > 0) {
-      setIsCollapsed(false);
-    }
-  }, [isStreaming, todos.length]);
+    previousTodoListKeyRef.current = todoListKey;
+  }, [todoListKey, todos.length]);
 
   if (todos.length === 0) {
     return null;

@@ -1807,3 +1807,289 @@ SlotFlow 之前只有 agent 工具和产物预览：
   又踩掉其增强;靠 `git checkout HEAD -- <files>` + 关键符号核验恢复共存。
 - **规约:同一时间只允许一个会话写这棵树**;交接一律经
   HANDOFF_CROSS_SESSION_*.md,接手前先 `git log` 对时间线。
+
+## 33. 迭代 25(2026-07-06):subagent 三层角色库 + todo/Skills/工作区前端修正
+
+### 33.1 背景与设计目标
+
+用户要求把 subagent 提示词借鉴 `https://github.com/msitarzewski/agency-agents`,
+但不能把 150+ 具体角色全部暴露给父模型。原因很明确:父模型如果一次看到全部角色
+提示词,上下文会被提示词库吞掉,角色选择反而变差。目标是保留 SlotFlow 现有 6 个
+功能型 subagent,新增 6-8 个领域分类层,具体角色提示词文件化存储,只在真正委派给
+子 agent 时按需加载一个角色。
+
+### 33.2 代码实况(已按仓库规约读代码核对)
+
+- Layer 1 功能角色仍来自 `backend/app/harness/subagents/config.py` 的
+  `DEFAULT_SUBAGENT_PROFILES`: `researcher`, `analyst`, `planner`, `coder`,
+  `reviewer`, `writer`。这是主模型选择 `task_tool(agent_name=...)` 的第一层。
+- Layer 2 领域分类由 `backend/app/harness/subagents/role_catalog.py` 的
+  `DEFAULT_ROLE_DOMAINS` 定义: `engineering`, `design`, `finance`, `market`,
+  `sales`, `product`, `research`, `specialized`。每个 domain 只包含描述、
+  division 列表和 sample role metadata。
+- Layer 3 具体角色提示词来自
+  `backend/app/harness/subagents/agency_agents/roles/*/*.md`。本次从
+  `msitarzewski/agency-agents` 本地克隆复制,保留 upstream `LICENSE` 与
+  `divisions.json`;当前 `find ... -maxdepth 2 -name '*.md'` 计数为 220。
+- `SubagentRoleCatalog.domains()` 只返回 domain 摘要、role_count 和前 5 个
+  sample_roles,不返回 `prompt` 字段。父模型通过 `subagent_list` 看到的是
+  compact metadata,不是完整提示词库。
+- `SubagentRoleCatalog.resolve(domain, role_name, task, context, expected_output)` 在
+  `task_tool` 执行时解析一个角色。显式 `role_name` 优先;没有 `role_name` 但有
+  `domain` 时,用 task/context/output 的词项对 domain 内角色做轻量匹配。单个角色
+  prompt 最多注入 `MAX_ROLE_TEMPLATE_CHARS=12000`。
+- `backend/app/harness/subagents/tools.py::build_subagent_system_prompt` 仅对子 agent
+  系统提示词追加 `<slotflow-agency-role>` 块,包含 id/name/domain/division/path/
+  description 和具体 prompt。父图不读也不总结完整角色库。
+- `backend/app/harness/builder.py` 的 `<slotflow-operating-procedure>` 现在明确告诉
+  主模型:需要委派且 role fit 重要时先调用 `subagent_list`,选择 Layer 1 的
+  `agent_name`,再按需把 `domain` 和 `role_name` 传给 `task_tool`;不要要求查看或总结
+  全量角色库。
+
+### 33.3 为什么这样放边界
+
+这个设计把“角色选择”和“角色执行”拆开:
+
+1. 父模型只需要足够信息来决定是否委派、委派给哪个功能角色、是否需要领域角色。
+2. 具体行业/岗位提示词只影响被委派的子 agent,不会污染父模型的全局行为。
+3. `subagent_list` 是发现/选择工具,`task_tool` 是加载/执行边界;这与现有
+   `task_tool` 子图隔离、`subagent_limit` 并发上限兼容。
+4. 即使 agency-agents 后续继续扩展,父模型上下文仍稳定,因为暴露面只随 domain
+   摘要和少量 sample metadata 增长。
+
+这不是主图并行 subagent 的最终形态;`task_tool` 仍是工具调用边界,§Roadmap 的
+`Send`+`merge` 主图并行分支仍可后续推进。当前改动先解决“如何选对专业角色且不把
+提示词库塞爆上下文”的问题。
+
+### 33.4 相关前端交互修正
+
+- Skills 目录删除硬编码推荐 Skills 区域。`directory-modal.tsx` 不再包含
+  `RECOMMENDED_SKILLS` / `RecommendedSkillsSection`;空状态只提示用右上角安装或上传。
+- `ComposerTodoPanel` 的自动展开改为只看 `todoListKey`。`use-chat-stream.ts`
+  继续用完整 todo signature 去重状态更新,但 `todoListKey` 只由 todo content 列表
+  生成;因此 pending/in_progress/completed 的状态推进不会把用户手动折叠的面板重新
+  弹开。只有内容列表真正变化(等价于新 todo list)才自动展开。
+- 右侧工作区 reader/preview 扩展了常见格式: `.tsx/.jsx/.css/.sql/.graphql/.svg`
+  等源码文本,`.drawio`,`.xlsx/.xlsm`,`.pptx`;旧二进制 `.xls/.ppt` 只给 media type
+  和 unsupported-binary 说明,不做脆弱解析。
+- 前端视觉层做了轻量 polish:主工作区背景层次、composer/消息/工作区面板/目录卡片
+  的短动效和 hover 反馈。动效通过 `prefers-reduced-motion` 降级。
+
+### 33.5 当前验证结果
+
+- `cd backend && uv run pytest tests/test_harness_subagents.py tests/test_harness_tools.py -q`
+  → 20 passed。
+- `cd frontend && pnpm typecheck` → passed。
+- `python3 -m py_compile backend/app/harness/sandbox/readers.py
+  backend/app/harness/subagents/role_catalog.py backend/app/harness/subagents/tools.py`
+  → passed。
+
+尚未做 live 模型探针:本轮改动的 subagent 角色选择依赖模型主动调用 `subagent_list`
+和 `task_tool(domain, role_name)`,离线测试覆盖了工具输出、角色解析和子 agent prompt
+注入,但真实模型是否稳定选择合适 role 仍需前端人工验证或后续 live probe。
+
+## 34. 迭代 26(2026-07-06):subagent 三层架构审查 + Docker 产物发布 + 新消息顶部锚定
+
+### 34.1 三层 subagent 架构审查结论
+
+用户追问“三层 subagents 架构是不是最优,主 agent 会不会被搞晕”。按当前代码核对后,
+结论是:三层方向是对的,但初版还缺一个减压阀。
+
+保留三层的理由:
+
+1. Layer 1 仍是 6 个功能型 profile(`researcher/analyst/planner/coder/reviewer/writer`),
+   主模型先按任务形态选 worker,不需要先理解 220 个行业角色。
+2. Layer 2 只有 8 个 domain,主模型看到的是 compact metadata,不是完整 prompt body。
+3. Layer 3 的 agency-agents markdown 只在 `task_tool` 子图执行时加载一个角色模板,不会污染
+   父模型的长期行为或占用父模型上下文。
+
+初版风险:
+
+- `subagent_list` 每个 domain 暴露前 5 个 sample role。这个数量不大,但 sample role 不是
+  搜索接口;主模型如果没看到想要的角色,可能猜 `role_name`,也可能因为中文任务关键词和英文
+  role metadata 不匹配而不传 Layer 3。
+- 自动 `resolve(domain, task, context, expected_output)` 只做轻量英文词项匹配。中文任务
+  只传 domain 时可能选不到具体 role。选不到 role 不会坏掉,但会退化成“功能 profile +
+  domain 文字”,专业角色增益变弱。
+
+本轮修正:
+
+- 新增 `SubagentRoleCatalog.search(query, domain, max_results)`,只返回 bounded metadata,
+  不读取/返回 prompt body。
+- 新增 `subagent_role_search` 工具。主模型需要精确职业角色时,先用 `subagent_list` 选 Layer 1/2,
+  再用 `subagent_role_search(query, domain)` 获取 1-20 个候选,最后把一个 `role_name`/id 传给
+  `task_tool`。
+- 搜索 query 无命中时回退到该 domain 的稳定短名单,避免中文/非英文任务返回空列表,让主模型仍有
+  可选候选。
+- `harness/builder.py` 的 operating procedure 收紧为:通常只传 Layer 2 `domain`;只有精确角色
+  真重要时才调用 `subagent_role_search`。这比让主模型在 `subagent_list` 的 samples 里硬猜更稳。
+
+判断:这个架构不是最终的“最优”形态,但在当前 `task_tool` 子图边界下是合理的局部最优。真正的下一步
+不是继续给父模型塞更多角色信息,而是做确定性 role router 或主图级 `Send(subagent)×N` 并行分支。
+当前版本不会因为 220 个角色被搞晕,因为父模型看不到 220 个 prompt;剩余风险是模型是否主动调用
+`subagent_role_search`,这仍是 prompt/tool-use 软行为,需要 live 探针或前端人工验证。
+
+### 34.2 Docker 产物发布工具
+
+用户要求“加上能把 docker 中产生的文件复制到产物中的工具”。代码边界核对:
+
+- `LazyDockerSandbox` 已把 `/workspace/artifacts` bind mount 到 host workspace 的 `artifacts/`,
+  所以模型如果一开始就写 `/workspace/artifacts/<thread>/...`,文件已经在产物面板可发现。
+- 真正缺口是脚本经常在当前 scratch workdir(`/workspace/work/<thread>`)或 `/tmp` 里先生成二进制/
+  图表/中间文件,之后没有受控方式把单个文件发布到当前线程的 artifact folder。
+
+本轮新增:
+
+- `LazyDockerSandbox.copy_to_artifacts(source_path, artifact_path, overwrite)`:
+  - `source_path` 允许相对当前线程 workdir、`/workspace/work/<thread>`、`/tmp`、或当前线程 artifact
+    folder。
+  - `artifact_path` 只能落到当前线程 artifact folder;绝对路径也必须在当前线程
+    `/workspace/artifacts/<thread>` 内。
+  - 只复制单个文件,不复制目录。
+  - 用 `max_write_bytes` 做大小上限。
+  - 默认拒绝覆盖,除非 `overwrite=true`。
+  - 复制在容器内通过 `docker exec ... sh -lc 'cp ...'` 完成,不引入宿主机 shell 写工具。
+- `build_sandbox_tools` 暴露 `sandbox_artifact_copy`。它和 `sandbox_exec` 一样在 Docker 不可用时返回
+  结构化 JSON 错误,不让 graph 崩。
+- `tool_status_event_from_tool_call` 增加 `sandbox_artifact_copy` 的 `tool.status`,前端能看到
+  “正在发布 Docker 文件到产物”。
+- `harness/builder.py` 系统提示更新:直接文本/内容产物仍用 `artifact_write`;Docker 内已经生成的文件
+  用 `sandbox_artifact_copy` 发布到产物面板。
+
+安全边界:这不是宿主机 copy 工具,也不是任意 docker cp。源路径被限制在容器内的当前线程 workdir、
+`/tmp` 或当前线程 artifacts;目标被限制在当前线程 artifact folder。继续禁止模型使用 host
+shell/terminal/MCP execution tools。
+
+### 34.3 新消息顶部锚定
+
+用户要求“当用户发送一个新消息时,用户的消息不要显示到最下面了,直接移到最上面”。
+
+根因在前端滚动策略:旧 `message-list.tsx` 在 assistant 首个 token 出现时调用
+`scrollViewportToBottom("smooth")`,之后如果 near-bottom 就继续 auto-follow。这样新 user bubble
+通常出现在底部附近,assistant 输出继续把视口拉到末尾,不符合“新一轮从问题往下读”的体验。
+
+本轮改法:
+
+- 保持消息数组时间顺序,不重排消息。
+- 新增 `scrollUserMessageToTurnTop`,在发送后流式期间把最新 user bubble 锚到 viewport 顶部附近。
+- 首个 assistant token 不再无条件滚到底部;如果有最新 user message,继续锚 user bubble。
+- 流式期间加一个临时底部 spacer,让“最新 user message 接近顶部”在 assistant 内容还很短时也成立。
+  `scrollViewportToBottom` 改为滚到真实 `messagesEndRef`,不是滚到 spacer 末端,避免底部空白影响跳转。
+- 用户手动滚动后,`userScrollIntentRef` 会阻止自动锚定刷新,避免生成完成时强行抢滚动。
+
+### 34.4 当前验证结果
+
+- `cd backend && uv run pytest tests/test_harness_sandbox.py tests/test_harness_subagents.py
+  tests/test_tool_registry.py tests/test_harness_tools.py tests/test_harness_builder.py
+  tests/test_agent_adapter.py -q` → 98 passed。
+- `cd backend && uv run ruff check app tests` → passed。
+- `cd frontend && pnpm typecheck` → passed。
+- 真实 Docker 探测:在临时 workspace 中用 `sandbox_exec` 生成 `docker-output.txt`,再用
+  `copy_to_artifacts(source_path="docker-output.txt", artifact_path="probe/docker-output.txt")`
+  发布;结果 `copy_ok=true`,host 文件
+  `artifacts/copy-probe/probe/docker-output.txt` 存在且内容为 `artifact from docker`。
+
+仍需人工验证:前端新 turn 锚定属于视觉交互,单元/类型测试只能保证代码路径和类型正确,不能替代在浏览器里
+确认“用户消息出现在顶部、assistant 从下面长出来、手动滚动不被抢回”。
+
+## 35. 迭代 27(2026-07-07):fresh clone bootstrap / Docker hardening / env template
+
+### 35.1 背景
+
+用户要求最后检查 `bootstrap.sh`:新 clone 仓库的人不管 Linux 版本如何,最好运行一次就能把
+SlotFlow 所有环境配好,尤其 Docker 不要脆弱;同时新增一个可提交的 `.env_example`,列出所有可配置
+功能,默认开启功能,但模型 URL/API key 用注释给新用户填写。
+
+这不是模型推理链路的算法改造,但它直接影响两个 harness 边界:
+
+1. `sandbox_exec` / `sandbox_artifact_copy` 的宿主机前置依赖是 Docker Engine。如果 bootstrap 没把 Docker
+   装好或启动好,模型会在第一轮真实代码执行时失败。
+2. `docker_engine_setup` 是模型唯一允许触碰宿主机 Docker setup 的受控工具。它的安装脚本和
+   `bootstrap.sh` 必须同一套支持范围,否则“首启脚本能装”和“运行时补救工具能装”会分叉。
+
+### 35.2 bootstrap.sh 代码实况
+
+按代码核对后,`bootstrap.sh` 现在的顺序是:
+
+1. 安装/验证 Makefile 依赖:`make`, `curl`, `git`, Python/build tools, `fuser`/`psmisc`。
+   支持 apt/dnf/yum/pacman/apk/zypper;Homebrew 是非 Linux 便利分支。
+2. 安装 `uv`。
+3. 从 `frontend/package.json` 的 `packageManager` 解析 pnpm 版本,安装 Node 22 + pnpm;已有 Node>=20 时只补
+   pnpm,否则用 Volta。
+4. `backend/uv sync` 与 `frontend/pnpm install --frozen-lockfile`。
+5. 如果 `backend/.env` 不存在,复制 `backend/.env_example`;已存在则不覆盖,避免覆盖本机密钥。
+6. Docker setup:
+   - Docker CLI 不存在时按 apt/dnf/yum/pacman/apk/zypper 安装 Docker Engine。compose 包不是
+     SlotFlow 的硬依赖,所以 apt/dnf/yum/apk/zypper 分支都有“带 compose → 只装 docker”的 fallback。
+   - 将当前用户加入 `docker` 组。这里允许交互 sudo,因为用户正在主动运行 bootstrap;但脚本仍明确提示
+     需要重新登录后非 sudo Docker 才对后端进程生效。
+   - WSL 且 PID1 非 systemd 时,编辑 `/etc/wsl.conf` 设置 `[boot] systemd=true`。如果 `[boot]` 已存在但没有
+     systemd,Python 分支会合并写入,不是简单追加重复段。
+   - 启动 daemon 的回退链路是 systemctl → service → rc-service → `nohup dockerd`。daemon 探测/启动用
+     `sudo -n` 非交互,避免后台路径卡住;需要权限时失败并打印明确 warning。
+   - 预拉镜像时优先当前用户 `docker`,只有当前用户不能访问 daemon 时才走 root 通道。
+   - 直连 Docker Hub 拉取失败后才写 registry mirrors;写入时若已有 `registry-mirrors` 则不改。没有 mirrors 时
+     先备份现有 `/etc/docker/daemon.json`,再用 Python 合并 JSON,避免覆盖用户已有 Docker daemon 配置。
+
+无法承诺“任何 Linux 100% 自动成功”的原因也写进文档:企业镜像源、无 sudo、rootless Docker、Docker Desktop
+外部 daemon、发行版改包名、被防火墙阻断 Docker Hub 等都不是仓库脚本能完全控制的状态。现在的目标是:
+常见 Linux/WSL 自动配置;不能自动配置时失败清楚,并让运行时 `docker_engine_setup` 返回同一类固定安装脚本。
+
+### 35.3 docker_engine_setup 同步
+
+`backend/app/harness/sandbox/docker_engine.py` 同步扩展:
+
+- `SUPPORTED_INSTALL_MANAGERS = {apt, dnf, yum, pacman, apk, zypper}`。
+- `/etc/os-release` 识别 Debian/Ubuntu/Linux Mint/Pop/Raspbian、Fedora、RHEL/CentOS/Amazon Linux、Rocky/Alma,
+  Arch/Manjaro/EndeavourOS、Alpine、openSUSE/SLES。RHEL-like 机器优先检查实际是否有 `dnf`,否则用 `yum`。
+- `ensure_daemon()` 的启动链路与 bootstrap 一致:systemctl → service → rc-service → direct dockerd。非 root 时
+  用 `sudo -n`,root 进程不再硬编码 sudo。
+- install script 和自动 install 都只执行固定命令,仍没有任意 shell/script 参数。`install` 仍必须同时满足
+  `SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL=true` 和 `confirm_host_install=true`,且只应在用户明确要求安装 Docker
+  Engine 后调用。
+
+安全边界不变:`docker_engine_setup` 只处理 Docker Engine 前置依赖,不成为通用宿主机 shell。模型运行代码、
+装包、执行 Skill helper 仍只能用 `sandbox_exec`;已生成文件发布到产物面板仍用 `sandbox_artifact_copy`。
+
+### 35.4 `.env_example` 与新增 env flags
+
+新增 `backend/.env_example`,与 `make dev` 的后端启动路径一致。内容包括:
+
+- provider key/base URL:DeepSeek/OpenAI/Anthropic/custom relay 都写出,但 API key 与 base URL 默认注释。
+- discovery/runtime provider knobs:`CUSTOM_MODELS`, `CUSTOM_VALIDATE_MODELS`, `SLOTFLOW_RELAY_USER_AGENT`。
+- FastAPI/frontend URL 说明。Next.js 不自动读取 `backend/.env`,所以 frontend-only 变量只作为注释说明。
+- chat/checkpointer/system prompt/storage 路径。
+- harness feature flags,默认全部开启。
+- skills/memory/MCP/workspace/network/Docker sandbox/terminal/title/bootstrap knobs。
+
+为了让这个示例不是“写了但代码不读”,本轮补了 `load_middleware_config_from_env()` 的缺口:
+
+- `SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION` → `proactive_memory_extraction_enabled`
+- `SLOTFLOW_CLARIFY_GATE` → `clarify_gate_enabled`
+- `SLOTFLOW_SUBAGENT_LIMIT` → `subagent_limit_enabled`
+- `SLOTFLOW_SUBAGENT_MAX_CONCURRENT` → `subagent_max_concurrent`
+
+这些变量只改变已有 graph 行为开关,不新增新节点或新工具。默认值仍与 dataclass 默认一致:主动记忆抽取开,
+澄清门开,subagent 并发限制开,并发上限 3。
+
+### 35.5 验证
+
+本轮验证:
+
+- `bash -n bootstrap.sh` → passed。
+- `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1 SLOTFLOW_SKIP_DOCKER=1 ./bootstrap.sh` → passed,不覆盖既有
+  `backend/.env`。
+- `cd backend && uv run pytest tests/test_harness_sandbox.py tests/test_runtime.py -q` → 47 passed。
+- `cd backend && uv run ruff check app tests` → passed。
+- `make verify` → backend `332 passed, 1 skipped`, frontend `pnpm typecheck` passed, frontend
+  `pnpm build` passed。
+- `git diff --check` → passed。
+
+局部测试覆盖点:
+
+- Docker 安装脚本仍返回受控固定命令。
+- Fedora/dnf、Alpine/apk、openSUSE/zypper、CentOS/yum 分支可生成 install script。
+- runtime `.env` 中新增 harness flags 能映射到 `SlotFlowMiddlewareConfig`。
+
+真实新机器 Docker 安装不可在当前已配置工作站完整模拟,所以 bootstrap 的跨发行版覆盖主要依赖语法检查、
+分支单测、跳过系统包/Docker 的 bootstrap 跑通,以及对固定命令的代码审计。

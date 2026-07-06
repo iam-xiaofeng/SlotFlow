@@ -220,8 +220,8 @@ export function WorkspacePanel({
     <aside
       aria-hidden={!open}
       className={cn(
-        "relative h-full min-w-0 shrink-0 flex-col bg-background py-4 pl-0 pr-4",
-        open ? "flex" : "hidden",
+        "relative h-full min-w-0 shrink-0 flex-col bg-transparent py-4 pl-0 pr-4 transition-[width,opacity] duration-200",
+        open ? "flex opacity-100" : "hidden opacity-0",
       )}
       style={{ width: `var(${panelWidthVariable}, ${visibleWidth}px)` }}
     >
@@ -235,9 +235,9 @@ export function WorkspacePanel({
         <span className="absolute left-1/2 top-1/2 h-16 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border opacity-0 shadow-sm transition-opacity group-hover/resize-handle:opacity-100" />
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-background shadow-sm">
+      <div className="slotflow-rise-in flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-background/92 shadow-[0_22px_70px_-42px_rgba(15,23,42,0.55)] backdrop-blur">
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-muted/40 px-2">
+          <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-background/80 px-2 backdrop-blur">
             {panelMode === "files" ? (
               <WorkspaceFileSelector
                 threads={threads}
@@ -267,7 +267,7 @@ export function WorkspacePanel({
                   variant={viewMode === "code" ? "secondary" : "ghost"}
                   size="icon-xs"
                   title="源码"
-                  className="size-7 rounded-md"
+                  className="slotflow-hover-lift size-7 rounded-md"
                   onClick={() => setViewMode("code")}
                 >
                   <Code2 className="size-4" />
@@ -278,7 +278,7 @@ export function WorkspacePanel({
                   variant={viewMode === "preview" ? "secondary" : "ghost"}
                   size="icon-xs"
                   title="预览"
-                  className="size-7 rounded-md"
+                  className="slotflow-hover-lift size-7 rounded-md"
                   onClick={() => setViewMode("preview")}
                 >
                   <Eye className="size-4" />
@@ -292,7 +292,7 @@ export function WorkspacePanel({
                 variant={panelMode === "files" ? "secondary" : "ghost"}
                 size="icon-xs"
                 title="文件"
-                className="size-7 rounded-md"
+                className="slotflow-hover-lift size-7 rounded-md"
                 onClick={() => setPanelMode("files")}
               >
                 <FileText className="size-4" />
@@ -303,7 +303,7 @@ export function WorkspacePanel({
                 variant={panelMode === "terminal" ? "secondary" : "ghost"}
                 size="icon-xs"
                 title="终端"
-                className="size-7 rounded-md"
+                className="slotflow-hover-lift size-7 rounded-md"
                 onClick={() => {
                   setTerminalEnabled(true);
                   setPanelMode("terminal");

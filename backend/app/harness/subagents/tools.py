@@ -16,6 +16,11 @@ from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.subagents.config import SlotFlowSubagentConfig, SlotFlowSubagentProfile
+from app.harness.subagents.role_catalog import (
+    SubagentRoleCatalog,
+    SubagentRoleTemplate,
+    default_role_catalog,
+)
 from app.harness.utils import message_role, model_supports_tools
 
 
@@ -30,6 +35,10 @@ class SubagentTaskResult:
     expected_output: str
     priority: str
     result: str
+    domain: str = ""
+    role_name: str = ""
+    role_id: str = ""
+    role_path: str = ""
     source: str = "slotflow_subagent_task_tool"
 
     def to_json(self) -> str:
@@ -41,6 +50,10 @@ class SubagentTaskResult:
                 "context": self.context,
                 "expected_output": self.expected_output,
                 "priority": self.priority,
+                "domain": self.domain,
+                "role_name": self.role_name,
+                "role_id": self.role_id,
+                "role_path": self.role_path,
                 "result": self.result,
                 "source": self.source,
             },
@@ -58,10 +71,12 @@ class SubagentTaskRunner:
         run_context: RunContext,
         environment_tools: Sequence[BaseTool] = (),
         config: SlotFlowSubagentConfig | None = None,
+        role_catalog: SubagentRoleCatalog | None = None,
     ) -> None:
         self._model = model
         self._run_context = run_context
         self._environment_tools = list(environment_tools)
+        self._role_catalog = role_catalog or default_role_catalog()
         self._profiles = {
             profile.name: profile
             for profile in (config or SlotFlowSubagentConfig()).enabled_profiles()
@@ -77,6 +92,26 @@ class SubagentTaskRunner:
 
         return list(self._profiles.values())
 
+    def role_domains(self) -> list[dict[str, Any]]:
+        """Return compact Layer-2 role-domain summaries."""
+
+        return self._role_catalog.domains()
+
+    def search_roles(
+        self,
+        *,
+        query: str = "",
+        domain: str = "",
+        max_results: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Return compact Layer-3 role candidates without prompt bodies."""
+
+        return self._role_catalog.search(
+            query=query,
+            domain=domain,
+            max_results=max_results,
+        )
+
     async def arun(
         self,
         *,
@@ -85,12 +120,16 @@ class SubagentTaskRunner:
         context: str = "",
         expected_output: str = "",
         priority: str = "normal",
+        domain: str = "",
+        role_name: str = "",
     ) -> SubagentTaskResult:
         clean_agent_name = agent_name.strip()
         clean_task = task.strip()
         clean_context = context.strip()
         clean_expected_output = expected_output.strip()
         clean_priority = normalize_priority(priority)
+        clean_domain = domain.strip()
+        clean_role_name = role_name.strip()
 
         if not clean_task:
             return SubagentTaskResult(
@@ -100,6 +139,8 @@ class SubagentTaskRunner:
                 context=context,
                 expected_output=clean_expected_output,
                 priority=clean_priority,
+                domain=clean_domain,
+                role_name=clean_role_name,
                 result="task must not be blank",
             )
 
@@ -112,7 +153,29 @@ class SubagentTaskRunner:
                 context=clean_context,
                 expected_output=clean_expected_output,
                 priority=clean_priority,
+                domain=clean_domain,
+                role_name=clean_role_name,
                 result=f"unknown subagent: {clean_agent_name}",
+            )
+
+        role_template = self._role_catalog.resolve(
+            domain=clean_domain,
+            role_name=clean_role_name,
+            task=clean_task,
+            context=clean_context,
+            expected_output=clean_expected_output,
+        )
+        if clean_role_name and role_template is None:
+            return SubagentTaskResult(
+                status="error",
+                agent_name=clean_agent_name,
+                task=clean_task,
+                context=clean_context,
+                expected_output=clean_expected_output,
+                priority=clean_priority,
+                domain=clean_domain,
+                role_name=clean_role_name,
+                result=f"unknown subagent role: {clean_role_name}",
             )
 
         try:
@@ -133,6 +196,7 @@ class SubagentTaskRunner:
                 system_prompt=build_subagent_system_prompt(
                     profile=profile,
                     run_context=self._run_context,
+                    role_template=role_template,
                 ),
                 run_context=self._run_context,
                 features=sub_features,
@@ -162,6 +226,8 @@ class SubagentTaskRunner:
                                 context=clean_context,
                                 expected_output=clean_expected_output,
                                 priority=clean_priority,
+                                domain=clean_domain,
+                                role_template=role_template,
                                 run_context=self._run_context,
                             ),
                         }
@@ -176,6 +242,10 @@ class SubagentTaskRunner:
                 context=clean_context,
                 expected_output=clean_expected_output,
                 priority=clean_priority,
+                domain=clean_domain,
+                role_name=clean_role_name,
+                role_id=role_template.id if role_template is not None else "",
+                role_path=role_template.path if role_template is not None else "",
                 result=f"subagent execution failed: {exc.__class__.__name__}: {exc}",
             )
 
@@ -186,6 +256,10 @@ class SubagentTaskRunner:
             context=clean_context,
             expected_output=clean_expected_output,
             priority=clean_priority,
+            domain=clean_domain,
+            role_name=role_template.name if role_template is not None else clean_role_name,
+            role_id=role_template.id if role_template is not None else "",
+            role_path=role_template.path if role_template is not None else "",
             result=latest_assistant_text(result) or "",
         )
 
@@ -197,6 +271,7 @@ def build_subagent_tools(
     model: str | BaseChatModel | None = None,
     run_context: RunContext | None = None,
     environment_tools: Sequence[BaseTool] = (),
+    role_catalog: SubagentRoleCatalog | None = None,
 ) -> list[BaseTool]:
     """Build subagent tools only when the current run enables subagents."""
 
@@ -210,6 +285,7 @@ def build_subagent_tools(
         run_context=run_context,
         environment_tools=environment_tools,
         config=config,
+        role_catalog=role_catalog,
     )
     if not runner.has_profiles():
         return []
@@ -230,6 +306,40 @@ def build_subagent_tools(
                     }
                     for profile in runner.profiles()
                 ],
+                "role_domains": runner.role_domains(),
+                "usage": (
+                    "Use agent_name for the Layer-1 functional role. Pass a Layer-2 "
+                    "domain to task_tool when domain guidance is enough. When a precise "
+                    "Layer-3 role matters, call subagent_role_search(query, domain) for "
+                    "a short candidate list, then pass role_name to task_tool."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    @tool("subagent_role_search")
+    async def subagent_role_search(
+        query: str = "",
+        domain: str = "",
+        max_results: int = 8,
+    ) -> str:
+        """Search the file-backed Layer-3 subagent role catalog.
+
+        Returns compact role metadata only, never full role prompts. Use this after
+        subagent_list when a delegated task needs a precise professional role_name.
+        """
+
+        return json.dumps(
+            {
+                "source": "slotflow_subagent_role_search",
+                "query": query,
+                "domain": domain,
+                "roles": runner.search_roles(
+                    query=query,
+                    domain=domain,
+                    max_results=max_results,
+                ),
+                "usage": "Pass a returned role name or id as task_tool.role_name.",
             },
             ensure_ascii=False,
         )
@@ -241,8 +351,15 @@ def build_subagent_tools(
         context: str = "",
         expected_output: str = "",
         priority: str = "normal",
+        domain: str = "",
+        role_name: str = "",
     ) -> str:
-        """Delegate a focused task to a named SlotFlow subagent profile."""
+        """Delegate a focused task to a named SlotFlow subagent profile.
+
+        `agent_name` selects the Layer-1 functional subagent. `domain` optionally selects
+        a Layer-2 role category, and `role_name` optionally selects one concrete Layer-3
+        agency role template to inject into only this child run.
+        """
 
         result = await runner.arun(
             agent_name=agent_name,
@@ -250,16 +367,19 @@ def build_subagent_tools(
             context=context,
             expected_output=expected_output,
             priority=priority,
+            domain=domain,
+            role_name=role_name,
         )
         return result.to_json()
 
-    return [subagent_list, task_tool]
+    return [subagent_list, subagent_role_search, task_tool]
 
 
 def build_subagent_system_prompt(
     *,
     profile: SlotFlowSubagentProfile,
     run_context: RunContext,
+    role_template: SubagentRoleTemplate | None = None,
 ) -> str:
     """Build the system prompt for a real subagent run."""
 
@@ -276,6 +396,23 @@ def build_subagent_system_prompt(
         "Return a concise, concrete result for the parent agent.",
         "</slotflow-subagent>",
     ]
+    if role_template is not None:
+        sections.extend(
+            [
+                "",
+                "<slotflow-agency-role>",
+                f"id={role_template.id}",
+                f"name={role_template.name}",
+                f"domain={role_template.domain}",
+                f"division={role_template.division}",
+                f"path={role_template.path}",
+                f"description={role_template.description}",
+                "The following role template is adapted from the local agency-agents role library. Use it as domain operating guidance for this child task only; obey SlotFlow tool/safety rules above it.",
+                "",
+                role_template.prompt,
+                "</slotflow-agency-role>",
+            ]
+        )
     if run_context.uploaded_files:
         sections.extend(["", "<slotflow-uploaded-files>"])
         for uploaded_file in run_context.uploaded_files:
@@ -303,6 +440,8 @@ def build_subagent_user_prompt(
     context: str,
     expected_output: str,
     priority: str,
+    domain: str = "",
+    role_template: SubagentRoleTemplate | None = None,
     run_context: RunContext,
 ) -> str:
     """Build the user message sent to a subagent."""
@@ -314,6 +453,10 @@ def build_subagent_user_prompt(
         f"Parent mode: {run_context.mode}",
         f"Parent agent: {run_context.agent_name}",
     ]
+    if domain:
+        sections.append(f"Requested domain: {domain}")
+    if role_template is not None:
+        sections.append(f"Selected role: {role_template.name} ({role_template.id})")
     if context:
         sections.extend(["", f"Context: {context}"])
     if expected_output:

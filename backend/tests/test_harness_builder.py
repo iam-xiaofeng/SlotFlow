@@ -96,6 +96,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "memory_list",
         "memory_save",
         "sandbox_exec",
+        "sandbox_artifact_copy",
         "docker_engine_setup",
         "skill_match",
         "ask_clarification",

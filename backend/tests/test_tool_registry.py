@@ -46,7 +46,7 @@ def test_registry_exposes_key_tools_per_category() -> None:
     assert {"ask_clarification"} <= names  # builtin
     assert {"write_todos"} <= names  # explicit todo requests work in every mode
     assert {"workspace_read", "workspace_grep", "artifact_write"} <= names  # workspace
-    assert {"sandbox_exec", "docker_engine_setup"} <= names  # code execution sandbox
+    assert {"sandbox_exec", "sandbox_artifact_copy", "docker_engine_setup"} <= names  # code execution sandbox
     assert {"web_fetch", "web_search"} <= names  # network
     assert {  # customization / skill + mcp discovery
         "skill_match",
@@ -72,6 +72,7 @@ def test_registry_orders_workspace_then_network_then_customization() -> None:
     assert names.index("workspace_read") < names.index("web_fetch")
     assert names.index("workspace_read") < names.index("sandbox_exec")
     assert names.index("sandbox_exec") < names.index("web_fetch")
+    assert names.index("sandbox_artifact_copy") < names.index("web_fetch")
     assert names.index("docker_engine_setup") < names.index("web_fetch")
     assert names.index("web_fetch") < names.index("skill_match")
 

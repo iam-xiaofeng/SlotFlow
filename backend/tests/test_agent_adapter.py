@@ -341,6 +341,18 @@ def test_generic_tool_call_becomes_tool_status_event() -> None:
     assert unknown.data["message"] == "正在调用工具"
 
 
+def test_sandbox_artifact_copy_tool_call_becomes_tool_status_event() -> None:
+    event = tool_status_event_from_tool_call(
+        {"name": "sandbox_artifact_copy", "args": {"source_path": "chart.png"}},
+        bundle=_bundle(),
+    )
+
+    assert event is not None
+    assert event.data["tool_name"] == "sandbox_artifact_copy"
+    assert event.data["message"] == "正在发布 Docker 文件到产物"
+    assert event.data["command"] is None
+
+
 def test_own_ui_tool_calls_do_not_become_tool_status_event() -> None:
     """澄清与 todo 工具有专属 UI,不再叠加状态芯片。"""
 

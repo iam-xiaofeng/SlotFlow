@@ -68,6 +68,7 @@ _TOOL_STATUS_SKIP = {
 
 _TOOL_STATUS_MESSAGES = {
     "sandbox_exec": "正在初始化 Docker 沙箱并执行代码",
+    "sandbox_artifact_copy": "正在发布 Docker 文件到产物",
     "artifact_write": "正在写入产物文件",
     "workspace_read": "正在读取工作区文件",
     "workspace_grep": "正在检索工作区",

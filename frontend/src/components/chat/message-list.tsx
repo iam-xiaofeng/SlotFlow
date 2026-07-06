@@ -51,6 +51,7 @@ export function MessageList({
   const userMessageSignatureRef = useRef("");
   const navigatorCloseTimerRef = useRef<number | null>(null);
   const firstTokenScrolledMessageIdsRef = useRef(new Set<string>());
+  const newTurnAnchoredUserIdsRef = useRef(new Set<string>());
   const autoFollowLatestAssistantRef = useRef(true);
   const userScrollIntentRef = useRef(false);
   const [activeUserIndex, setActiveUserIndex] = useState(0);
@@ -98,6 +99,16 @@ export function MessageList({
           latestAssistantMessage.reasoningContent?.length ?? 0,
         ].join(":")
       : null;
+  const latestUserTurnAnchorKey =
+    isStreaming && latestUserMessageId ? latestUserMessageId : null;
+  const latestUserTurnAnchorRefreshKey =
+    isStreaming && latestUserMessageId
+      ? [
+          latestUserMessageId,
+          latestAssistantMessage?.content.length ?? 0,
+          latestAssistantMessage?.reasoningContent?.length ?? 0,
+        ].join(":")
+      : null;
 
   const getViewport = useCallback(
     () =>
@@ -115,7 +126,36 @@ export function MessageList({
       }
 
       return window.requestAnimationFrame(() => {
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+        const endElement = messagesEndRef.current;
+        if (!endElement) {
+          viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+          return;
+        }
+        const viewportRect = viewport.getBoundingClientRect();
+        const endRect = endElement.getBoundingClientRect();
+        const endTop = endRect.top - viewportRect.top + viewport.scrollTop;
+        const targetTop = Math.max(0, endTop - viewport.clientHeight + endRect.height);
+        viewport.scrollTo({ top: targetTop, behavior });
+      });
+    },
+    [getViewport, messagesEndRef],
+  );
+
+  const scrollUserMessageToTurnTop = useCallback(
+    (messageId: string, behavior: ScrollBehavior) => {
+      const viewport = getViewport();
+      const element = userMessageRefs.current.get(messageId);
+      if (!viewport || !element) {
+        return null;
+      }
+
+      return window.requestAnimationFrame(() => {
+        const viewportRect = viewport.getBoundingClientRect();
+        const elementRect = element.getBoundingClientRect();
+        const elementTop = elementRect.top - viewportRect.top + viewport.scrollTop;
+        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        const targetTop = Math.min(maxScrollTop, Math.max(0, elementTop - 16));
+        viewport.scrollTo({ top: targetTop, behavior });
       });
     },
     [getViewport],
@@ -205,21 +245,62 @@ export function MessageList({
   }, [userMessageSignature, updateActiveUserMessage]);
 
   useEffect(() => {
+    const messageId = latestUserTurnAnchorKey;
+    if (!messageId || newTurnAnchoredUserIdsRef.current.has(messageId)) {
+      return;
+    }
+
+    const frame = scrollUserMessageToTurnTop(messageId, "smooth");
+    if (frame === null) {
+      return;
+    }
+
+    autoFollowLatestAssistantRef.current = false;
+    userScrollIntentRef.current = false;
+    newTurnAnchoredUserIdsRef.current.add(messageId);
+    return () => window.cancelAnimationFrame(frame);
+  }, [latestUserTurnAnchorKey, scrollUserMessageToTurnTop]);
+
+  useEffect(() => {
+    if (!latestUserTurnAnchorRefreshKey || !latestUserMessageId || userScrollIntentRef.current) {
+      return;
+    }
+
+    const frame = scrollUserMessageToTurnTop(latestUserMessageId, "auto");
+    if (frame === null) {
+      return;
+    }
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    latestUserMessageId,
+    latestUserTurnAnchorRefreshKey,
+    scrollUserMessageToTurnTop,
+  ]);
+
+  useEffect(() => {
     const messageId = latestAssistantFirstTokenScrollKey;
     if (!messageId || firstTokenScrolledMessageIdsRef.current.has(messageId)) {
       return;
     }
 
-    const frame = scrollViewportToBottom("smooth");
+    const frame = latestUserMessageId
+      ? scrollUserMessageToTurnTop(latestUserMessageId, "smooth")
+      : scrollViewportToBottom("smooth");
     if (frame === null) {
       return;
     }
 
-    autoFollowLatestAssistantRef.current = true;
+    autoFollowLatestAssistantRef.current = !latestUserMessageId;
     userScrollIntentRef.current = false;
     firstTokenScrolledMessageIdsRef.current.add(messageId);
     return () => window.cancelAnimationFrame(frame);
-  }, [latestAssistantFirstTokenScrollKey, scrollViewportToBottom]);
+  }, [
+    latestAssistantFirstTokenScrollKey,
+    latestUserMessageId,
+    scrollUserMessageToTurnTop,
+    scrollViewportToBottom,
+  ]);
 
   useEffect(() => {
     if (!latestAssistantStreamingOutputKey || !autoFollowLatestAssistantRef.current) {
@@ -309,6 +390,14 @@ export function MessageList({
             ))}
           </div>
           <div ref={messagesEndRef} />
+          <div
+            aria-hidden="true"
+            className={
+              latestUserTurnAnchorKey
+                ? "h-[58vh] shrink-0 transition-[height] duration-300 ease-out"
+                : "h-0 shrink-0 transition-[height] duration-300 ease-out"
+            }
+          />
         </div>
       </ScrollArea>
       <MessageNavigator

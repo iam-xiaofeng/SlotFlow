@@ -21,24 +21,7 @@ from app.harness.sandbox.config import SlotFlowSandboxConfig
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Which = Callable[[str], str | None]
 
-SUPPORTED_INSTALL_MANAGERS = {"apt", "dnf", "pacman"}
-
-# 依次尝试的守护进程启动方式:systemd 主机 → sysvinit 包装 → 无 init 管理的
-# WSL 等环境直接后台拉起 dockerd。全部 `sudo -n` 非交互,失败即跳下一种。
-_DAEMON_START_COMMANDS: list[tuple[str, list[str]]] = [
-    ("systemctl", ["sudo", "-n", "systemctl", "start", "docker"]),
-    ("service", ["sudo", "-n", "service", "docker", "start"]),
-    (
-        "dockerd",
-        [
-            "sudo",
-            "-n",
-            "sh",
-            "-c",
-            "nohup dockerd > /var/log/slotflow-dockerd.log 2>&1 &",
-        ],
-    ),
-]
+SUPPORTED_INSTALL_MANAGERS = {"apt", "dnf", "yum", "pacman", "apk", "zypper"}
 
 
 @dataclass(slots=True)
@@ -122,7 +105,7 @@ class DockerEngineSetup:
         }
 
     def ensure_daemon(self) -> dict[str, Any]:
-        """确保 dockerd 可达;不可达时按三级回退自动拉起并轮询等待。"""
+        """确保 dockerd 可达;不可达时按固定启动回退链路自动拉起并轮询等待。"""
 
         if self._daemon_reachable():
             return {
@@ -138,7 +121,7 @@ class DockerEngineSetup:
             }
 
         attempts: list[dict[str, Any]] = []
-        for method, command in _DAEMON_START_COMMANDS:
+        for method, command in self._daemon_start_commands():
             try:
                 result = self.runner(
                     command,
@@ -205,6 +188,27 @@ class DockerEngineSetup:
             return None
         return result.stdout.strip() if result.returncode == 0 else None
 
+    def _daemon_start_commands(self) -> list[tuple[str, list[str]]]:
+        """Return fixed daemon start commands for the current privilege context."""
+
+        prefix: list[str] = []
+        if os.geteuid() != 0 and self.which("sudo") is not None:
+            prefix = ["sudo", "-n"]
+        return [
+            ("systemctl", [*prefix, "systemctl", "start", "docker"]),
+            ("service", [*prefix, "service", "docker", "start"]),
+            ("rc-service", [*prefix, "rc-service", "docker", "start"]),
+            (
+                "dockerd",
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "nohup dockerd > /var/log/slotflow-dockerd.log 2>&1 &",
+                ],
+            ),
+        ]
+
     def install_script(self) -> dict[str, Any]:
         host = self.host_info()
         script = self._install_script_for_host(host)
@@ -219,7 +223,7 @@ class DockerEngineSetup:
             "hint": (
                 None
                 if script is not None
-                else "Automatic script generation supports Debian/Ubuntu, Fedora/RHEL-like, and Arch-like Linux hosts. Install Docker Engine manually for this host."
+                else "Automatic script generation supports Debian/Ubuntu, Fedora/RHEL-like, Arch-like, Alpine, and openSUSE/SLES Linux hosts. Install Docker Engine manually for this host."
             ),
             "source": "slotflow_docker_engine_setup",
         }
@@ -250,7 +254,7 @@ class DockerEngineSetup:
             return {
                 "ok": False,
                 "error": "unsupported host OS for automatic Docker install",
-                "hint": "Automatic install supports Debian/Ubuntu, Fedora/RHEL-like, and Arch-like Linux hosts. Use install_script if available or give OS-specific manual instructions.",
+                "hint": "Automatic install supports Debian/Ubuntu, Fedora/RHEL-like, Arch-like, Alpine, and openSUSE/SLES Linux hosts. Use install_script if available or give OS-specific manual instructions.",
                 "script": script,
                 "host": host,
                 "source": "slotflow_docker_engine_setup",
@@ -323,7 +327,7 @@ class DockerEngineSetup:
         os_id = values.get("ID", "")
         id_like = values.get("ID_LIKE", "")
         os_ids = {os_id, *id_like.split()}
-        manager = self._install_manager_for_ids(os_ids)
+        manager = self._install_manager_for_ids(os_ids, os_id=os_id)
         return {
             "os_id": os_id or None,
             "id_like": id_like or None,
@@ -345,20 +349,31 @@ class DockerEngineSetup:
             values[key] = value.strip().strip('"').lower()
         return values
 
-    def _install_manager_for_ids(self, os_ids: set[str]) -> str | None:
-        if os_ids & {"debian", "ubuntu"}:
+    def _install_manager_for_ids(self, os_ids: set[str], *, os_id: str = "") -> str | None:
+        if os_ids & {"debian", "ubuntu", "linuxmint", "pop", "raspbian"}:
             return "apt"
-        if os_ids & {"fedora", "rhel", "centos", "rocky", "almalinux"}:
+        if os_id == "fedora":
             return "dnf"
-        if os_ids & {"arch", "manjaro"}:
+        if os_ids & {"rhel", "centos", "amzn"}:
+            return "dnf" if self.which("dnf") is not None else "yum"
+        if os_ids & {"rocky", "almalinux"}:
+            return "dnf" if self.which("dnf") is not None else "yum"
+        if os_ids & {"arch", "manjaro", "endeavouros"}:
             return "pacman"
+        if os_ids & {"alpine"}:
+            return "apk"
+        if os_ids & {"opensuse", "opensuse-leap", "opensuse-tumbleweed", "suse", "sles"}:
+            return "zypper"
         return None
 
     def _manager_binary(self, manager: str) -> str | None:
         return {
             "apt": "apt-get",
             "dnf": "dnf",
+            "yum": "yum",
             "pacman": "pacman",
+            "apk": "apk",
+            "zypper": "zypper",
         }.get(manager)
 
     def _install_script_for_host(self, host: dict[str, Any]) -> str | None:
@@ -377,17 +392,69 @@ class DockerEngineSetup:
         if manager == "apt":
             return [
                 [*prefix, "apt-get", "update"],
-                [*prefix, "apt-get", "install", "-y", "docker.io", "docker-compose-v2"],
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "apt-get install -y docker.io docker-compose-v2 || "
+                    "apt-get install -y docker.io docker-compose-plugin || "
+                    "apt-get install -y docker.io",
+                ],
                 [*prefix, "systemctl", "enable", "--now", "docker"],
             ]
         if manager == "dnf":
             return [
-                [*prefix, "dnf", "install", "-y", "moby-engine", "docker-compose-plugin"],
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "dnf install -y moby-engine docker-compose-plugin || "
+                    "dnf install -y docker docker-compose-plugin || "
+                    "dnf install -y docker",
+                ],
+                [*prefix, "systemctl", "enable", "--now", "docker"],
+            ]
+        if manager == "yum":
+            return [
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "yum install -y docker docker-compose-plugin || yum install -y docker",
+                ],
                 [*prefix, "systemctl", "enable", "--now", "docker"],
             ]
         if manager == "pacman":
             return [
-                [*prefix, "pacman", "-Sy", "--noconfirm", "docker", "docker-compose"],
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "pacman -Sy --needed --noconfirm docker docker-compose || "
+                    "pacman -Sy --needed --noconfirm docker",
+                ],
+                [*prefix, "systemctl", "enable", "--now", "docker"],
+            ]
+        if manager == "apk":
+            return [
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "apk add --no-cache docker docker-cli-compose || apk add --no-cache docker",
+                ],
+                [*prefix, "rc-update", "add", "docker", "default"],
+                [*prefix, "rc-service", "docker", "start"],
+            ]
+        if manager == "zypper":
+            return [
+                [
+                    *prefix,
+                    "sh",
+                    "-c",
+                    "zypper --non-interactive install docker docker-compose || "
+                    "zypper --non-interactive install docker",
+                ],
                 [*prefix, "systemctl", "enable", "--now", "docker"],
             ]
         return []
