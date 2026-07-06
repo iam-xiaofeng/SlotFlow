@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { GraduationCap, Pencil, Telescope } from "lucide-react";
 
 import {
   type ChatMode,
@@ -22,7 +21,6 @@ import {
   ComposerActions,
   ComposerAttachments,
   ComposerError,
-  ComposerPromptChip,
   ComposerQueue,
   ComposerTextarea,
   ComposerTodoPanel,
@@ -34,7 +32,7 @@ import {
 type ChatComposerProps = {
   attachments: UploadedFileRecord[];
   todos: ComposerTodo[];
-  todoRevision: number;
+  todoListKey: string | null;
   error: string | null;
   fileInputRef: RefObject<HTMLInputElement | null>;
   isStreaming: boolean;
@@ -46,7 +44,6 @@ type ChatComposerProps = {
   selectedMode: ChatMode;
   selectedModelName: string;
   selectedThinkingEnabled: boolean;
-  showPromptChips: boolean;
   onAttachFiles: () => void;
   onCancel: () => void;
   onClearError: () => void;
@@ -65,7 +62,7 @@ export type { ComposerQueuedMessage, ComposerTodo } from "./composer-parts";
 export function ChatComposer({
   attachments,
   todos,
-  todoRevision,
+  todoListKey,
   error,
   fileInputRef,
   isStreaming,
@@ -77,7 +74,6 @@ export function ChatComposer({
   selectedMode,
   selectedModelName,
   selectedThinkingEnabled,
-  showPromptChips,
   onAttachFiles,
   onCancel,
   onClearError,
@@ -177,11 +173,10 @@ export function ChatComposer({
 
         <ComposerTodoPanel
           todos={todos}
-          todoRevision={todoRevision}
-          isStreaming={isStreaming}
+          todoListKey={todoListKey}
         />
 
-        <div className="relative z-10 overflow-hidden rounded-[1.7rem] border border-border/80 bg-background shadow-[0_18px_50px_-34px_rgba(15,23,42,0.55),0_1px_2px_rgba(15,23,42,0.04)] transition-shadow focus-within:border-foreground/15 focus-within:shadow-[0_24px_70px_-38px_rgba(15,23,42,0.62),0_1px_2px_rgba(15,23,42,0.05)]">
+        <div className="slotflow-hover-lift relative z-10 overflow-hidden rounded-xl border border-border/80 bg-background/96 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.55),0_1px_2px_rgba(15,23,42,0.04)] backdrop-blur transition-shadow focus-within:border-foreground/15 focus-within:shadow-[0_24px_70px_-38px_rgba(15,23,42,0.62),0_1px_2px_rgba(15,23,42,0.05)]">
           <div className="px-5 pb-2 pt-4 sm:px-6">
             <ComposerTextarea
               input={input}
@@ -216,15 +211,7 @@ export function ChatComposer({
             />
           </div>
         </div>
-        {showPromptChips ? (
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 group-data-[collapsible=icon]:hidden">
-            <ComposerPromptChip icon={Pencil} label="Write" />
-            <ComposerPromptChip icon={GraduationCap} label="Learn" />
-            <ComposerPromptChip icon={Telescope} label="Research" />
-          </div>
-        ) : null}
       </div>
     </form>
   );
 }
-

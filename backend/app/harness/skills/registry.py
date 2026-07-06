@@ -2,11 +2,41 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
 from app.harness.skills.parser import SKILL_FILE_NAME, parse_skill_file
 from app.harness.skills.types import Skill
+
+# Cache the disk scan (rglob + read every SKILL.md) so the prepare-node skills preflight
+# does not re-read all skill files on every turn. The scan is the main contributor to
+# first-token latency (cold ~2-3s with 25 skills). Invalidated by the skills_root mtime
+# (install/remove changes the dir mtime) and a TTL safety net.
+_SKILL_SCAN_CACHE: dict[tuple[str, int, float], tuple[float, list[Skill]]] = {}
+_SKILL_SCAN_TTL = 60.0
+
+
+def _scan_all_skills(skills_root: Path) -> list[Skill]:
+    now = time.monotonic()
+    try:
+        root_mtime = skills_root.stat().st_mtime_ns
+    except OSError:
+        return []
+    key = (str(skills_root), root_mtime, 0.0)
+    cached = _SKILL_SCAN_CACHE.get(key)
+    if cached is not None and now - cached[0] < _SKILL_SCAN_TTL:
+        return cached[1]
+    skills = [skill for skill in iter_skill_files(skills_root) if skill is not None]
+    skills.sort(key=lambda skill: skill.name)
+    _SKILL_SCAN_CACHE[key] = (now, skills)
+    return skills
+
+
+def invalidate_skill_scan_cache() -> None:
+    """Drop the disk-scan cache (call after installing/removing a Skill)."""
+
+    _SKILL_SCAN_CACHE.clear()
 
 
 def load_enabled_skills(
@@ -23,12 +53,10 @@ def load_enabled_skills(
     if skills_root is None or not skills_root.exists():
         return []
 
-    skills = [
-        skill
-        for skill in iter_skill_files(skills_root)
-        if skill is not None and (enabled_names is None or skill.name in enabled_names)
-    ]
-    return sorted(skills, key=lambda skill: skill.name)
+    skills = _scan_all_skills(skills_root)
+    if enabled_names is not None:
+        skills = [skill for skill in skills if skill.name in enabled_names]
+    return skills
 
 
 def iter_skill_files(skills_root: Path) -> Iterable[Skill | None]:

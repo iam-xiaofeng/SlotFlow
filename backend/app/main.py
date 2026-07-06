@@ -14,6 +14,7 @@ from app.chat.runtime import (
 from app.mcp.routes import router as mcp_router
 from app.memory.routes import router as memory_router
 from app.skills.routes import router as skills_router
+from app.terminal.routes import router as terminal_router
 from app.uploads import SlotFlowUploadStore
 from app.uploads.routes import router as upload_router
 from app.workspace.routes import router as workspace_router
@@ -78,6 +79,7 @@ def create_app(
     app.include_router(mcp_router)
     app.include_router(upload_router)
     app.include_router(workspace_router)
+    app.include_router(terminal_router)
     return app
 
 

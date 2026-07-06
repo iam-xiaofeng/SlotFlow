@@ -37,7 +37,7 @@ class SlotFlowMemoryStore:
         """Insert a memory record, touching existing equivalent memories."""
 
         validated_kind = validate_memory_kind(kind)
-        normalized_content = normalize_memory_content(content, kind=validated_kind)
+        normalized_content = normalize_memory_content(content)
         if not normalized_content:
             raise ValueError("memory content cannot be blank")
 
@@ -92,10 +92,7 @@ class SlotFlowMemoryStore:
         """Return an existing memory with the same normalized kind and content."""
 
         validated_kind = validate_memory_kind(kind)
-        normalized_content = normalize_memory_content(
-            content,
-            kind=validated_kind,
-        )
+        normalized_content = normalize_memory_content(content)
         if not normalized_content:
             return None
         rows = self._fetchall(
@@ -221,7 +218,7 @@ class SlotFlowMemoryStore:
 
         existing = self.get_memory(memory_id)
         next_kind = validate_memory_kind(kind) if kind is not None else existing.kind
-        normalized_content = normalize_memory_content(content, kind=next_kind)
+        normalized_content = normalize_memory_content(content)
         if not normalized_content:
             raise ValueError("memory content cannot be blank")
 
@@ -327,10 +324,16 @@ def new_memory_id() -> str:
 def normalize_memory_content(
     content: str,
     *,
-    kind: MemoryKind | None = None,
     max_chars: int = 1600,
 ) -> str:
-    compact = canonicalize_memory_content(kind, strip_memory_command_prefix(content))
+    """写入边界的卫生化：剥指令前缀、压空白、补句号、限长。
+
+    语义改写（第三人称化、要素归纳、风格统一）是 LLM 的职责——``memory_save`` 工具
+    的内容由模型撰写、后台抽取由 ``SlotFlowMemoryExtractor`` 改写。store 不做语义
+    加工，避免用正则揉搓 LLM 已经写好的内容。
+    """
+
+    compact = ensure_chinese_sentence(strip_memory_command_prefix(content))
     if len(compact) <= max_chars:
         return compact
     return f"{compact[: max_chars - 1]}..."
@@ -342,9 +345,8 @@ def strip_memory_command_prefix(content: str) -> str:
         return ""
 
     prefixes = [
-        r"^(?:请)?(?:再)?(?:记住|保存到记忆|加入记忆|长期记忆|记录一下)[:：]?",
-        r"^(?:在)?(?:你的|用户的)?长期记忆中(?:记住|记录)?(?:事实|偏好|资料)?[:：]?",
-        r"^中(?:记住|记录)?(?:事实|偏好|资料)?[:：]?",
+        r"^(?:请)?(?:再)?(?:帮我)?(?:记住|保存到记忆|加入记忆|记录一下)[:：]?",
+        r"^(?:请)?(?:再)?(?:帮我)?(?:在)?(?:你的|用户的)?长期记忆(?:中|里)?(?:记住|记录)?(?:事实|偏好|资料)?[:：]?",
         r"^(?:事实|偏好|资料|近期|手动)[:：]",
     ]
     cleaned = compact
@@ -357,131 +359,6 @@ def strip_memory_command_prefix(content: str) -> str:
                 cleaned = next_value
                 changed = True
     return cleaned
-
-
-def canonicalize_memory_content(kind: MemoryKind | None, content: str) -> str:
-    compact = re.sub(r"\s+", " ", content).strip(" ：:")
-    if not compact:
-        return ""
-
-    if kind == "preference":
-        return canonical_prefixed_sentence(
-            "用户的偏好是：",
-            strip_subject_prefix(compact),
-        )
-    if kind == "profile":
-        return canonicalize_profile_memory(compact)
-    if kind == "topic":
-        return canonical_prefixed_sentence(
-            "用户近期关注：",
-            strip_subject_prefix(compact),
-        )
-    if kind == "fact":
-        return canonicalize_fact_memory(compact)
-    if kind == "manual":
-        return canonical_prefixed_sentence("用户记录：", compact)
-    return ensure_chinese_sentence(compact)
-
-
-def canonical_prefixed_sentence(prefix: str, content: str) -> str:
-    compact = re.sub(r"\s+", " ", content).strip(" ：:")
-    if compact.startswith(prefix):
-        return ensure_chinese_sentence(compact)
-    return ensure_chinese_sentence(f"{prefix}{compact}")
-
-
-def canonicalize_profile_memory(content: str) -> str:
-    if content.startswith("用户资料："):
-        return ensure_chinese_sentence(content)
-    if re.search(r"用户的(?:姓名|职业|专业|生日)是", content):
-        return ensure_chinese_sentence(content)
-
-    fields: list[str] = []
-    name = extract_first_match(
-        content,
-        [
-            r"(?:我叫|我的名字是|用户叫|用户的姓名是)([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_.·-]{0,20})",
-        ],
-    )
-    if name:
-        fields.append(f"用户的姓名是{name}")
-
-    profession = extract_first_match(
-        content,
-        [
-            r"(?:职业是|工作是|身份是|用户的职业是)([^，。；;、]{1,30})",
-        ],
-    )
-    if not profession and re.search(r"(研究生|硕士|博士)", content):
-        profession = "研究生"
-    if profession:
-        fields.append(f"用户的职业是{strip_subject_prefix(profession)}")
-
-    major = extract_first_match(
-        content,
-        [
-            r"(?:专业是|专业为|用户的专业是)([^，。；;、]{1,30})",
-        ],
-    )
-    if not major and "控制工程" in content:
-        major = "控制工程"
-    if major:
-        fields.append(f"用户的专业是{strip_subject_prefix(major)}")
-
-    birthday = extract_birthday(content)
-    if birthday:
-        fields.append(f"用户的生日是{birthday}")
-
-    if fields:
-        return "。".join(fields) + "。"
-    return canonical_prefixed_sentence("用户资料：", strip_subject_prefix(content))
-
-
-def canonicalize_fact_memory(content: str) -> str:
-    if content.startswith("用户事实：") or re.search(r"用户的.+是", content):
-        return ensure_chinese_sentence(content)
-
-    birthday = extract_birthday(content)
-    if birthday:
-        return ensure_chinese_sentence(f"用户的生日是{birthday}")
-    return canonical_prefixed_sentence("用户事实：", strip_subject_prefix(content))
-
-
-def strip_subject_prefix(content: str) -> str:
-    cleaned = content.strip(" ：:")
-    replacements = [
-        (r"^用户(?:的)?", ""),
-        (r"^(?:偏好|喜好)(?:是|为)?", ""),
-        (r"^(?:资料|事实|近期关注|记录)", ""),
-        (r"^我希望", ""),
-        (r"^我更喜欢", "喜欢"),
-        (r"^我喜欢", "喜欢"),
-        (r"^我是", ""),
-        (r"^我叫", ""),
-    ]
-    for pattern, replacement in replacements:
-        cleaned = re.sub(pattern, replacement, cleaned).strip(" ：:")
-    return cleaned
-
-
-def extract_birthday(content: str) -> str | None:
-    match = re.search(r"((?:农历|公历)?\s*\d{1,2}月\d{1,2}日)(?:是)?(?:我|用户)?的?生日", content)
-    if match:
-        return re.sub(r"\s+", "", match.group(1))
-    match = re.search(r"(?:我|用户)?的?生日(?:是|为)\s*((?:农历|公历)?\s*\d{1,2}月\d{1,2}日)", content)
-    if match:
-        return re.sub(r"\s+", "", match.group(1))
-    return None
-
-
-def extract_first_match(content: str, patterns: list[str]) -> str | None:
-    for pattern in patterns:
-        match = re.search(pattern, content)
-        if match:
-            value = match.group(1).strip(" ：:，。；;、")
-            if value:
-                return value
-    return None
 
 
 def ensure_chinese_sentence(content: str) -> str:
@@ -530,11 +407,13 @@ def tokenize_memory_text(value: str) -> set[str]:
 def row_to_memory(row: sqlite3.Row) -> MemoryRecord:
     metadata = json.loads(row["metadata_json"] or "{}")
     kind = validate_memory_kind(row["kind"] or "manual")
+    # 规范化只发生在写入边界(add/update);读取返回存储原文,避免规则演进时
+    # 每次读取都用新规则改写旧数据的呈现。
     return MemoryRecord(
         id=row["id"],
         thread_id=row["thread_id"],
         kind=kind,
-        content=normalize_memory_content(row["content"], kind=kind),
+        content=row["content"],
         source_run_id=row["source_run_id"],
         metadata=metadata if isinstance(metadata, dict) else {},
         created_at=row["created_at"],

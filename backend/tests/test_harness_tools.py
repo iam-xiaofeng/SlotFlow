@@ -121,9 +121,12 @@ def test_build_harness_tools_adds_safe_builtin_and_dedupes_by_name() -> None:
     assert {
         "ask_clarification",
         "artifact_write",
+        "sandbox_exec",
+        "sandbox_artifact_copy",
         "web_search",
         "skill_match",
         "search_skill_repos",
+        "write_todos",  # plan_enabled (ultra) exposes the todo tool
     } <= set(names)
 
 
@@ -145,6 +148,7 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
         "workspace_read",
         "workspace_tree",
         "workspace_search",
+        "workspace_grep",
         "artifact_list",
     ]
     listing = json.loads(tools["workspace_list"].invoke({"path": "."}))
@@ -173,7 +177,17 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
     root.mkdir()
     create_docx(root / "note.docx", "Docx hello")
     create_docx(root / "docx", "No suffix docx hello")
+    create_xlsx(root / "table.xlsx")
+    create_xlsx(root / "spreadsheet")
+    create_pptx(root / "slides.pptx")
     create_blank_pdf(root / "blank.pdf")
+    (root / "component.tsx").write_text("export function App() { return <div />; }\n", encoding="utf-8")
+    (root / "flow.drawio").write_text(
+        '<mxfile><diagram name="Page-1"><mxGraphModel /></diagram></mxfile>',
+        encoding="utf-8",
+    )
+    (root / "legacy.xls").write_bytes(b"\xd0\xcf\x11\xe0legacy spreadsheet")
+    (root / "legacy.ppt").write_bytes(b"\xd0\xcf\x11\xe0legacy presentation")
     (root / "photo.jpg").write_bytes(tiny_jpeg_bytes(width=2, height=1))
     tools = {
         item.name: item
@@ -182,6 +196,13 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
 
     docx = json.loads(tools["workspace_read"].invoke({"path": "note.docx"}))
     no_suffix_docx = json.loads(tools["workspace_read"].invoke({"path": "docx"}))
+    xlsx = json.loads(tools["workspace_read"].invoke({"path": "table.xlsx"}))
+    no_suffix_xlsx = json.loads(tools["workspace_read"].invoke({"path": "spreadsheet"}))
+    pptx = json.loads(tools["workspace_read"].invoke({"path": "slides.pptx"}))
+    tsx = json.loads(tools["workspace_read"].invoke({"path": "component.tsx"}))
+    drawio = json.loads(tools["workspace_read"].invoke({"path": "flow.drawio"}))
+    legacy_xls = json.loads(tools["workspace_read"].invoke({"path": "legacy.xls"}))
+    legacy_ppt = json.loads(tools["workspace_read"].invoke({"path": "legacy.ppt"}))
     pdf = json.loads(tools["workspace_read"].invoke({"path": "blank.pdf"}))
     image = json.loads(tools["workspace_read"].invoke({"path": "photo.jpg"}))
 
@@ -192,6 +213,30 @@ def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> 
     assert no_suffix_docx["media_type"] == (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
+    assert xlsx["kind"] == "spreadsheet"
+    assert xlsx["metadata"]["sheet_count"] == 1
+    assert xlsx["metadata"]["sheets"] == ["Sheet One"]
+    assert "Revenue" in xlsx["content"]
+    assert "42" in xlsx["content"]
+    assert no_suffix_xlsx["kind"] == "spreadsheet"
+    assert no_suffix_xlsx["media_type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert pptx["kind"] == "presentation"
+    assert pptx["metadata"]["slides"] == 1
+    assert "Quarterly Plan" in pptx["content"]
+    assert tsx["kind"] == "text"
+    assert tsx["media_type"] == "text/tsx"
+    assert "export function App" in tsx["content"]
+    assert drawio["kind"] == "diagram"
+    assert drawio["media_type"] == "application/vnd.jgraph.mxfile"
+    assert "<mxfile>" in drawio["content"]
+    assert legacy_xls["kind"] == "binary"
+    assert legacy_xls["media_type"] == "application/vnd.ms-excel"
+    assert "unsupported binary" in legacy_xls["warning"]
+    assert legacy_ppt["kind"] == "binary"
+    assert legacy_ppt["media_type"] == "application/vnd.ms-powerpoint"
+    assert "unsupported binary" in legacy_ppt["warning"]
     assert pdf["kind"] == "pdf"
     assert pdf["metadata"]["pages"] == 1
     assert pdf["warning"] == "pdf text extraction returned no text"
@@ -218,6 +263,7 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
 
     tree = json.loads(tools["workspace_tree"].invoke({"path": ".", "max_depth": 3}))
     search = json.loads(tools["workspace_search"].invoke({"query": "tools"}))
+    grep = json.loads(tools["workspace_grep"].invoke({"pattern": "SlotFlow"}))
     artifact = json.loads(
         tools["artifact_write"].invoke(
             {"path": "summary.md", "content": "# Summary"}
@@ -227,6 +273,7 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
 
     assert {"path": "docs/guide.md", "kind": "file", "size_bytes": 25} in tree["entries"]
     assert search["matches"][0]["path"] == "docs/guide.md"
+    assert grep["matches"][0]["path"] == "docs/guide.md"
     assert artifact["path"] == "artifacts/summary.md"
     assert artifacts["entries"] == [
         {"path": "artifacts/summary.md", "kind": "file", "size_bytes": 9}
@@ -244,6 +291,7 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
         "workspace_read",
         "workspace_tree",
         "workspace_search",
+        "workspace_grep",
         "artifact_list",
     ]
 
@@ -264,6 +312,7 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
         "workspace_read",
         "workspace_tree",
         "workspace_search",
+        "workspace_grep",
         "artifact_list",
         "artifact_write",
     ]
@@ -350,6 +399,54 @@ def create_docx(path: Path, text: str) -> None:
     )
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("word/document.xml", document_xml)
+
+
+def create_xlsx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "xl/workbook.xml",
+            (
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<sheets><sheet name="Sheet One" sheetId="1" r:id="rId1"/></sheets>'
+                "</workbook>"
+            ),
+        )
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            (
+                '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                "<si><t>Revenue</t></si><si><t>Notes</t></si>"
+                "</sst>"
+            ),
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            (
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                "<sheetData>"
+                '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row>'
+                '<row r="2"><c r="A2" t="inlineStr"><is><t>Notes</t></is></c></row>'
+                "</sheetData>"
+                "</worksheet>"
+            ),
+        )
+
+
+def create_pptx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ppt/slides/slide1.xml",
+            (
+                '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+                "<p:cSld><p:spTree><p:sp><p:txBody>"
+                "<a:p><a:r><a:t>Quarterly Plan</a:t></a:r></a:p>"
+                "<a:p><a:r><a:t>Ship the preview</a:t></a:r></a:p>"
+                "</p:txBody></p:sp></p:spTree></p:cSld>"
+                "</p:sld>"
+            ),
+        )
 
 
 def create_blank_pdf(path: Path) -> None:
@@ -470,3 +567,73 @@ def test_find_skill_repos_on_github_surfaces_fetch_error(monkeypatch: pytest.Mon
 
     assert result["results"] == []
     assert result["error"] == "network tools are disabled"
+
+
+@pytest.mark.asyncio
+async def test_ask_clarification_via_slotflow_tool_node_actually_interrupts() -> None:
+    """Regression: the SlotFlow tool-safety wrapper must NOT swallow GraphBubbleUp.
+
+    ask_clarification pauses via interrupt() which raises GraphBubbleUp (an Exception
+    subclass). The node+edge graph's ToolNode runs tools through the SlotFlow safety
+    wrapper, whose old `except Exception` caught GraphBubbleUp and converted it to a
+    tool_execution_error — so voluntary HITL never paused and the model just continued.
+    This test drives the real build_slotflow_harness_graph so the wrapper is in the path.
+    """
+
+    import app.harness.graph as G
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+
+    async def no_triage(*, messages, model=None, triage_fn=None):
+        return None
+
+    original = G.run_triage
+    G.run_triage = no_triage
+    try:
+        model = ToolAwareFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "ask_clarification",
+                            "args": {
+                                "question": "用哪种格式？",
+                                "clarification_type": "ambiguous_requirement",
+                                "options": ["CSV", "HTML"],
+                            },
+                            "id": "call_reg",
+                        }
+                    ],
+                ),
+                AIMessage(content="好的，用 CSV。"),
+            ]
+        )
+        request = ChatStreamRequest(message="导出", mode="pro")
+        bundle = build_run_config(thread_id="thread_reg", run_id="run_reg", request=request)
+        graph = build_slotflow_harness_graph(
+            model=model,
+            run_context=bundle.context,
+            harness_config=SlotFlowHarnessConfig(
+                system_prompt="你是测试助手。",
+                middleware_config=SlotFlowMiddlewareConfig(),
+            ),
+            checkpointer=InMemorySaver(),
+        )
+        await graph.ainvoke(
+            {"messages": [{"role": "user", "content": "导出"}]},
+            config=bundle.config,
+            context=bundle.context,
+        )
+        state = await graph.aget_state(bundle.config)
+        # The graph MUST be paused on the clarification, not have swallowed the interrupt
+        # into a tool_execution_error and continued.
+        assert state.interrupts, "ask_clarification must pause the graph (wrapper must propagate GraphBubbleUp)"
+        assert state.interrupts[0].value["question"] == "用哪种格式？"
+
+        result = await graph.ainvoke(Command(resume="CSV"), config=bundle.config, context=bundle.context)
+        assert result["messages"][-1].content == "好的，用 CSV。"
+        after = await graph.aget_state(bundle.config)
+        assert not after.interrupts
+    finally:
+        G.run_triage = original

@@ -58,6 +58,35 @@ PROVIDER_REASONING_CASES = [
     ),
     # Anthropic extended thinking block.
     ("anthropic-thinking-block", {"type": "thinking", "thinking": "Claude 在思考"}, "reasoning", "Claude 在思考"),
+    # OpenAI Responses API: reasoning arrives as a *summary* of sub-blocks, not a flat
+    # string. langchain-openai keeps this shape in message.content under the default
+    # "responses/v1" output_version; the projection must flatten the summary text into
+    # the reasoning channel (not drop it). See HARNESS_NOTES.md §17.
+    (
+        "openai-responses-reasoning-summary",
+        {
+            "type": "reasoning",
+            "summary": [
+                {"index": 0, "type": "summary_text", "text": "先分析"},
+            ],
+            "index": 0,
+            "id": "rs_1",
+        },
+        "reasoning",
+        "先分析",
+    ),
+    (
+        "openai-responses-reasoning-summary-multi",
+        {
+            "type": "reasoning",
+            "summary": [
+                {"index": 0, "type": "summary_text", "text": "分"},
+                {"index": 1, "type": "summary_text", "text": "步"},
+            ],
+        },
+        "reasoning",
+        "分步",
+    ),
     # Plain text content blocks across providers.
     ("openai-text-block", {"type": "text", "text": "最终答案"}, "content", "最终答案"),
     (
@@ -102,6 +131,7 @@ def test_reasoning_and_content_never_cross_channels() -> None:
         {"type": "reasoning", "reasoning": "reason"},
         {"channel": "reasoning", "delta": "typed-reason"},
         {"additional_kwargs": {"reasoning_content": "kw-reason"}},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "resp-reason"}]},
     ]
     content_items = [
         {"type": "text", "text": "answer"},

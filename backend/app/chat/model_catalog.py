@@ -25,6 +25,39 @@ PROVIDER_DEFAULT_BASE_URLS: dict[ModelProvider, str] = {
 }
 
 
+# User-Agent sent on every request to the `custom` relay (discovery + runtime).
+# Many third-party OpenAI-compatible relays sit behind a Cloudflare WAF that blocks
+# the OpenAI SDK's fingerprint UA (`AsyncOpenAI/Python <ver>` -> HTTP 403
+# "Your request was blocked."), which silently breaks every non-DeepSeek model the
+# relay serves. A neutral UA sidesteps the block. Live-verified against
+# https://metapi.lilililwan.xyz/v1 (2026-06-30): `AsyncOpenAI/Python 2.40.0` -> 403
+# for glm/kimi/qwen/minimax (and even deepseek-v4-pro); `python-httpx/0.28.1`,
+# `curl/8.5.0`, `SlotFlow/1.0`, and empty UA all -> 200. The WAF is a blacklist on
+# the OpenAI fingerprint, not a whitelist, so any neutral UA works.
+RELAY_USER_AGENT = os.environ.get("SLOTFLOW_RELAY_USER_AGENT") or "SlotFlow/1.0"
+
+
+def relay_request_headers(provider_env: "ProviderEnv", *, content_json: bool = False) -> dict[str, str]:
+    """Discovery/probe headers that match the runtime's request fingerprint.
+
+    Built on top of ``provider_headers`` (so Anthropic still gets ``x-api-key`` /
+    ``anthropic-version`` and everyone else gets ``Authorization: Bearer``) and, for the
+    ``custom`` relay only, adds a neutral ``User-Agent``. Many third-party relays sit
+    behind a Cloudflare WAF that blocks the OpenAI SDK fingerprint UA
+    (``AsyncOpenAI/Python <ver>`` -> HTTP 403 "Your request was blocked."), which would
+    otherwise silently break every non-DeepSeek model the relay serves. Discovery (fetch
+    + probe) MUST use the same UA the runtime uses, or the selector shows models the
+    runtime then can't call ("shows but can't use").
+    """
+
+    headers = dict(provider_headers(provider_env))
+    if provider_env.provider == "custom":
+        headers["User-Agent"] = RELAY_USER_AGENT
+    if content_json:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderEnv:
     provider: ModelProvider
@@ -160,10 +193,10 @@ async def probe_openai_compatible_chat_model(
     """Return whether one OpenAI-compatible chat model is callable with this key."""
 
     url = f"{provider_env.base_url.rstrip('/')}/chat/completions"
-    headers = {
-        **provider_headers(provider_env),
-        "Content-Type": "application/json",
-    }
+    # Use the SAME headers the runtime sends (incl. neutral relay UA) so the probe and
+    # the live chat path agree: a model shows in the selector only if the runtime can
+    # actually call it with these exact headers.
+    headers = relay_request_headers(provider_env, content_json=True)
     payload = {
         "model": model_id,
         "messages": [{"role": "user", "content": "ping"}],
@@ -196,7 +229,8 @@ async def fetch_provider_model_ids(provider_env: ProviderEnv) -> list[str]:
     """Fetch model ids from an OpenAI-compatible or Anthropic model list API."""
 
     url = f"{provider_env.base_url.rstrip('/')}/models"
-    headers = provider_headers(provider_env)
+    # Same neutral relay UA on /models as on /chat/completions (see relay_request_headers).
+    headers = relay_request_headers(provider_env)
     async with httpx.AsyncClient(timeout=8.0) as client:
         response = await client.get(url, headers=headers)
         response.raise_for_status()

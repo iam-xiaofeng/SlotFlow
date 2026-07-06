@@ -102,7 +102,15 @@ export type WorkspaceEntryRecord = {
 
 export type WorkspaceReadRecord = {
   path: string;
-  kind: "text" | "document" | "pdf" | "image" | "binary";
+  kind:
+    | "text"
+    | "document"
+    | "spreadsheet"
+    | "presentation"
+    | "diagram"
+    | "pdf"
+    | "image"
+    | "binary";
   media_type: string;
   size_bytes: number;
   source: string;
@@ -128,6 +136,11 @@ export type SkillRecord = {
   order: number;
   pinned: boolean;
   parent?: string | null;
+};
+
+export type SkillInstallRequest = {
+  package_url: string;
+  skill_name: string;
 };
 
 export type McpServerRecord = {
@@ -223,21 +236,6 @@ export async function searchThreads(
   }
 
   return response.json() as Promise<ThreadSearchResultRecord[]>;
-}
-
-export async function getThread(
-  threadId: string,
-  options: ChatRequestOptions = {},
-): Promise<ThreadRecord> {
-  const response = await fetch(`/api/chat/threads/${threadId}`, {
-    signal: options.signal,
-  });
-
-  if (!response.ok) {
-    throw new Error(`get thread failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ThreadRecord>;
 }
 
 export async function deleteThread(
@@ -413,10 +411,7 @@ export async function uploadSkillFolder(
 }
 
 export async function installSkill(
-  body: {
-    package_url: string;
-    skill_name: string;
-  },
+  body: SkillInstallRequest,
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord> {
   const response = await fetch("/api/skills/install", {
@@ -746,8 +741,18 @@ export async function* streamThreadRun(
   }
 }
 
-export function resolveChatStreamUrl(path: string): string {
+function resolveChatStreamUrl(path: string): string {
   return joinBaseUrl(resolveChatStreamBaseUrl(), path);
+}
+
+export function resolveTerminalWebSocketUrl(): string {
+  const httpUrl = resolveChatStreamUrl("/api/terminal/ws");
+  if (typeof window === "undefined") {
+    return httpUrl;
+  }
+  const url = new URL(httpUrl, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
 }
 
 function resolveChatStreamBaseUrl(): string {

@@ -24,9 +24,13 @@ from app.chat.agent_adapter import (
     extract_message_delta,
     extract_message_delta_parts,
     flatten_message_projection_items,
+    iter_projection_agent_events,
+    normalize_message_content,
     normalize_values_snapshot,
+    strip_slotflow_context_blocks,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
+    tool_status_event_from_tool_call,
 )
 from app.chat.models import ChatStreamRequest, UploadedFileContext
 from app.chat.run_config import build_run_config
@@ -240,7 +244,7 @@ def test_summarization_projection_delta_is_filtered_by_langgraph_node() -> None:
     event = projection_item_to_agent_event(
         projection="messages",
         item=SimpleNamespace(
-            _node="SlotFlowSummarizationMiddleware.before_model",
+            _node="SlotFlowSummarizationMiddleware",
             content="Summary for next model call",
         ),
         bundle=_bundle(),
@@ -287,6 +291,77 @@ def test_projection_tool_call_item_becomes_tool_delta_event() -> None:
         event="tool.delta",
         data={"name": "search", "args": {"query": "SlotFlow"}},
     )
+
+
+def test_sandbox_tool_call_becomes_tool_status_event() -> None:
+    """sandbox_exec 开始执行时要给前端一个可见状态，避免 Docker 启动期像卡死。"""
+
+    event = tool_status_event_from_tool_call(
+        {
+            "name": "sandbox_exec",
+            "args": {"command": "python -m pip install pandas && python script.py"},
+        },
+        bundle=_bundle(),
+    )
+
+    assert event == AgentEvent(
+        event="tool.status",
+        data={
+            "thread_id": "thread_test",
+            "run_id": "run_test",
+            "tool_name": "sandbox_exec",
+            "phase": "running",
+            "message": "正在初始化 Docker 沙箱并执行代码",
+            "command": "python -m pip install pandas && python script.py",
+            "source": "slotflow_tool_call_projection",
+        },
+    )
+
+
+def test_generic_tool_call_becomes_tool_status_event() -> None:
+    """所有普通工具执行都要对前端可见,否则用户只看到冻结的思考态。"""
+
+    event = tool_status_event_from_tool_call(
+        {"name": "artifact_write", "args": {"path": "hello.html"}},
+        bundle=_bundle(),
+    )
+
+    assert event is not None
+    assert event.event == "tool.status"
+    assert event.data["tool_name"] == "artifact_write"
+    assert event.data["phase"] == "running"
+    assert event.data["message"] == "正在写入产物文件"
+    assert event.data["command"] is None
+
+    unknown = tool_status_event_from_tool_call(
+        {"name": "some_mcp_tool", "args": {}},
+        bundle=_bundle(),
+    )
+    assert unknown is not None
+    assert unknown.data["message"] == "正在调用工具"
+
+
+def test_sandbox_artifact_copy_tool_call_becomes_tool_status_event() -> None:
+    event = tool_status_event_from_tool_call(
+        {"name": "sandbox_artifact_copy", "args": {"source_path": "chart.png"}},
+        bundle=_bundle(),
+    )
+
+    assert event is not None
+    assert event.data["tool_name"] == "sandbox_artifact_copy"
+    assert event.data["message"] == "正在发布 Docker 文件到产物"
+    assert event.data["command"] is None
+
+
+def test_own_ui_tool_calls_do_not_become_tool_status_event() -> None:
+    """澄清与 todo 工具有专属 UI,不再叠加状态芯片。"""
+
+    for tool_name in ("ask_clarification", "write_todos"):
+        event = tool_status_event_from_tool_call(
+            {"name": tool_name, "args": {}},
+            bundle=_bundle(),
+        )
+        assert event is None, tool_name
 
 
 def test_normalize_values_snapshot_keeps_thread_and_run_identity() -> None:
@@ -402,7 +477,7 @@ def test_todos_in_values_snapshot_become_todo_updated_event() -> None:
         item={
             "messages": [],
             "todos": [
-                {"content": "读取代码", "status": "completed"},
+                {"text": "读取代码", "status": "completed"},
                 {"content": "补前端展示", "status": "in_progress"},
                 {"content": "跑测试", "status": "later"},
             ],
@@ -424,6 +499,42 @@ def test_todos_in_values_snapshot_become_todo_updated_event() -> None:
             ],
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_identical_todo_snapshots_emit_each_todo_updated_event() -> None:
+    class ProjectionChannel:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def iterator():
+                for item in self._items:
+                    yield item
+
+            return iterator()
+
+    class ProjectionOnlyStream:
+        def __init__(self) -> None:
+            snapshot = {
+                "messages": [],
+                "todos": [{"content": "保持当前状态", "status": "in_progress"}],
+            }
+            self.values = ProjectionChannel([snapshot, snapshot])
+
+    events = [
+        event
+        async for event in iter_projection_agent_events(
+            ProjectionOnlyStream(),
+            bundle=_bundle(),
+        )
+    ]
+
+    todo_events = [event for event in events if event.event == "todo.updated"]
+    assert len(todo_events) == 2
+    assert todo_events[0].data["todos"] == [
+        {"content": "保持当前状态", "status": "in_progress"}
+    ]
 
 
 def test_run_bundle_keeps_business_context_out_of_configurable() -> None:
@@ -537,6 +648,45 @@ async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_it
 
 
 @pytest.mark.asyncio
+async def test_langgraph_event_adapter_emits_sandbox_tool_status_before_tool_delta() -> None:
+    class ProjectionChannel:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __aiter__(self):
+            async def iterator():
+                for item in self._items:
+                    yield item
+
+            return iterator()
+
+    class ProjectionOnlyStream:
+        def __init__(self) -> None:
+            self.messages = ProjectionChannel([])
+            self.values = ProjectionChannel([])
+            self.tool_calls = ProjectionChannel(
+                [
+                    {
+                        "name": "sandbox_exec",
+                        "args": {"command": "python -V"},
+                    }
+                ]
+            )
+
+    events = [
+        event
+        async for event in iter_projection_agent_events(
+            ProjectionOnlyStream(),
+            bundle=_bundle(),
+        )
+    ]
+
+    assert [event.event for event in events] == ["tool.status", "tool.delta"]
+    assert events[0].data["message"] == "正在初始化 Docker 沙箱并执行代码"
+    assert events[0].data["command"] == "python -V"
+
+
+@pytest.mark.asyncio
 async def test_langgraph_event_adapter_uses_typed_message_reasoning_projection() -> None:
     class ProjectionChannel:
         def __init__(self, items):
@@ -601,7 +751,7 @@ async def test_langgraph_event_adapter_drains_summarization_substream_without_le
             return iterator()
 
     class SummarizationSubstream:
-        _node = "SlotFlowSummarizationMiddleware.before_model"
+        _node = "SlotFlowSummarizationMiddleware"
 
         def __aiter__(self):
             async def iterator():
@@ -648,23 +798,44 @@ async def test_langgraph_event_adapter_drains_summarization_substream_without_le
 
 @pytest.mark.asyncio
 async def test_langgraph_event_adapter_filters_real_summarization_middleware_stream() -> None:
-    from langchain.agents import create_agent
-    from langchain_core.language_models.fake_chat_models import FakeListChatModel
     from langgraph.checkpoint.memory import InMemorySaver
 
-    from app.harness.middleware import SlotFlowSummarizationMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from app.harness.builder import build_slotflow_harness_graph
+    from app.harness.config import SlotFlowHarnessConfig
+    from app.harness.middleware import SlotFlowMiddlewareConfig
+    from app.chat.run_config import build_run_config
 
-    graph = create_agent(
-        model=FakeListChatModel(responses=["旧回答", "最终答复"]),
-        tools=[],
-        middleware=[
-            SlotFlowSummarizationMiddleware(
-                model=FakeListChatModel(responses=["Summary for next model call"]),
-                trigger_tokens=1,
-                keep_messages=1,
-                trim_tokens_to_summarize=100,
-            )
-        ],
+    class _ToolAware(FakeMessagesListChatModel):
+        def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+            return self
+
+    # The summarization node reuses the chat model for its internal summary call (advancing
+    # the cursor once), so we provide: turn-1 answer, turn-2 summary text (filtered by node
+    # name), turn-2 final answer.
+    chat_model = _ToolAware(
+        responses=[
+            AIMessage(content="旧回答"),
+            AIMessage(content="Summary for next model call"),
+            AIMessage(content="最终答复"),
+        ]
+    )
+    request = ChatStreamRequest(message="旧上下文", mode="flash")
+    bundle = build_run_config(thread_id="tsum", run_id="r1", request=request)
+    graph = build_slotflow_harness_graph(
+        model=chat_model,
+        run_context=bundle.context,
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="你是测试助手。",
+            middleware_config=SlotFlowMiddlewareConfig(
+                clarify_gate_enabled=False,
+                summarization_enabled=True,
+                summarization_trigger_tokens=1,
+                summarization_keep_messages=1,
+                summarization_trim_tokens=100,
+            ),
+        ),
         checkpointer=InMemorySaver(),
     )
     adapter = LangGraphEventAgentAdapter(graph)
@@ -672,27 +843,27 @@ async def test_langgraph_event_adapter_filters_real_summarization_middleware_str
     await collect_agent_events(
         adapter.stream_events(
             request=ChatStreamRequest(message="旧上下文"),
-            bundle=_bundle(ChatStreamRequest(message="旧上下文")),
+            bundle=bundle,
         )
     )
+    # Resume on the same thread so turn-2 sees turn-1 history and triggers summarization.
     events = await collect_agent_events(
         adapter.stream_events(
             request=ChatStreamRequest(message="继续"),
-            bundle=_bundle(ChatStreamRequest(message="继续")),
+            bundle=build_run_config(thread_id="tsum", run_id="r2", request=ChatStreamRequest(message="继续")),
         )
     )
 
     assert "context.compressing" in [event.event for event in events]
-    assert "Summary for next model call" not in "".join(
+    # The summary node's internal model stream is filtered by node name; only the agent
+    # node's final answer should surface as message.delta.
+    deltas = "".join(
         str(event.data.get("delta", ""))
         for event in events
         if event.event == "message.delta"
     )
-    assert "最终答复" == "".join(
-        str(event.data.get("delta", ""))
-        for event in events
-        if event.event == "message.delta"
-    )
+    assert "Summary for next model call" not in deltas
+    assert deltas == "最终答复"
 
 
 @pytest.mark.asyncio
@@ -717,3 +888,30 @@ async def test_message_projection_flattening_preserves_parent_metadata() -> None
             {"metadata": {"lc_source": "summarization"}},
         )
     ]
+
+
+def test_normalize_message_content_reasoning_only_returns_empty() -> None:
+    """纯 reasoning 块消息的正文必须是空串——曾被 repr 成
+    \"[{type: reasoning, ...}]\" 直接当回复展示(2026-07-04 真机踩坑)。"""
+
+    content = [{"type": "reasoning", "reasoning": "内部思考过程", "index": 0}]
+
+    assert normalize_message_content(content) == ""
+
+
+def test_normalize_message_content_unknown_payload_never_reprs() -> None:
+    assert normalize_message_content({"weird": {"nested": 1}}) == ""
+    assert normalize_message_content(12345) == ""
+
+
+def test_normalize_message_content_strips_slotflow_context_blocks() -> None:
+    """模型复读的 <slotflow-*> 内部标签块不得进入用户可见正文。"""
+
+    text = (
+        "答案开头<slotflow-todo-reminder>\n内部提醒内容\n</slotflow-todo-reminder>答案结尾"
+    )
+
+    assert normalize_message_content(text) == "答案开头答案结尾"
+    assert strip_slotflow_context_blocks("<slotflow-runtime>x</slotflow-runtime>好") == "好"
+    assert strip_slotflow_context_blocks("无标签正文不受影响") == "无标签正文不受影响"
+    assert strip_slotflow_context_blocks("孤立标签<slotflow-todo-enforcer>也剥") == "孤立标签也剥"

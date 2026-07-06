@@ -92,6 +92,26 @@ def build_workspace_tools(
             ensure_ascii=False,
         )
 
+    @tool("workspace_grep")
+    def workspace_grep(pattern: str, path: str = ".", max_results: int = 20) -> str:
+        """Grep readable SlotFlow workspace files for a literal pattern without Docker."""
+
+        matches = search_workspace_text(
+            workspace=workspace,
+            query=pattern,
+            path=path,
+            max_results=max_results,
+        )
+        return json.dumps(
+            {
+                "pattern": pattern,
+                "path": path,
+                "matches": matches,
+                "source": "slotflow_workspace",
+            },
+            ensure_ascii=False,
+        )
+
     @tool("artifact_list")
     def artifact_list() -> str:
         """List this conversation's artifacts (uploads + generated files)."""
@@ -121,6 +141,7 @@ def build_workspace_tools(
         workspace_read,
         workspace_tree,
         workspace_search,
+        workspace_grep,
         artifact_list,
     ]
 

@@ -90,8 +90,19 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     monkeypatch.delenv("SLOTFLOW_MCP_SERVERS", raising=False)
     monkeypatch.delenv("SLOTFLOW_MCP_CONFIG_JSON", raising=False)
     monkeypatch.delenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", raising=False)
-    monkeypatch.delenv("SLOTFLOW_TOOL_SAFETY_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_ARTIFACT_DISCOVERY_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUMMARIZATION_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUMMARIZATION_TRIGGER_TOKENS", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUMMARIZATION_KEEP_MESSAGES", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUMMARIZATION_TRIM_TOKENS", raising=False)
     monkeypatch.delenv("SLOTFLOW_LONG_TERM_MEMORY_ENABLED", raising=False)
+    monkeypatch.delenv("SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_CLARIFY_GATE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_UPLOADS_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_TODO_MIDDLEWARE", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUBAGENT_LIMIT", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUBAGENT_MAX_CONCURRENT", raising=False)
     monkeypatch.delenv("SLOTFLOW_MEMORY_SQLITE_PATH", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_WRITES_ENABLED", raising=False)
@@ -149,6 +160,47 @@ def test_load_runtime_config_from_env_reads_mcp_config(
         servers=(SlotFlowMcpServerConfig(name="search"),),
     )
     assert config.mcp_tool_provider is None
+
+
+def test_load_runtime_config_from_env_reads_harness_feature_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Feature flags in backend/.env map to the graph behavior config."""
+
+    isolate_user_config_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_ARTIFACT_DISCOVERY_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_TRIGGER_TOKENS", "1200")
+    monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_KEEP_MESSAGES", "8")
+    monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_TRIM_TOKENS", "900")
+    monkeypatch.setenv("SLOTFLOW_LONG_TERM_MEMORY_ENABLED", "false")
+    monkeypatch.setenv("SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION", "false")
+    monkeypatch.setenv("SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_CLARIFY_GATE", "false")
+    monkeypatch.setenv("SLOTFLOW_UPLOADS_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_TODO_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_SUBAGENT_LIMIT", "false")
+    monkeypatch.setenv("SLOTFLOW_SUBAGENT_MAX_CONCURRENT", "1")
+
+    config = load_runtime_config_from_env()
+
+    assert config.middleware_config.runtime_summary_enabled is False
+    assert config.middleware_config.artifact_discovery_enabled is False
+    assert config.middleware_config.summarization_enabled is False
+    assert config.middleware_config.summarization_trigger_tokens == 1200
+    assert config.middleware_config.summarization_keep_messages == 8
+    assert config.middleware_config.summarization_trim_tokens == 900
+    assert config.middleware_config.long_term_memory_enabled is False
+    assert config.middleware_config.proactive_memory_extraction_enabled is False
+    assert config.middleware_config.skills_preflight_enabled is False
+    assert config.middleware_config.clarify_gate_enabled is False
+    assert config.middleware_config.uploads_enabled is False
+    assert config.middleware_config.todo_enabled is False
+    assert config.middleware_config.subagent_limit_enabled is False
+    assert config.middleware_config.subagent_max_concurrent == 1
+    assert config.memory_store is None
 
 
 def test_deepseek_thinking_kwargs_follow_run_context() -> None:
@@ -245,6 +297,54 @@ def test_custom_provider_kwargs_send_no_deepseek_thinking_flags() -> None:
     assert "extra_body" not in kwargs
     assert "reasoning_effort" not in kwargs
     assert kwargs["base_url"] == "http://relay.local/v1"
+
+
+def test_custom_provider_kwargs_override_relay_user_agent() -> None:
+    """custom 中转站：注入中性 User-Agent，覆盖 OpenAI SDK 的 `AsyncOpenAI/Python` 指纹 UA。
+
+    根因（live-verified 2026-06-30 against https://metapi.lilililwan.xyz/v1）：很多第三方
+    中转站前置 Cloudflare WAF 按 OpenAI SDK 的 `User-Agent: AsyncOpenAI/Python <ver>` 指纹拦截
+    （HTTP 403 "Your request was blocked."），导致非 deepseek 系列模型"能显示但用不了"——
+    因为发现探针用裸 httpx（中性 UA）能过，而真正跑对话的 OpenAI SDK 客户端用被拦 UA。
+    ChatDeepSeek 与 ChatOpenAI 共用同一 `openai.AsyncOpenAI` 客户端，都会注入该 UA，故必须在此覆盖。
+    中转站是黑名单（任何非 OpenAI 指纹的 UA 都放行），不是白名单。
+    """
+
+    from app.chat.model_catalog import RELAY_USER_AGENT
+
+    context = _bundle(
+        request=ChatStreamRequest(
+            message="x", model_name="glm-5.2", mode="pro", provider="custom"
+        )
+    ).context
+    custom_kwargs = build_openai_compatible_model_kwargs(
+        model_name="glm-5.2",
+        api_key="key",
+        base_url="http://relay.local/v1",
+        provider="custom",
+        run_context=context,
+    )
+    assert custom_kwargs["default_headers"] == {"User-Agent": RELAY_USER_AGENT}
+    # 中转站 UA 必须是中性、非 OpenAI SDK 指纹：
+    assert "AsyncOpenAI" not in RELAY_USER_AGENT
+
+    # DeepSeek / OpenAI 官方端点不得改 UA（默认 SDK UA 没有被 WAF 拦截）：
+    deepseek_kwargs = build_openai_compatible_model_kwargs(
+        model_name="deepseek-v4-pro",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        provider="deepseek",
+        run_context=context,
+    )
+    assert "default_headers" not in deepseek_kwargs
+    openai_kwargs = build_openai_compatible_model_kwargs(
+        model_name="o3",
+        api_key="key",
+        base_url=None,
+        provider="openai",
+        run_context=context,
+    )
+    assert "default_headers" not in openai_kwargs
 
 
 def test_resolve_model_provider_prefers_carried_provenance() -> None:
@@ -411,13 +511,13 @@ def test_load_runtime_config_from_env_reads_middleware_config(monkeypatch: pytes
     """Runtime reads middleware switches but does not instantiate middleware."""
 
     monkeypatch.setenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", "false")
-    monkeypatch.setenv("SLOTFLOW_TOOL_SAFETY_MIDDLEWARE", "false")
+    monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_MIDDLEWARE", "false")
 
     config = load_runtime_config_from_env()
 
     assert config.middleware_config == SlotFlowMiddlewareConfig(
         runtime_summary_enabled=False,
-        tool_safety_enabled=False,
+        summarization_enabled=False,
     )
 
 

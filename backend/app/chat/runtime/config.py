@@ -149,14 +149,6 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE",
             default=True,
         ),
-        dangling_tool_call_enabled=load_bool_from_env(
-            "SLOTFLOW_DANGLING_TOOL_CALL_MIDDLEWARE",
-            default=True,
-        ),
-        tool_safety_enabled=load_bool_from_env(
-            "SLOTFLOW_TOOL_SAFETY_MIDDLEWARE",
-            default=True,
-        ),
         artifact_discovery_enabled=load_bool_from_env(
             "SLOTFLOW_ARTIFACT_DISCOVERY_MIDDLEWARE",
             default=True,
@@ -181,8 +173,16 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_LONG_TERM_MEMORY_ENABLED",
             default=True,
         ),
+        proactive_memory_extraction_enabled=load_bool_from_env(
+            "SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION",
+            default=True,
+        ),
         skills_preflight_enabled=load_bool_from_env(
             "SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE",
+            default=True,
+        ),
+        clarify_gate_enabled=load_bool_from_env(
+            "SLOTFLOW_CLARIFY_GATE",
             default=True,
         ),
         uploads_enabled=load_bool_from_env(
@@ -192,6 +192,14 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
         todo_enabled=load_bool_from_env(
             "SLOTFLOW_TODO_MIDDLEWARE",
             default=True,
+        ),
+        subagent_limit_enabled=load_bool_from_env(
+            "SLOTFLOW_SUBAGENT_LIMIT",
+            default=True,
+        ),
+        subagent_max_concurrent=load_positive_int_from_env(
+            "SLOTFLOW_SUBAGENT_MAX_CONCURRENT",
+            default=defaults.subagent_max_concurrent,
         ),
     )
 
@@ -294,6 +302,30 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
         network_timeout_seconds=load_positive_int_from_env(
             "SLOTFLOW_NETWORK_TIMEOUT_SECONDS",
             default=SlotFlowSandboxConfig().network_timeout_seconds,
+        ),
+        code_execution_enabled=load_bool_from_env(
+            "SLOTFLOW_CODE_EXECUTION_ENABLED",
+            default=True,
+        ),
+        docker_image=(
+            os.environ.get("SLOTFLOW_DOCKER_SANDBOX_IMAGE", "").strip()
+            or SlotFlowSandboxConfig().docker_image
+        ),
+        docker_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS",
+            default=SlotFlowSandboxConfig().docker_timeout_seconds,
+        ),
+        docker_network_enabled=load_bool_from_env(
+            "SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED",
+            default=SlotFlowSandboxConfig().docker_network_enabled,
+        ),
+        docker_idle_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS",
+            default=SlotFlowSandboxConfig().docker_idle_timeout_seconds,
+        ),
+        allow_host_docker_install=load_bool_from_env(
+            "SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL",
+            default=SlotFlowSandboxConfig().allow_host_docker_install,
         ),
     )
 

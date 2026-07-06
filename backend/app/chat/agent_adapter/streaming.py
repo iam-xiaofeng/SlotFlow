@@ -9,7 +9,6 @@ typed projection channel（messages / values / tool_calls）并发拉取、近�
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +27,7 @@ from app.chat.agent_adapter.projections import (
     is_summarization_item,
     projection_item_to_agent_event,
     todo_event_from_snapshot,
+    tool_status_event_from_tool_call,
 )
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 
@@ -145,11 +145,10 @@ async def iter_projection_agent_events(
     queue: asyncio.Queue[ProjectionEnvelope | BaseException | object] = asyncio.Queue()
     done_sentinel = object()
     latest_snapshot: AgentEvent | None = None
-    latest_todos_signature: str | None = None
     compression_announced = False
 
     async def pump_projection(projection: str, channel: Any) -> None:
-        nonlocal compression_announced, latest_snapshot, latest_todos_signature
+        nonlocal compression_announced, latest_snapshot
         try:
             async for item in channel:
                 if projection == "values":
@@ -161,14 +160,7 @@ async def iter_projection_agent_events(
                     if latest_snapshot is not None:
                         todo_event = todo_event_from_snapshot(latest_snapshot.data)
                         if todo_event is not None:
-                            signature = json.dumps(
-                                todo_event.data.get("todos", []),
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            )
-                            if signature != latest_todos_signature:
-                                latest_todos_signature = signature
-                                await queue.put(todo_event)
+                            await queue.put(todo_event)
                     continue
                 if projection == "messages":
                     if is_summarization_item(item):
@@ -177,13 +169,40 @@ async def iter_projection_agent_events(
                             await queue.put(make_context_compressing_event(bundle=bundle))
                         await drain_message_projection_item(item)
                         continue
+                    # 每条消息内已播报过的工具名:tool_calls 子投影按分片产出,
+                    # 同一工具会出现几十个 chunk,只发一次 tool.status。
+                    announced_tools: set[str] = set()
                     async for message_item in flatten_message_projection_items(item):
                         if is_summarization_item(message_item):
                             if not compression_announced:
                                 compression_announced = True
                                 await queue.put(make_context_compressing_event(bundle=bundle))
                             continue
+                        # 消息子流的 tool_calls 投影:合成 tool.status——这是工具执行
+                        # 对前端可见的唯一 live 来源,不进入 message.delta 映射。
+                        if (
+                            isinstance(message_item, dict)
+                            and message_item.get("channel") == "tool_calls"
+                        ):
+                            delta = message_item.get("delta")
+                            for tool_call in delta if isinstance(delta, list) else [delta]:
+                                status_event = tool_status_event_from_tool_call(
+                                    tool_call, bundle=bundle
+                                )
+                                if status_event is None:
+                                    continue
+                                tool_name = str(status_event.data.get("tool_name"))
+                                if tool_name in announced_tools:
+                                    continue
+                                announced_tools.add(tool_name)
+                                await queue.put(status_event)
+                            continue
                         await queue.put(ProjectionEnvelope(projection=projection, item=message_item))
+                elif projection == "tool_calls":
+                    status_event = tool_status_event_from_tool_call(item, bundle=bundle)
+                    if status_event is not None:
+                        await queue.put(status_event)
+                    await queue.put(ProjectionEnvelope(projection=projection, item=item))
                 else:
                     await queue.put(ProjectionEnvelope(projection=projection, item=item))
         except Exception as exc:  # pragma: no cover - surfaced to caller
@@ -280,6 +299,9 @@ def typed_message_delta_channels(item: Any) -> list[tuple[str, Any]]:
     for channel_name, attr_name in (
         ("reasoning", "reasoning"),
         ("content", "text"),
+        # live 流中模型工具调用只出现在每条消息的 .tool_calls 子投影里;
+        # 顶层 run_stream.tool_calls 通道实测从不产出(2026-07-04 真机探针)。
+        ("tool_calls", "tool_calls"),
     ):
         channel = getattr(item, attr_name, None)
         if channel is not None and hasattr(channel, "__aiter__"):
@@ -289,16 +311,20 @@ def typed_message_delta_channels(item: Any) -> list[tuple[str, Any]]:
 
 async def iter_typed_message_delta_items(
     channels: list[tuple[str, Any]],
-) -> AsyncIterator[dict[str, str]]:
-    """Interleave LangGraph `message.reasoning` and `message.text` deltas."""
+) -> AsyncIterator[dict[str, Any]]:
+    """Interleave LangGraph `message.reasoning` / `message.text` / `message.tool_calls`."""
 
-    queue: asyncio.Queue[tuple[str, str] | BaseException | object] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, Any] | BaseException | object] = asyncio.Queue()
     done_sentinel = object()
 
     async def pump_channel(channel_name: str, channel: Any) -> None:
         try:
             async for delta in channel:
-                if isinstance(delta, str) and delta:
+                if channel_name == "tool_calls":
+                    # 工具调用分片不是字符串(ToolCallChunk 字典),原样透传。
+                    if delta is not None:
+                        await queue.put((channel_name, delta))
+                elif isinstance(delta, str) and delta:
                     await queue.put((channel_name, delta))
         except Exception as exc:  # pragma: no cover - surfaced to caller
             await queue.put(exc)

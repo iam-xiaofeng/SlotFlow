@@ -8,20 +8,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from app.clock import utc_now
 from app.chat.models import RunContext
 from app.harness.config import SlotFlowHarnessConfig
+from app.harness.graph import build_slotflow_graph
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
-from app.harness.middleware import build_harness_middleware
 from app.harness.skills import build_skills_prompt, load_enabled_skills
-from app.harness.state import SlotFlowAgentState
 from app.harness.tools import build_harness_tools
 from app.harness.utils import model_supports_tools
 
 if TYPE_CHECKING:
-    from langchain.agents.middleware import AgentMiddleware
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import BaseTool
     from langgraph.types import Checkpointer
@@ -34,12 +32,11 @@ def build_slotflow_harness_graph(
     harness_config: SlotFlowHarnessConfig,
     checkpointer: Checkpointer | None = None,
     tools: list[BaseTool] | None = None,
-    middleware: list[AgentMiddleware] | None = None,
 ):
-    """创建 SlotFlow 本地 harness graph。
+    """创建 SlotFlow 本地 harness graph（node + edge 版本）。
 
-    模块 10 只落下边界，不急着引入真实 tools/skills/MCP/middleware。后续模块会逐步把
-    `tools` 和 `middleware` 从外部测试替身替换成 harness 内部 registry 的输出。
+    重构后改为 LangGraph 原生 `StateGraph`（见 `app.harness.graph`）。中间件逻辑已抽成
+    `app/harness/steps/*` 纯函数，由节点直接调用，顺序由边显式保证。
     """
 
     features = features_from_run_context(run_context)
@@ -58,29 +55,21 @@ def build_slotflow_harness_graph(
         subagent_config=harness_config.subagent_config,
     )
     selected_tools = built_tools if tools_supported else []
-
-    selected_middleware = build_harness_middleware(
-        features=features,
-        model=model,
-        run_context=run_context,
-        config=harness_config.middleware_config,
-        memory_store=harness_config.memory_store,
-        sandbox_config=harness_config.sandbox_config,
-        skills_root=harness_config.skills_root,
-        skills_config_store=harness_config.skills_config_store,
-        extra_middleware=middleware,
-        tools_enabled=tools_supported,
-    )
-
-    return _create_agent_graph(
+    return build_slotflow_graph(
         model=model,
         tools=selected_tools,
-        middleware=selected_middleware,
         system_prompt=build_system_prompt(
             harness_config=harness_config,
             features=features,
             run_context=run_context,
         ),
+        run_context=run_context,
+        features=features,
+        sandbox_config=harness_config.sandbox_config,
+        memory_store=harness_config.memory_store,
+        skills_root=harness_config.skills_root,
+        skills_config_store=harness_config.skills_config_store,
+        config_flags=harness_config.middleware_config,
         checkpointer=checkpointer,
     )
 
@@ -105,6 +94,7 @@ def build_system_prompt(
         harness_config.system_prompt,
         "",
         "<slotflow-runtime>",
+        f"current_utc_date={utc_now().date().isoformat()}",
         f"thinking_enabled={features.thinking_enabled}",
         f"plan_enabled={features.plan_enabled}",
         f"subagent_enabled={features.subagent_enabled}",
@@ -113,9 +103,21 @@ def build_system_prompt(
     sections.extend(
         [
             "",
+            "<slotflow-freshness-policy>",
+            "Before answering, ground time-sensitive claims on the current date above. For facts that change over time — current events, prices, laws, releases, APIs, model capabilities, rankings, availability, company/product status, schedules, weather, statistics, or anything the user asks as 'latest/current/today/now' — do not rely on training data alone.",
+            "Use web_search/web_fetch, workspace files, uploaded files, MCP tools, or another authoritative source before answering time-sensitive questions. If the answer is stable and unlikely to have changed (definitions, timeless concepts, basic math, local code already in the workspace), you may answer without web search.",
+            "When sources disagree materially, say so clearly, cite/describe the conflicting sources, and give the best-supported conclusion with uncertainty instead of hiding the conflict.",
+            "</slotflow-freshness-policy>",
+        ]
+    )
+    sections.extend(
+        [
+            "",
             "<slotflow-long-term-memory-status>",
             f"enabled={harness_config.memory_store is not None}",
-            "When enabled, long-term memory instructions and tools are owned by SlotFlowLongTermMemoryMiddleware.",
+            "When enabled, long-term memory retrieval/injection/save is handled by the prepare/pre_model/finalize graph nodes.",
+            "At the start of a task, decide whether existing long-term memory could matter. The graph already retrieves likely relevant memories, but if the task depends on user preferences, prior project context, profile facts, or past decisions and the injected memories are missing/insufficient, call memory_list before working.",
+            "After completing a task, decide whether anything durable should be saved or corrected. Use memory_save for stable preferences/profile/project context/facts worth reusing; use memory_update or memory_delete when an existing memory is wrong or obsolete. Do not save one-off transient task details.",
             "</slotflow-long-term-memory-status>",
         ]
     )
@@ -131,13 +133,14 @@ def build_system_prompt(
             "Query find-skills (and search_skill_repos) by CAPABILITY or task type in English — e.g. 'research', 'data analysis', 'web scraping', 'pdf', 'slides', 'stock'/'finance' — NOT by the literal topic words of the request (do not search '世界杯' or '股市'). Skills are organized by what they DO, not by subject. If the first query returns nothing, try synonyms and broader capability terms, and use search_skill_repos / web_search to look on GitHub before concluding that no Skill exists. Do not give up after one literal-keyword search.",
             "Use search_skill_repos to find installable Skills hosted on GitHub when the curated find-skills registry has no match; it returns repositories you can then install with skill_install.",
             "When the user asks about a domain, profession, specialized task, or expert workflow, call skill_match before doing the work so you can discover whether a matching installed or installable Skill exists.",
-            "For specialized requests, SlotFlow also injects a backend skills preflight into the latest user message when possible; review installed_matches before deciding whether to search, install, or use a Skill.",
+            "For specialized requests, SlotFlow may provide a backend skills preflight as internal system context; review installed_matches before deciding whether to search, install, or use a Skill.",
             "Use skill_install only when a concrete package_url and skill_name are known or the user explicitly asks for that exact install.",
             "After installing a relevant Skill, use it for the corresponding work as soon as it is available; if it only becomes available on the next run, say that plainly and continue with the best current tools.",
             "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
             "When uploaded files are present, their workspace paths are injected into the latest user message; call workspace_read(path) before answering file-content questions.",
+            "Run shell/bash/python/node/npm/pip commands, generated scripts, dependency installs, and Skill helper scripts ONLY with sandbox_exec. Never use host shell/terminal/MCP execution tools for code execution; unsafe host execution tools are intentionally blocked and will return an error telling you to use sandbox_exec. If sandbox_exec creates a user-visible file outside /workspace/artifacts (for example in the current /workspace/work/<thread> scratch directory or /tmp), publish that one file with sandbox_artifact_copy so it appears in this conversation's artifact panel. If sandbox_exec reports Docker is unavailable, call docker_engine_setup(action='check') first; it auto-starts an installed-but-stopped daemon and returns host OS/package-manager info from /etc/os-release. Then use docker_engine_setup(action='install', confirm_host_install=true) only after the user explicitly asks SlotFlow to install Docker Engine. If automatic install is disabled or sudo cannot run non-interactively, use docker_engine_setup(action='install_script') and tell the user to run the returned script.",
             "When you need input from the user before you can proceed — an ambiguous or underspecified request, a required preference, or a risky/irreversible action — you MUST call ask_clarification with 2-4 concise options. It renders an interactive picker (with a free-text 'other' option) that the user clicks; do NOT instead write your questions as plain message text and wait for a reply. If several things are unknown, ask the single most blocking question via ask_clarification first rather than a long plain-text questionnaire. Still skip it when a reasonable default is obvious — don't over-ask.",
-            "Every user-visible file MUST be produced with artifact_write — reports, charts, HTML/Markdown pages, visualizations, comparison tables, interactive demos, code previews. It is the only way a file appears in the artifact panel; files live in this conversation's artifact folder next to the user's uploads. Do NOT create user-facing deliverables with the filesystem MCP server or any other write path — files written that way will NOT appear in the artifact panel. Never claim you saved a file unless you actually called artifact_write for it.",
+            "Every user-visible file MUST be produced with artifact_write or, for files generated inside Docker, sandbox_artifact_copy — reports, charts, HTML/Markdown pages, visualizations, comparison tables, interactive demos, code previews. These are the paths that place files in the artifact panel; files live in this conversation's artifact folder next to the user's uploads. Do NOT create user-facing deliverables with the filesystem MCP server or any other write path — files written that way will NOT appear in the artifact panel. Never claim you saved a file unless you actually called artifact_write or sandbox_artifact_copy for it.",
             "Decide when a result deserves an artifact. Create one for SUBSTANTIAL, STANDALONE deliverables the user will keep, open, share, or iterate on — full reports/documents, complete HTML pages or apps, rendered charts/diagrams/visualizations, slide decks, large or structured datasets, and long or multi-file code. Do NOT create an artifact for ordinary conversational answers — a short explanation, a brief comparison or small table, a few bullet points, or a short snippet meant to be read in context; answer those inline in the message. Rule of thumb: use artifact_write when the output is longer than roughly a screenful, is a complete document/page/app, or the user asked to generate/export a file; otherwise reply inline.",
             "For complex planning workflows with human approval steps, create the final approved plan/report as an artifact with artifact_write after the required approval is received. Keep the chat reply short and point to the saved artifact path returned by the tool.",
             "Installed skills or MCP servers may become reliably available on the next run after runtime refresh.",
@@ -151,13 +154,14 @@ def build_system_prompt(
         "- Keep the final answer clean: never include meta-commentary about your own indecision, apologies for confusion, or 'let me think about whether to ask'. Decide, state the assumption in one line, deliver.",
         "- For a specialized, domain, or expert task, call skill_match before doing the work to find a relevant Skill.",
     ]
-    if features.plan_enabled:
-        orchestration_lines.append(
-            "- Plan the work with write_todos (3-7 concrete steps) and work the list, marking items in_progress/completed as you go — don't keep the plan only in your head.",
-        )
     if features.subagent_enabled:
-        orchestration_lines.append(
-            "- When the task splits into INDEPENDENT parts (research multiple items, evaluate multiple options, build multiple components), delegate each to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself — don't do every part sequentially in one thread.",
+        orchestration_lines.extend(
+            [
+                "- When the task splits into INDEPENDENT parts (research multiple items, evaluate multiple options, build multiple components), delegate each to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself — don't do every part sequentially in one thread.",
+                "- For delegation, call subagent_list before choosing workers when role fit matters. Pick a Layer-1 functional agent_name (researcher/analyst/planner/coder/reviewer/writer), then usually pass only a Layer-2 domain to task_tool for domain guidance.",
+                "- Use subagent_role_search(query, domain) only when the exact Layer-3 professional role matters; pass one returned role_name/id to task_tool. Do not ask to see or summarize the full role library.",
+                "- subagent_list/subagent_role_search expose compact role metadata only; task_tool loads at most one file-backed agency role template into the child subagent.",
+            ]
         )
     sections.extend(
         ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
@@ -195,24 +199,3 @@ def build_mcp_status_prompt(mcp_config) -> list[str]:
         ]
     )
     return sections
-
-
-def _create_agent_graph(
-    *,
-    model: str | BaseChatModel,
-    tools: list[BaseTool],
-    middleware: list[AgentMiddleware],
-    system_prompt: str,
-    checkpointer: Checkpointer | None,
-):
-    """薄封装 LangChain `create_agent`，方便模块测试 monkeypatch 边界参数。"""
-
-    return create_agent(
-        model=model,
-        tools=tools,
-        middleware=middleware,
-        system_prompt=system_prompt,
-        state_schema=SlotFlowAgentState,
-        context_schema=RunContext,
-        checkpointer=checkpointer,
-    )

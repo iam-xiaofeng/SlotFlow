@@ -22,7 +22,16 @@ class WorkspaceReadRecord(BaseModel):
     """A model-readable workspace file payload exposed to the frontend."""
 
     path: str
-    kind: Literal["text", "document", "pdf", "image", "binary"]
+    kind: Literal[
+        "text",
+        "document",
+        "spreadsheet",
+        "presentation",
+        "diagram",
+        "pdf",
+        "image",
+        "binary",
+    ]
     media_type: str
     size_bytes: int
     source: str

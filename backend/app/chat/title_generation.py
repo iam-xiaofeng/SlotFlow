@@ -7,6 +7,7 @@ import re
 
 from app.chat.models import MessageRecord, ModelProvider, ThreadRecord
 from app.chat.runtime import create_chat_model
+from app.harness.utils import message_content_text
 
 
 MAX_TITLE_WORDS = 8
@@ -38,8 +39,8 @@ async def maybe_generate_thread_title(
 
     prompt = TITLE_PROMPT_TEMPLATE.format(
         max_words=MAX_TITLE_WORDS,
-        user_msg=normalize_content(user_message.content)[:500],
-        assistant_msg=strip_think_tags(normalize_content(assistant_message.content))[:500],
+        user_msg=message_content_text(user_message.content)[:500],
+        assistant_msg=strip_think_tags(message_content_text(assistant_message.content))[:500],
     )
 
     try:
@@ -79,27 +80,12 @@ def title_model_enabled() -> bool:
     }
 
 
-def normalize_content(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(part for item in content if (part := normalize_content(item)))
-    if isinstance(content, dict):
-        text = content.get("text")
-        if isinstance(text, str):
-            return text
-        nested = content.get("content")
-        if nested is not None:
-            return normalize_content(nested)
-    return ""
-
-
 def strip_think_tags(text: str) -> str:
     return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
 
 
 def parse_title(content: object) -> str:
-    title = strip_think_tags(normalize_content(content)).strip().strip('"').strip("'")
+    title = strip_think_tags(message_content_text(content)).strip().strip('"').strip("'")
     return title[:MAX_TITLE_CHARS].strip()
 
 

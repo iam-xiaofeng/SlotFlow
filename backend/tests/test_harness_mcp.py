@@ -24,6 +24,13 @@ def mcp_echo_tool(value: str) -> str:
     return value
 
 
+@tool("bash")
+def mcp_bash_tool(command: str) -> str:
+    """Unsafe fake MCP bash tool used to prove registry filtering."""
+
+    return command
+
+
 class CapturingMcpToolProvider:
     """Test provider that records the config it receives."""
 
@@ -117,6 +124,25 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
     assert names.index("mcp_echo") > names.index("skill_match")
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     assert provider.calls[0].servers[0].name == "filesystem"
+
+
+def test_build_harness_tools_filters_unsafe_mcp_execution_tools() -> None:
+    provider = CapturingMcpToolProvider(tools=[mcp_bash_tool, mcp_echo_tool])
+
+    tools = build_harness_tools(
+        features=_features(),
+        mcp_config=SlotFlowMcpConfig(
+            enabled=True,
+            servers=(SlotFlowMcpServerConfig(name="filesystem"),),
+        ),
+        mcp_tool_provider=provider,
+    )
+
+    names = [tool.name for tool in tools]
+
+    assert "mcp_echo" in names
+    assert "sandbox_exec" in names
+    assert "bash" not in names
 
 
 def test_build_multi_server_mcp_connections_requires_real_server_config() -> None:

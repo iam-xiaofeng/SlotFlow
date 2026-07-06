@@ -14,7 +14,7 @@ from app.chat.runtime import (
     refresh_runtime_skills_config,
 )
 from app.dependencies import get_runtime_config
-from app.harness.skills import load_enabled_skills
+from app.harness.skills import invalidate_skill_scan_cache, load_enabled_skills
 from app.harness.skills.store import ProtectedSkillError, SlotFlowSkillsConfigStore
 from app.skills.models import (
     SkillInstallRequest,
@@ -193,26 +193,32 @@ async def delete_skill(skill_name: str, request: Request) -> Response:
 
     root = get_skills_root(request)
     store = get_skills_config_store(request)
+    if store is not None:
+        store.infer_missing_dependency_parents()
     skill = find_skill_by_name(root, skill_name)
     if skill is None:
         raise HTTPException(status_code=404, detail="skill not found")
     if store is not None and store.is_protected(skill.name):
         raise HTTPException(status_code=403, detail="protected skill cannot be deleted")
 
-    resolved_root = root.resolve()
-    resolved_dir = skill.skill_dir.resolve()
-    if resolved_root not in resolved_dir.parents and resolved_dir != resolved_root:
-        raise HTTPException(status_code=400, detail="invalid skill path")
+    skills_to_delete = skill_tree_for_delete(root=root, root_skill_name=skill.name, store=store)
+    for candidate in skills_to_delete:
+        if store is not None and store.is_protected(candidate.name):
+            raise HTTPException(status_code=403, detail="protected skill cannot be deleted")
+        ensure_skill_dir_under_root(root=root, skill_dir=candidate.skill_dir)
 
-    shutil.rmtree(resolved_dir)
+    for skill_dir in minimal_delete_dirs([candidate.skill_dir for candidate in skills_to_delete]):
+        shutil.rmtree(skill_dir)
     if store is not None:
         try:
             store.remove_skill_tree_config(skill.name)
         except ProtectedSkillError as exc:
             raise HTTPException(status_code=403, detail="protected skill cannot be deleted") from exc
+    invalidate_skill_scan_cache()
     runtime_config = get_runtime_config(request)
     if runtime_config.enabled_skills is not None:
-        runtime_config.enabled_skills.discard(skill.name)
+        for deleted_skill in skills_to_delete:
+            runtime_config.enabled_skills.discard(deleted_skill.name)
     refresh_runtime_skills_config(runtime_config)
     return Response(status_code=204)
 
@@ -257,6 +263,59 @@ def find_skill_by_name(root: Path, skill_name: str):
         if skill.name == skill_name:
             return skill
     return None
+
+
+def skill_tree_for_delete(
+    *,
+    root: Path,
+    root_skill_name: str,
+    store: SlotFlowSkillsConfigStore | None,
+):
+    """Return the selected skill and every discovered child skill that should be deleted with it."""
+
+    skills = load_enabled_skills(skills_root=root, enabled_names=None)
+    skills_by_name = {skill.name: skill for skill in skills}
+    root_skill = skills_by_name.get(root_skill_name)
+    if root_skill is None:
+        return []
+
+    names_to_delete = {root_skill_name}
+    if store is not None:
+        configs = store.configs()
+        changed = True
+        while changed:
+            changed = False
+            for name, config in configs.items():
+                if name not in names_to_delete and config.parent in names_to_delete:
+                    names_to_delete.add(name)
+                    changed = True
+
+    root_dir = root_skill.skill_dir.resolve()
+    for skill in skills:
+        skill_dir = skill.skill_dir.resolve()
+        if skill.name not in names_to_delete and root_dir in skill_dir.parents:
+            names_to_delete.add(skill.name)
+
+    return [skill for skill in skills if skill.name in names_to_delete]
+
+
+def ensure_skill_dir_under_root(*, root: Path, skill_dir: Path) -> None:
+    resolved_root = root.resolve()
+    resolved_dir = skill_dir.resolve()
+    if resolved_root not in resolved_dir.parents and resolved_dir != resolved_root:
+        raise HTTPException(status_code=400, detail="invalid skill path")
+
+
+def minimal_delete_dirs(skill_dirs: list[Path]) -> list[Path]:
+    """Drop nested dirs when their parent is already being deleted."""
+
+    resolved_dirs = sorted({path.resolve() for path in skill_dirs}, key=lambda item: len(item.parts))
+    result: list[Path] = []
+    for path in resolved_dirs:
+        if any(parent == path or parent in path.parents for parent in result):
+            continue
+        result.append(path)
+    return result
 
 
 def uploaded_skills(*, root: Path, uploaded_paths: list[Path]):

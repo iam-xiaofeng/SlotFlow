@@ -19,6 +19,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.harness.memory.models import MEMORY_KINDS, MemoryKind
+from app.harness.utils import message_content_text
 
 
 _EXTRACT_SYSTEM = (
@@ -30,12 +31,43 @@ _EXTRACT_SYSTEM = (
     "- fact: another durable personal fact (e.g. birthday, location)\n"
     "Do NOT save: the one-off question itself, transient task details, your own answer, "
     "uploaded-file events, or anything only relevant to this single turn. "
+    "NEVER save instructions/commands directed at the assistant (e.g. 不要使用工具 / "
+    "必须使用某工具 / 用一句话回答 / test-scenario directives) — those are one-off task "
+    "instructions, not durable user facts. Never mention internal tool names "
+    "(sandbox_exec / write_todos / artifact_write / ask_clarification / skill_match ...) "
+    "in saved content. "
     "When in doubt, prefer to save a clearly durable fact rather than miss it, but return an "
     "EMPTY array if the turn contains nothing durable. Each `content` must be a concise, "
-    "standalone sentence understandable without the conversation. "
+    "standalone sentence understandable without the conversation. Write each `content` in "
+    "Chinese, third person, subject 用户 (e.g. 用户的职业是研究生。/ 用户偏好简洁的中文回答。"
+    "/ 用户正在开发SlotFlow项目。) — you are the ONLY rewriter; storage keeps your wording "
+    "verbatim.\n"
     "Respond with ONLY a compact JSON array, no prose, no markdown fences:\n"
     '[{"kind": "preference|profile|topic|fact", "content": "<concise standalone fact>"}]'
 )
+
+# 后置硬过滤:提及内部工具名的"记忆"几乎必然是任务指令或测试脚本片段,
+# 混进长期记忆会在无关对话里串台(2026-07-04 实测踩坑)。
+_INSTRUCTION_MARKERS = (
+    "sandbox_exec",
+    "write_todos",
+    "artifact_write",
+    "ask_clarification",
+    "skill_match",
+    "skill_install",
+    "workspace_read",
+    "workspace_grep",
+    "memory_save",
+    "memory_list",
+    "task_tool",
+    "不要使用工具",
+    "不要调用工具",
+)
+
+
+def looks_like_assistant_instruction(content: str) -> bool:
+    lowered = content.lower()
+    return any(marker in lowered for marker in _INSTRUCTION_MARKERS)
 
 
 class SlotFlowMemoryExtractor:
@@ -61,7 +93,8 @@ class SlotFlowMemoryExtractor:
             )
         except Exception:  # noqa: BLE001 - background best-effort; never raise
             return []
-        return parse_extracted_facts(_message_text(getattr(response, "content", "")))
+        facts = parse_extracted_facts(message_content_text(getattr(response, "content", "")))
+        return [fact for fact in facts if not looks_like_assistant_instruction(fact["content"])]
 
 
 def parse_extracted_facts(text: str) -> list[dict[str, str]]:
@@ -96,17 +129,3 @@ def _coerce_kind(value: Any) -> MemoryKind:
     if isinstance(value, str) and value in MEMORY_KINDS:
         return value  # type: ignore[return-value]
     return "fact"
-
-
-def _message_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts)
-    return ""

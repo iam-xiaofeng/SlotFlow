@@ -1,10 +1,9 @@
 "use client";
 
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type ChatMode,
-  type ChatStreamEvent,
   type ChatStreamRequest,
   type ThreadRecord,
   type WorkspaceEntryRecord,
@@ -21,10 +20,12 @@ import {
   latestDiscoveredArtifacts,
   latestTodos,
   makeId,
+  mergeAssistantContent,
   mergeReasoningContent,
   mergeWorkspaceEntries,
   messageRecordToUiMessage,
   parseClarificationRequest,
+  parseToolStatus,
   parseTodos,
 } from "./use-chat-stream-helpers";
 
@@ -32,6 +33,7 @@ export type {
   ChatTodo,
   ChatTodoStatus,
   ChatUiMessage,
+  ChatToolStatus,
   ChatUiMessageRole,
   ChatUiMessageStatus,
 } from "./use-chat-stream-helpers";
@@ -45,7 +47,6 @@ export type UseChatStreamOptions = {
   defaultMode?: ChatMode;
   defaultAgentName?: string;
   defaultMetadata?: Record<string, unknown>;
-  maxEventLogItems?: number;
 };
 
 export type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message"> & {
@@ -62,8 +63,11 @@ const fallbackThreadTitle = "SlotFlow chat";
 const fallbackModelName = "deepseek-v4-pro";
 const fallbackMode: ChatMode = "pro";
 const fallbackAgentName = "default";
-const fallbackMaxEventLogItems = 12;
 const streamingDeltaFlushMs = 80;
+
+function todoContentKey(todos: ChatTodo[]): string {
+  return JSON.stringify(todos.map((todo) => todo.content.trim()));
+}
 
 export function useChatStream(options: UseChatStreamOptions = {}) {
   const {
@@ -72,19 +76,18 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     defaultMode = fallbackMode,
     defaultAgentName = fallbackAgentName,
     defaultMetadata = {},
-    maxEventLogItems = fallbackMaxEventLogItems,
   } = options;
 
   const [thread, setThread] = useState<ThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [todos, setTodos] = useState<ChatTodo[]>([]);
-  const [todoRevision, setTodoRevision] = useState(0);
-  const [events, setEvents] = useState<ChatStreamEvent[]>([]);
+  const [todoListKey, setTodoListKey] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isStreamingRef = useRef(false);
-  const hasTodoListForCurrentRunRef = useRef(false);
+  const todoSignatureRef = useRef("[]");
+  const todoListKeyRef = useRef<string | null>(null);
   const pendingAssistantDeltasRef = useRef(new Map<string, PendingAssistantDeltas>());
   const pendingFlushTimerRef = useRef<number | null>(null);
 
@@ -98,27 +101,21 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     };
   }, []);
 
-  const appendEvent = useCallback(
-    (event: ChatStreamEvent) => {
-      startTransition(() => {
-        setEvents((current) => [
-          ...current.slice(Math.max(0, current.length - maxEventLogItems + 1)),
-          event,
-        ]);
-      });
-    },
-    [maxEventLogItems],
-  );
-
   const replaceTodos = useCallback((nextTodos: ChatTodo[]) => {
-    if (nextTodos.length === 0 && !hasTodoListForCurrentRunRef.current) {
+    if (nextTodos.length === 0 && todoSignatureRef.current === "[]") {
       return;
     }
-    setTodos(nextTodos);
-    if (nextTodos.length > 0 && !hasTodoListForCurrentRunRef.current) {
-      hasTodoListForCurrentRunRef.current = true;
-      setTodoRevision((current) => current + 1);
+    const nextSignature = JSON.stringify(nextTodos);
+    if (nextSignature === todoSignatureRef.current) {
+      return;
     }
+    const nextListKey = nextTodos.length > 0 ? todoContentKey(nextTodos) : null;
+    todoSignatureRef.current = nextSignature;
+    if (nextListKey !== todoListKeyRef.current) {
+      todoListKeyRef.current = nextListKey;
+      setTodoListKey(nextListKey);
+    }
+    setTodos(nextTodos);
   }, []);
 
   const updateAssistantMessage = useCallback((
@@ -217,7 +214,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       return {
         ...message,
         compressionStarted: false,
-        content,
+        content: mergeAssistantContent(message.content, content),
       };
     });
   }, [updateAssistantMessage]);
@@ -229,31 +226,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     [updateAssistantMessage],
   );
 
-  const startNewThread = useCallback(
-    async (title = defaultThreadTitle): Promise<ThreadRecord | null> => {
-      if (isStreamingRef.current) {
-        return thread;
-      }
-
-      setError(null);
-      try {
-        const nextThread = await createThread(title);
-        setThread(nextThread);
-        setMessages([]);
-        setTodos([]);
-        setTodoRevision(0);
-        hasTodoListForCurrentRunRef.current = false;
-        setEvents([]);
-        return nextThread;
-      } catch (caught) {
-        const message = caught instanceof Error ? caught.message : "create thread failed";
-        setError(message);
-        return null;
-      }
-    },
-    [defaultThreadTitle, thread],
-  );
-
   const resetThread = useCallback((): boolean => {
     if (isStreamingRef.current) {
       return false;
@@ -262,9 +234,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     setThread(null);
     setMessages([]);
     setTodos([]);
-    setTodoRevision(0);
-    hasTodoListForCurrentRunRef.current = false;
-    setEvents([]);
+    setTodoListKey(null);
+    todoSignatureRef.current = "[]";
+    todoListKeyRef.current = null;
     setError(null);
     return true;
   }, []);
@@ -284,9 +256,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       setThread(targetThread);
       setMessages(storedMessages.map(messageRecordToUiMessage));
       setTodos([]);
-      setTodoRevision(0);
-      hasTodoListForCurrentRunRef.current = false;
-      setEvents([]);
+      setTodoListKey(null);
+      todoSignatureRef.current = "[]";
+      todoListKeyRef.current = null;
       return true;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "load thread failed";
@@ -331,7 +303,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
       abortControllerRef.current = controller;
       isStreamingRef.current = true;
-      hasTodoListForCurrentRunRef.current = false;
       setIsStreaming(true);
       setError(null);
 
@@ -387,11 +358,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         };
 
         let discoveredArtifacts: WorkspaceEntryRecord[] = [];
+        let toolStatusVisible = false;
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
           signal: controller.signal,
         })) {
-          appendEvent(streamEvent);
-
           if (streamEvent.event === "run.prepared") {
             const runId = streamEvent.data.run_id;
             if (typeof runId === "string") {
@@ -409,12 +379,27 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
               const channel = streamEvent.data.channel;
               if (channel === "reasoning") {
                 patchAssistant(assistantMessageId, { thinkingStarted: true });
+              } else if (toolStatusVisible) {
+                // 工具已执行完、模型恢复输出正文:清掉状态芯片,别让"running"一直挂着骗人。
+                toolStatusVisible = false;
+                patchAssistant(assistantMessageId, { toolStatus: undefined });
               }
               appendAssistantDelta(
                 assistantMessageId,
                 channel === "reasoning" ? "reasoning" : "content",
                 delta,
               );
+            }
+          }
+
+          if (streamEvent.event === "tool.status") {
+            const toolStatus = parseToolStatus(streamEvent.data);
+            if (toolStatus) {
+              toolStatusVisible = true;
+              patchAssistant(assistantMessageId, {
+                compressionStarted: false,
+                toolStatus,
+              });
             }
           }
 
@@ -435,6 +420,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
           if (streamEvent.event === "state.snapshot") {
             flushPendingAssistantDeltas();
+            const snapshotTodos = latestTodos(streamEvent);
+            if (snapshotTodos !== null) {
+              replaceTodos(snapshotTodos);
+            }
             const content = latestAssistantContent(streamEvent);
             if (content) {
               replaceAssistantContent(assistantMessageId, "content", content);
@@ -442,10 +431,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             const reasoningContent = latestAssistantReasoningContent(streamEvent);
             if (reasoningContent) {
               replaceAssistantContent(assistantMessageId, "reasoning", reasoningContent);
-            }
-            const nextTodos = latestTodos(streamEvent);
-            if (nextTodos) {
-              replaceTodos(nextTodos);
             }
             const nextArtifacts = latestDiscoveredArtifacts(streamEvent);
             if (nextArtifacts.length > 0) {
@@ -463,6 +448,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             setError(message);
             patchAssistant(assistantMessageId, {
               compressionStarted: false,
+              toolStatus: undefined,
               status: "error",
             });
           }
@@ -472,11 +458,13 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         if (controller.signal.aborted) {
           patchAssistant(assistantMessageId, {
             compressionStarted: false,
+            toolStatus: undefined,
             status: "cancelled",
           });
         } else if (!failed) {
           patchAssistant(assistantMessageId, {
             compressionStarted: false,
+            toolStatus: undefined,
             status: "done",
           });
         }
@@ -487,6 +475,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         if (controller.signal.aborted) {
           patchAssistant(assistantMessageId, {
             compressionStarted: false,
+            toolStatus: undefined,
             status: "cancelled",
           });
           return { accepted, thread: activeThread, artifacts: [] };
@@ -496,6 +485,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         setError(message);
         patchAssistant(assistantMessageId, {
           compressionStarted: false,
+          toolStatus: undefined,
           status: "error",
         });
         return { accepted, thread: activeThread, artifacts: [] };
@@ -509,7 +499,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     },
     [
       appendAssistantDelta,
-      appendEvent,
       defaultAgentName,
       defaultMetadata,
       defaultMode,
@@ -531,12 +520,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     thread,
     messages,
     todos,
-    todoRevision,
-    events,
+    todoListKey,
     isStreaming,
     error,
     sendMessage,
-    startNewThread,
     cancelStream,
     resetThread,
     removeMessage,

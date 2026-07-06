@@ -10,7 +10,12 @@ from urllib.parse import quote_plus
 from langchain_core.tools import BaseTool, tool
 
 from app.harness.mcp import SlotFlowMcpConfigStore
-from app.harness.skills import ProtectedSkillError, SlotFlowSkillsConfigStore, load_enabled_skills
+from app.harness.skills import (
+    ProtectedSkillError,
+    SlotFlowSkillsConfigStore,
+    invalidate_skill_scan_cache,
+    load_enabled_skills,
+)
 from app.harness.tools.network import fetch_url, search_web
 from app.harness.sandbox import SlotFlowSandboxConfig
 
@@ -121,6 +126,7 @@ def build_customization_tools(
             )
 
         invalidate_skill_match_cache()
+        invalidate_skill_scan_cache()
         return json.dumps(
             {
                 "installed": True,
@@ -276,8 +282,15 @@ def find_relevant_skills(
     skills_root,
     skills_config_store: SlotFlowSkillsConfigStore | None = None,
     config: SlotFlowSandboxConfig | None = None,
+    local_only: bool = False,
 ) -> dict:
-    """Prefer locally installed Skills, then fall back to installable Skill search."""
+    """Prefer locally installed Skills, then fall back to installable Skill search.
+
+    ``local_only=True`` skips the network installable-skill search. The prepare-node
+    preflight uses this so a request with no matching local Skill does not block first-
+    token on a ~4s web search; the model can still run the network search itself via the
+    ``skill_match`` tool when it actually wants to install something.
+    """
 
     installed_matches = match_installed_skills(
         query=query,
@@ -295,6 +308,14 @@ def find_relevant_skills(
         result["next_action"] = "use_installed_skills"
         result["hint"] = (
             "Use the installed Skill matches for this run before searching or installing more Skills."
+        )
+        return result
+
+    if local_only:
+        result["next_action"] = "optional_skill_match"
+        result["hint"] = (
+            "No relevant installed Skills were found. If specialized work is needed, call "
+            "skill_match to search installable Skills on demand; otherwise proceed."
         )
         return result
 

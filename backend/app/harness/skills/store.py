@@ -212,8 +212,10 @@ class SlotFlowSkillsConfigStore:
         configs = self.configs()
         if configs.get(name, SkillConfig()).protected:
             raise ProtectedSkillError(name)
-        for skill_name, config in list(configs.items()):
-            if skill_name == name or config.parent == name:
+        names_to_remove = skill_config_tree_names(configs, name)
+        for skill_name in names_to_remove:
+            config = configs.get(skill_name, SkillConfig())
+            if skill_name in configs:
                 if config.protected:
                     raise ProtectedSkillError(skill_name)
                 configs.pop(skill_name, None)
@@ -348,6 +350,20 @@ def next_skill_order(configs: dict[str, SkillConfig]) -> int:
     if not configs:
         return 0
     return max(config.order for config in configs.values()) + 1
+
+
+def skill_config_tree_names(configs: dict[str, SkillConfig], root_name: str) -> set[str]:
+    """Return the root skill and all configured descendants by parent link."""
+
+    names = {root_name}
+    changed = True
+    while changed:
+        changed = False
+        for name, config in configs.items():
+            if name not in names and config.parent in names:
+                names.add(name)
+                changed = True
+    return names
 
 
 def skill_config_sort_key(item: tuple[str, SkillConfig]) -> tuple[bool, int, str]:

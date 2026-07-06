@@ -15,8 +15,11 @@ from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore
 from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
 from app.harness.tools.builtins import ask_clarification_tool
+from app.harness.tools.todo import write_todos_tool
 from app.harness.tools.customization import build_customization_tools
+from app.harness.tools.host_execution import is_unsafe_host_execution_tool_name
 from app.harness.tools.network import build_network_tools
+from app.harness.tools.sandbox import build_sandbox_tools
 from app.harness.tools.workspace import build_workspace_tools
 from app.harness.utils import dedupe_by_name
 
@@ -43,13 +46,20 @@ def build_harness_tools(
     `features` 会透传给 `build_subagent_tools`，用于决定是否启用子 agent 工具等能力。
     """
 
-    mcp_tools = load_mcp_tools(
-        config=mcp_config or SlotFlowMcpConfig(),
-        provider=mcp_tool_provider,
+    mcp_tools = filter_unsafe_host_execution_tools(
+        load_mcp_tools(
+            config=mcp_config or SlotFlowMcpConfig(),
+            provider=mcp_tool_provider,
+        )
     )
     workspace_tools = build_workspace_tools(
         sandbox_config,
         thread_id=run_context.thread_id if run_context is not None else None,
+    )
+    sandbox_tools = build_sandbox_tools(
+        sandbox_config,
+        thread_id=run_context.thread_id if run_context is not None else None,
+        skills_root=skills_root,
     )
     network_tools = build_network_tools(sandbox_config)
     customization_tools = build_customization_tools(
@@ -65,19 +75,38 @@ def build_harness_tools(
         run_context=run_context,
         environment_tools=[
             *workspace_tools,
+            *sandbox_tools,
             *network_tools,
             *customization_tools,
             *mcp_tools,
         ],
     )
+    # Expose write_todos in every mode. Pro/Ultra still get the proactive planning
+    # prompt; Flash keeps the tool available for explicit requests like "测试 todo 功能"
+    # instead of forcing the model to simulate a todo list in prose.
+    todo_tools = [write_todos_tool]
     return dedupe_by_name(
-        [
-            *(extra_tools or []),
-            ask_clarification_tool,
-            *workspace_tools,
-            *network_tools,
-            *customization_tools,
-            *subagent_tools,
-            *mcp_tools,
-        ]
+        filter_unsafe_host_execution_tools(
+            [
+                *(extra_tools or []),
+                ask_clarification_tool,
+                *todo_tools,
+                *workspace_tools,
+                *sandbox_tools,
+                *network_tools,
+                *customization_tools,
+                *subagent_tools,
+                *mcp_tools,
+            ]
+        )
     )
+
+
+def filter_unsafe_host_execution_tools(tools: list[BaseTool]) -> list[BaseTool]:
+    """Remove host shell/code execution tools; code execution must use sandbox_exec."""
+
+    return [tool for tool in tools if not is_unsafe_host_execution_tool(tool)]
+
+
+def is_unsafe_host_execution_tool(tool: BaseTool) -> bool:
+    return is_unsafe_host_execution_tool_name(tool.name)

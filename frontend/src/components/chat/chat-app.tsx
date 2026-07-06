@@ -9,7 +9,9 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { PanelRightOpen, SquareTerminal } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarInset,
@@ -26,10 +28,10 @@ import {
   type MemoryKind,
   type MemoryRecord,
   type SkillRecord,
+  type SkillInstallRequest,
   type ThreadRecord,
   type UploadedFileRecord,
   type WorkspaceEntryRecord,
-  type WorkspaceReadRecord,
   createHttpMcpServer,
   createMemory,
   deleteArtifact,
@@ -39,7 +41,6 @@ import {
   deleteThread,
   installSkill,
   listThreads,
-  readArtifact,
   reorderMcpServers,
   reorderSkills,
   setMcpServerEnabled,
@@ -51,7 +52,7 @@ import {
   uploadSkillFolder,
 } from "@/lib/chat-stream";
 
-import { WorkspacePanel } from "./workspace-panel";
+import { WorkspacePanel, type WorkspacePanelRequest } from "./workspace-panel";
 import { WorkspaceDirectoryModal } from "./workspace-directory-modal";
 import {
   defaultModelName,
@@ -95,12 +96,10 @@ export function ChatApp() {
   const [selectedThinkingEnabled, setSelectedThinkingEnabled] = useState(
     defaultMode !== "flash",
   );
-  const [artifactPreview, setArtifactPreview] = useState<WorkspaceReadRecord | null>(null);
-  const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
-  const [isLoadingArtifactPreview, setIsLoadingArtifactPreview] = useState(false);
   const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
   const [isWorkspaceDirectoryOpen, setIsWorkspaceDirectoryOpen] = useState(false);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
+  const [panelRequest, setPanelRequest] = useState<WorkspacePanelRequest | null>(null);
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(680);
   const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -115,7 +114,7 @@ export function ChatApp() {
     thread,
     messages,
     todos,
-    todoRevision,
+    todoListKey,
     isStreaming,
     error,
     sendMessage,
@@ -132,7 +131,6 @@ export function ChatApp() {
     defaultMetadata: {
       source: "chat-ui",
     },
-    maxEventLogItems: 10,
   });
 
   const { isLoadingModels, selectedModelName, setSelectedModelName, modelOptions } =
@@ -254,10 +252,22 @@ export function ChatApp() {
           refreshMcpServers(),
           refreshMemories(),
         ]);
+        // Only auto-open artifacts that belong to THIS thread and are genuinely new.
+        // `nextArtifacts` is the full recursive listing under artifacts/ (every thread +
+        // legacy), so naively taking newArtifacts[0] could pop up an older thread's file
+        // after answering an unrelated question (issue #8). Restrict to this thread's
+        // namespaced path + remembered paths, then to files not seen before this run.
+        const threadId = result.thread?.id ?? thread?.id;
+        const threadPrefix = threadId ? `artifacts/${threadId}/` : null;
+        const threadOwned = (artifact: WorkspaceEntryRecord) =>
+          threadPrefix !== null && artifact.path.startsWith(threadPrefix);
         const newArtifacts = mergeWorkspaceEntries(
-          discoveredArtifacts,
+          discoveredArtifacts.filter(threadOwned),
           nextArtifacts.filter(
-            (artifact) => artifact.kind === "file" && !previousArtifactPaths.has(artifact.path),
+            (artifact) =>
+              artifact.kind === "file" &&
+              threadOwned(artifact) &&
+              !previousArtifactPaths.has(artifact.path),
           ),
         );
         if (result.thread && newArtifacts.length > 0) {
@@ -268,7 +278,7 @@ export function ChatApp() {
         }
         const newArtifact = newArtifacts[0];
         if (newArtifact) {
-          void handlePreviewArtifact(newArtifact);
+          handlePreviewArtifact(newArtifact);
           setWorkspaceRefreshKey((current) => current + 1);
         }
       } else if (options.restoreAttachments) {
@@ -329,6 +339,7 @@ export function ChatApp() {
     if (loaded) {
       setAttachments([]);
       setQueuedMessages([]);
+      setSelectedArtifactPath(null);
       clearError();
     }
   }
@@ -337,6 +348,7 @@ export function ChatApp() {
     if (resetThread()) {
       setAttachments([]);
       setQueuedMessages([]);
+      setSelectedArtifactPath(null);
     }
   }
 
@@ -359,6 +371,7 @@ export function ChatApp() {
         resetThread();
         setAttachments([]);
         setQueuedMessages([]);
+        setSelectedArtifactPath(null);
       }
       setThreadArtifactPaths((current) => {
         if (!(targetThread.id in current)) {
@@ -507,16 +520,16 @@ export function ChatApp() {
     }
   }
 
-  async function handleInstallSkillFromRegistry() {
-    const packageUrl = window.prompt(
-      "Skill package URL",
-      "https://github.com/vercel-labs/skills",
-    );
+  async function handleInstallSkillFromRegistry(request?: SkillInstallRequest) {
+    const packageUrl =
+      request?.package_url ??
+      window.prompt("Skill package URL", "https://github.com/vercel-labs/skills");
     if (!packageUrl?.trim()) {
       return;
     }
 
-    const skillName = window.prompt("Skill name", "find-skills");
+    const skillName =
+      request?.skill_name ?? window.prompt("Skill name", "find-skills");
     if (!skillName?.trim()) {
       return;
     }
@@ -691,25 +704,15 @@ export function ChatApp() {
     }
   }
 
-  async function handlePreviewArtifact(artifact: WorkspaceEntryRecord) {
+  function handlePreviewArtifact(artifact: WorkspaceEntryRecord) {
     if (artifact.kind !== "file") {
       return;
     }
 
+    // 只负责选路径+开面板;文件内容由 WorkspacePanel 自行拉取,这里不再重复请求一次。
     setSelectedArtifactPath(artifact.path);
     setIsArtifactPanelOpen(true);
-    setIsLoadingArtifactPreview(true);
-    setArtifactPreviewError(null);
-    try {
-      setArtifactPreview(await readArtifact(artifact.path));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "read artifact failed";
-      setArtifactPreview(null);
-      setArtifactPreviewError(message);
-      toast.error(message);
-    } finally {
-      setIsLoadingArtifactPreview(false);
-    }
+    setPanelRequest({ mode: "files", nonce: Date.now() });
   }
 
   async function handleOpenWorkspaceFile(threadId: string, file: WorkspaceEntryRecord) {
@@ -729,6 +732,14 @@ export function ChatApp() {
         return;
       }
 
+      const confirmed = window.confirm(
+        `该文件属于另一个对话「${targetThread.title || "未命名会话"}」。\n` +
+          "切换过去查看吗？当前未发送的附件与排队消息会被清空。",
+      );
+      if (!confirmed) {
+        return;
+      }
+
       const loaded = await loadThread(targetThread);
       if (!loaded) {
         toast.error("打开对应对话失败");
@@ -740,16 +751,19 @@ export function ChatApp() {
     }
 
     setSelectedArtifactPath(file.path);
-    setArtifactPreview(null);
-    setArtifactPreviewError(null);
-    setIsLoadingArtifactPreview(false);
     setIsArtifactPanelOpen(true);
+    setPanelRequest({ mode: "files", nonce: Date.now() });
     setWorkspaceRefreshKey((current) => current + 1);
   }
 
-  function handleOpenArtifactPanel() {
+  function handleOpenWorkspaceDirectory() {
     setIsWorkspaceDirectoryOpen(true);
     setWorkspaceRefreshKey((current) => current + 1);
+  }
+
+  function handleOpenWorkspacePanel(mode: "files" | "terminal") {
+    setIsArtifactPanelOpen(true);
+    setPanelRequest({ mode, nonce: Date.now() });
   }
 
   async function handleDeleteArtifact(artifact: WorkspaceEntryRecord) {
@@ -762,10 +776,8 @@ export function ChatApp() {
       const nextArtifacts = await refreshArtifacts();
       setWorkspaceRefreshKey((current) => current + 1);
       setThreadArtifactPaths((current) => removeArtifactPathFromThreadIndex(current, artifact.path));
-      if (selectedArtifactPath === artifact.path || artifactPreview?.path === artifact.path) {
+      if (selectedArtifactPath === artifact.path) {
         setSelectedArtifactPath(null);
-        setArtifactPreview(null);
-        setArtifactPreviewError(null);
         const nextFile = thread
           ? filterThreadArtifacts(
               thread.id,
@@ -775,7 +787,7 @@ export function ChatApp() {
             )[0]
           : undefined;
         if (nextFile && isArtifactPanelOpen) {
-          void handlePreviewArtifact(nextFile);
+          handlePreviewArtifact(nextFile);
         } else if (!nextFile) {
           setIsArtifactPanelOpen(false);
         }
@@ -792,20 +804,15 @@ export function ChatApp() {
       return;
     }
 
-    if (selectedArtifactPath || artifactPreview?.path) {
+    if (selectedArtifactPath) {
       return;
     }
 
     const firstFile = activeThreadArtifactFiles[0];
     if (firstFile) {
-      void handlePreviewArtifact(firstFile);
+      handlePreviewArtifact(firstFile);
     }
-  }, [
-    activeThreadArtifactFiles,
-    artifactPreview?.path,
-    isArtifactPanelOpen,
-    selectedArtifactPath,
-  ]);
+  }, [activeThreadArtifactFiles, isArtifactPanelOpen, selectedArtifactPath]);
 
   async function handleCopyMessage(content: string) {
     if (!content.trim()) {
@@ -856,13 +863,14 @@ export function ChatApp() {
       return;
     }
     removeMessage(messageId);
-    await submitMessage(`我选择 ${option.id}：${option.label}`, {
+    await submitMessage(option.label, {
       files: [],
       metadata: {
         source: "clarification-choice",
         clarification_id: clarification.id,
         clarification_question: clarification.question,
         option_id: option.id,
+        option_label: option.label,
       },
     });
   }
@@ -879,7 +887,7 @@ export function ChatApp() {
     <ChatComposer
       attachments={attachments}
       todos={todos}
-      todoRevision={todoRevision}
+      todoListKey={todoListKey}
       error={error}
       fileInputRef={fileInputRef}
       isStreaming={isStreaming}
@@ -895,7 +903,6 @@ export function ChatApp() {
       selectedMode={selectedMode}
       selectedModelName={selectedModelName}
       selectedThinkingEnabled={selectedThinkingEnabled}
-      showPromptChips={messages.length === 0}
       isLoadingModels={isLoadingModels}
       onAttachFiles={() => fileInputRef.current?.click()}
       onCancel={cancelStream}
@@ -912,7 +919,7 @@ export function ChatApp() {
   );
 
   return (
-    <SidebarProvider className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
+    <SidebarProvider className="slotflow-app-bg h-dvh min-h-0 overflow-hidden text-foreground">
       <input
         ref={skillFolderInputRef}
         type="file"
@@ -947,10 +954,10 @@ export function ChatApp() {
           onDeleteArtifact={(artifact) => void handleDeleteArtifact(artifact)}
           onDeleteThread={(targetThread) => void handleDeleteThread(targetThread)}
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
-          onInstallSkill={() => void handleInstallSkillFromRegistry()}
+          onInstallSkill={handleInstallSkillFromRegistry}
           onNewThread={handleNewThread}
-          onOpenArtifacts={handleOpenArtifactPanel}
-          onPreviewArtifact={(artifact) => void handlePreviewArtifact(artifact)}
+          onOpenWorkspaceDirectory={handleOpenWorkspaceDirectory}
+          onPreviewArtifact={handlePreviewArtifact}
           onQueryChange={setThreadQuery}
           onPinMcpServer={(server, pinned) => void handlePinMcpServer(server, pinned)}
           onPinSkill={(skill, pinned) => void handlePinSkill(skill, pinned)}
@@ -963,9 +970,35 @@ export function ChatApp() {
         />
       </Sidebar>
 
-      <SidebarInset className="h-dvh min-h-0 overflow-hidden">
+      <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-transparent">
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <section className="slotflow-surface relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-border/30">
+            {!isArtifactPanelOpen ? (
+              <div className="slotflow-rise-in absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border bg-background/95 p-0.5 shadow-sm backdrop-blur">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="打开工作区面板"
+                  className="slotflow-hover-lift"
+                  onClick={() => handleOpenWorkspacePanel("files")}
+                >
+                  <PanelRightOpen className="size-4" />
+                  <span className="sr-only">打开工作区面板</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="打开终端"
+                  className="slotflow-hover-lift"
+                  onClick={() => handleOpenWorkspacePanel("terminal")}
+                >
+                  <SquareTerminal className="size-4" />
+                  <span className="sr-only">打开终端</span>
+                </Button>
+              </div>
+            ) : null}
             {messages.length === 0 ? (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 pb-16 sm:px-6">
                 <div className="w-full max-w-3xl -translate-y-10">
@@ -988,24 +1021,23 @@ export function ChatApp() {
                     void handleSelectClarification(messageId, clarification, option)
                   }
                 />
-                <div className="shrink-0 bg-background px-3 pb-5 pt-3 sm:px-6">
+                <div className="shrink-0 border-t border-border/35 bg-background/86 px-3 pb-5 pt-3 backdrop-blur sm:px-6">
                   {composer}
                 </div>
               </>
             )}
           </section>
 
-          {isArtifactPanelOpen ? (
-            <WorkspacePanel
-              open={isArtifactPanelOpen}
-              selectedPath={selectedArtifactPath}
-              width={artifactPanelWidth}
-              refreshKey={workspaceRefreshKey}
-              onClose={() => setIsArtifactPanelOpen(false)}
-              onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
-              onWidthChange={setArtifactPanelWidth}
-            />
-          ) : null}
+          <WorkspacePanel
+            open={isArtifactPanelOpen}
+            selectedPath={selectedArtifactPath}
+            width={artifactPanelWidth}
+            refreshKey={workspaceRefreshKey}
+            requestedMode={panelRequest}
+            onClose={() => setIsArtifactPanelOpen(false)}
+            onOpenFile={(threadId, file) => void handleOpenWorkspaceFile(threadId, file)}
+            onWidthChange={setArtifactPanelWidth}
+          />
         </div>
       </SidebarInset>
     </SidebarProvider>

@@ -1,5 +1,6 @@
 import {
   type RefObject,
+  memo,
   useEffect,
   useRef,
   useState,
@@ -13,10 +14,11 @@ import {
   Pencil,
   RotateCcw,
   SendHorizontal,
+  Terminal,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { type ChatUiMessage } from "@/hooks/use-chat-stream";
+import { type ChatToolStatus, type ChatUiMessage } from "@/hooks/use-chat-stream";
 import {
   type ClarificationOptionRecord,
   type ClarificationRequestRecord,
@@ -29,6 +31,7 @@ import {
   getMessageFiles,
   displayFileName,
   isImageFile,
+  stripSlotflowBlocks,
   type MessageFile,
 } from "./chat-format";
 import { MarkdownContent } from "./markdown-content";
@@ -44,7 +47,7 @@ type AssistantContentParts = {
   body: string;
 };
 
-export function MessageBubble({
+function MessageBubbleImpl({
   message,
   isLatestUser,
   isLatestAssistant,
@@ -77,7 +80,8 @@ export function MessageBubble({
 }) {
   const isUser = message.role === "user";
   const files = getMessageFiles(message);
-  const content = message.content;
+  // <slotflow-*> 是注入给模型的内部上下文协议;模型偶尔复读,渲染前一律剥离。
+  const content = isUser ? message.content : stripSlotflowBlocks(message.content);
   const clarification = getClarificationRequest(message);
   const assistantContent =
     isUser || clarification
@@ -93,6 +97,10 @@ export function MessageBubble({
     !clarification &&
     message.status === "streaming" &&
     message.compressionStarted === true;
+  const activeToolStatus =
+    !isUser && !clarification && message.status === "streaming"
+      ? message.toolStatus
+      : undefined;
   const shouldShowThinkingCard =
     !isUser &&
     !clarification &&
@@ -101,14 +109,6 @@ export function MessageBubble({
         message.thinkingStarted === true &&
         !hasAssistantBody &&
         !isCompressingContext));
-  const isAssistantThinking =
-    !isUser &&
-    !clarification &&
-    message.status === "streaming" &&
-    !isCompressingContext &&
-    !hasAssistantBody &&
-    message.thinkingStarted === true &&
-    !message.reasoningContent?.trim();
   const canShowAssistantActions =
     !clarification &&
     isLatestAssistant &&
@@ -120,7 +120,10 @@ export function MessageBubble({
   return (
     <article
       ref={userMessageRef}
-      className={cn("group/message flex", isUser ? "justify-end" : "justify-start")}
+      className={cn(
+        "slotflow-rise-in group/message flex",
+        isUser ? "justify-end" : "justify-start",
+      )}
     >
       <div
         className={cn(
@@ -142,7 +145,9 @@ export function MessageBubble({
           <div
             className={cn(
               "min-w-0 break-words",
-              isUser ? "rounded-2xl bg-muted px-4 py-2.5" : "w-full",
+              isUser
+                ? "rounded-xl border border-border/60 bg-background/88 px-4 py-2.5 shadow-sm backdrop-blur"
+                : "w-full",
             )}
           >
             {isUser ? (
@@ -157,8 +162,6 @@ export function MessageBubble({
               />
             ) : isCompressingContext ? (
               <ContextCompressingIndicator />
-            ) : isAssistantThinking ? (
-              <AssistantThinkingSummary content="" isStreaming />
             ) : (
               <>
                 {shouldShowThinkingCard ? (
@@ -167,12 +170,15 @@ export function MessageBubble({
                     isStreaming={message.status === "streaming"}
                   />
                 ) : null}
+                {activeToolStatus ? (
+                  <ToolStatusIndicator status={activeToolStatus} />
+                ) : null}
                 {hasAssistantBody ? (
                   <SoftStreamingMarkdown
                     content={assistantContent.body}
                     isStreaming={message.status === "streaming"}
                   />
-                ) : message.status === "streaming" && !shouldShowThinkingCard ? (
+                ) : message.status === "streaming" && !shouldShowThinkingCard && !activeToolStatus ? (
                   <ThinkingIndicator />
                 ) : null}
               </>
@@ -198,6 +204,20 @@ export function MessageBubble({
     </article>
   );
 }
+
+// Memoize so a streaming delta on the latest message does NOT re-render every older bubble
+// (each would otherwise re-run the heavy react-markdown pipeline). We compare only the
+// props that affect output; callback identities are ignored since their behavior is stable.
+export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
+  return (
+    prev.message === next.message &&
+    prev.isLatestUser === next.isLatestUser &&
+    prev.isLatestAssistant === next.isLatestAssistant &&
+    prev.isEditing === next.isEditing &&
+    prev.isStreaming === next.isStreaming &&
+    prev.userMessageRef === next.userMessageRef
+  );
+});
 
 function UserMessageActions({
   canEdit,
@@ -352,26 +372,71 @@ function AssistantMessageActions({
   );
 }
 
-function ThinkingIndicator() {
+function useElapsedSeconds(): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return seconds;
+}
+
+/** 思考/等待态的扫光文字;耗时超过 3s 后附带计秒,回答很快时不打扰。 */
+function ThinkingIndicator({ label = "思考中" }: { label?: string }) {
+  const seconds = useElapsedSeconds();
   return (
-    <div className="flex h-8 items-center gap-1.5 text-muted-foreground">
-      <span className="sr-only">思考中</span>
+    <div className="flex h-8 items-center gap-2">
+      <span className="slotflow-shimmer-text text-sm font-medium">{label}</span>
+      {seconds >= 3 ? (
+        <span className="text-xs tabular-nums text-muted-foreground/70">{seconds}s</span>
+      ) : null}
+    </div>
+  );
+}
+
+/** 运行态的三根细均衡条,替代通用的弹跳圆点。 */
+function ActivityGlyph() {
+  return (
+    <span className="inline-flex h-3.5 shrink-0 items-center gap-[3px]" aria-hidden>
       {[0, 1, 2].map((index) => (
         <span
           key={index}
-          className="size-2 rounded-full bg-current opacity-60 animate-bounce"
-          style={{ animationDelay: `${index * 120}ms` }}
+          className="slotflow-eq-bar h-full w-[2px] rounded-full bg-current opacity-70"
+          style={{ animationDelay: `${index * 140}ms` }}
         />
       ))}
-    </div>
+    </span>
   );
 }
 
 function ContextCompressingIndicator() {
   return (
-    <div className="flex h-8 items-center gap-2 text-sm text-muted-foreground">
-      <span>正在压缩上下文</span>
-      <ThinkingDots />
+    <div className="flex h-8 items-center gap-2">
+      <span className="slotflow-shimmer-text text-sm font-medium">正在压缩上下文</span>
+    </div>
+  );
+}
+
+function ToolStatusIndicator({ status }: { status: ChatToolStatus }) {
+  const label = status.toolName === "sandbox_exec" ? "沙箱" : status.toolName;
+  return (
+    <div className="slotflow-rise-in mb-4 rounded-lg border border-border/70 bg-background/85 px-3 py-2.5 text-sm text-muted-foreground shadow-sm backdrop-blur">
+      <div className="flex min-w-0 items-center gap-2">
+        <Terminal className="size-4 shrink-0" />
+        <span className="shrink-0 font-medium text-foreground">{label}</span>
+        <span className="min-w-0 truncate">{status.message}</span>
+        {status.phase === "running" || status.phase === "starting" ? (
+          <ActivityGlyph />
+        ) : null}
+      </div>
+      {status.command ? (
+        <code className="mt-2 block max-h-20 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/80 px-2 py-1.5 text-xs leading-5 text-muted-foreground">
+          {status.command}
+        </code>
+      ) : null}
     </div>
   );
 }
@@ -419,7 +484,7 @@ function ClarificationRequestPanel({
   }, [clarification, disabled, onSelect]);
 
   return (
-    <div className="max-w-3xl rounded-lg border bg-background p-4 shadow-sm">
+    <div className="slotflow-rise-in max-w-3xl rounded-lg border bg-background/95 p-4 shadow-sm backdrop-blur">
       {clarification.context ? (
         <p className="mb-2 text-sm leading-6 text-muted-foreground">
           {clarification.context}
@@ -728,11 +793,13 @@ function SoftStreamingMarkdown({
     return () => window.clearTimeout(timer);
   }, [content, isStreaming]);
 
+  // While fresh tokens arrive, render slightly faded; settle to full opacity so new text
+  // reads as fading in from light to dark instead of a hard pop. motion-reduce keeps it crisp.
   return (
     <MarkdownContent
       className={cn(
         "transition-opacity duration-300 ease-out motion-reduce:transition-none",
-        isSoft && "opacity-80",
+        isSoft ? "opacity-70" : "opacity-100",
         className,
       )}
       compact={compact}
@@ -754,12 +821,16 @@ function AssistantThinkingSummary({
 
   return (
     <details
-      className="group/thinking mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background text-sm text-muted-foreground"
+      className="group/thinking slotflow-rise-in mb-5 w-full overflow-hidden rounded-lg border border-border/70 bg-background/88 text-sm text-muted-foreground shadow-sm backdrop-blur"
       open
     >
       <summary className="flex h-9 cursor-pointer list-none items-center gap-2 px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
         <ChevronDown className="size-3.5 transition-transform group-open/thinking:rotate-180" />
-        <span>{isStreaming && !hasContent ? "思考中" : "隐藏步骤"}</span>
+        {isStreaming && !hasContent ? (
+          <span className="slotflow-shimmer-text">思考中</span>
+        ) : (
+          <span>隐藏步骤</span>
+        )}
       </summary>
       <div className="px-4 pb-4 pt-1">
         <div className="max-h-[30rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]">
@@ -790,8 +861,11 @@ function AssistantThinkingSummary({
                 <Lightbulb className="size-3" />
               </span>
               <div className="flex min-h-8 items-center gap-2 text-[0.82rem] leading-6 text-muted-foreground">
-                <span>{isStreaming ? "思考中..." : "已完成思考，模型未返回可展示的思考内容。"}</span>
-                {isStreaming ? <ThinkingDots /> : null}
+                {isStreaming ? (
+                  <span className="slotflow-shimmer-text">正在整理思路</span>
+                ) : (
+                  <span>已完成思考，模型未返回可展示的思考内容。</span>
+                )}
               </div>
             </div>
           )}
@@ -822,27 +896,13 @@ function splitThinkingSteps(content: string): string[] {
   return lineSteps.length > 1 ? lineSteps : [normalized];
 }
 
-function ThinkingDots() {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {[0, 1, 2].map((index) => (
-        <span
-          key={index}
-          className="size-1.5 rounded-full bg-current opacity-60 animate-bounce"
-          style={{ animationDelay: `${index * 120}ms` }}
-        />
-      ))}
-    </span>
-  );
-}
-
 function MessageAttachments({ files }: { files: MessageFile[] }) {
   return (
     <div className="flex max-w-full flex-wrap justify-end gap-2">
       {files.map((file) => (
         <div
           key={file.id}
-          className="flex max-w-72 items-center gap-3 rounded-lg border border-border bg-card px-2 py-2 text-left shadow-sm"
+          className="slotflow-hover-lift flex max-w-72 items-center gap-3 rounded-lg border border-border bg-card/90 px-2 py-2 text-left shadow-sm"
         >
           {isImageFile(file) ? (
             <img

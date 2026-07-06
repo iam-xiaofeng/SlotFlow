@@ -15,10 +15,20 @@ export type ChatUiMessage = {
   reasoningContent?: string;
   thinkingStarted?: boolean;
   compressionStarted?: boolean;
+  toolStatus?: ChatToolStatus;
   status: ChatUiMessageStatus;
   runId?: string;
   createdAt?: string;
   metadata?: Record<string, unknown>;
+};
+
+export type ChatToolStatusPhase = "starting" | "running" | "completed" | "error";
+
+export type ChatToolStatus = {
+  toolName: string;
+  phase: ChatToolStatusPhase;
+  message: string;
+  command?: string;
 };
 
 export type ChatTodoStatus = "pending" | "in_progress" | "completed";
@@ -73,6 +83,27 @@ export function mergeReasoningContent(
   return incoming.length > currentText.length ? incoming : currentText;
 }
 
+export function mergeAssistantContent(current: string, incoming: string): string {
+  const currentText = current ?? "";
+  if (!currentText.trim()) {
+    return incoming;
+  }
+  if (!incoming.trim()) {
+    return currentText;
+  }
+  if (incoming.startsWith(currentText)) {
+    return incoming;
+  }
+  if (currentText.startsWith(incoming)) {
+    return currentText;
+  }
+
+  // Values snapshots can lag behind the live message.delta stream or retain only the
+  // final compact assistant message. Never let a shorter unrelated snapshot erase text
+  // the user already watched stream in.
+  return incoming.length > currentText.length ? incoming : currentText;
+}
+
 export function latestAssistantContent(event: ChatStreamEvent): string | null {
   const messages = event.data.messages;
   if (!Array.isArray(messages)) {
@@ -89,6 +120,9 @@ export function latestAssistantContent(event: ChatStreamEvent): string | null {
       const role = message.role;
       const content = message.content;
       if (role === "assistant" || role === "ai") {
+        if ((message as Record<string, unknown>).has_tool_calls === true) {
+          continue;
+        }
         if (typeof content === "string") {
           return content;
         }
@@ -133,27 +167,50 @@ export function parseTodos(value: unknown): ChatTodo[] {
   if (!Array.isArray(value)) {
     return [];
   }
-
-  return value.flatMap((item) => {
-    if (
-      typeof item === "object" &&
-      item !== null &&
-      "content" in item &&
-      "status" in item &&
-      typeof item.content === "string"
-    ) {
-      const status = parseTodoStatus(item.status);
-      return [{ content: item.content, status }];
+  const todos: ChatTodo[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) {
+      continue;
     }
-    return [];
-  });
+    const record = item as Record<string, unknown>;
+    // 后端 write_todos 工具与 adapter 投影层都已把 text 归一为 content,这里只认 content。
+    const content = record.content;
+    if (typeof content !== "string" || !content.trim()) {
+      continue;
+    }
+    const status =
+      record.status === "in_progress" ||
+      record.status === "completed" ||
+      record.status === "pending"
+        ? record.status
+        : "pending";
+    todos.push({ content, status });
+  }
+  return todos;
 }
 
-function parseTodoStatus(value: unknown): ChatTodoStatus {
-  if (value === "completed" || value === "in_progress" || value === "pending") {
-    return value;
+export function parseToolStatus(
+  data: Record<string, unknown>,
+): ChatToolStatus | null {
+  const toolName = data.tool_name;
+  const phase = data.phase;
+  const message = data.message;
+  if (
+    typeof toolName !== "string" ||
+    typeof message !== "string" ||
+    (phase !== "starting" &&
+      phase !== "running" &&
+      phase !== "completed" &&
+      phase !== "error")
+  ) {
+    return null;
   }
-  return "pending";
+  return {
+    toolName,
+    phase,
+    message,
+    command: typeof data.command === "string" ? data.command : undefined,
+  };
 }
 
 export function latestDiscoveredArtifacts(event: ChatStreamEvent): WorkspaceEntryRecord[] {

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import shutil
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 import app.chat.runtime as runtime_module
@@ -24,6 +28,9 @@ from app.harness.sandbox import (
     WorkspacePathError,
     WorkspaceWriteDisabledError,
 )
+from app.harness.sandbox.docker import DockerSandboxError, LazyDockerSandbox
+from app.harness.sandbox.docker_engine import DockerEngineSetup
+from app.harness.tools.sandbox import build_sandbox_tools
 
 
 class ToolAwareFakeListChatModel(FakeListChatModel):
@@ -31,6 +38,28 @@ class ToolAwareFakeListChatModel(FakeListChatModel):
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self
+
+
+class FakeTimer:
+    instances: list["FakeTimer"] = []
+
+    def __init__(self, interval: float, function):
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+        FakeTimer.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        if not self.cancelled:
+            self.function()
 
 
 def _run_context():
@@ -164,6 +193,12 @@ def test_runtime_loads_sandbox_config_from_env(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setenv("SLOTFLOW_WORKSPACE_WRITES_ENABLED", "true")
     monkeypatch.setenv("SLOTFLOW_WORKSPACE_MAX_READ_BYTES", "123")
     monkeypatch.setenv("SLOTFLOW_WORKSPACE_MAX_WRITE_BYTES", "456")
+    monkeypatch.setenv("SLOTFLOW_CODE_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_IMAGE", "python:3.13-slim")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_NETWORK_ENABLED", "true")
+    monkeypatch.setenv("SLOTFLOW_DOCKER_SANDBOX_IDLE_TIMEOUT_SECONDS", "34")
+    monkeypatch.setenv("SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL", "true")
 
     config = load_runtime_config_from_env()
 
@@ -172,7 +207,25 @@ def test_runtime_loads_sandbox_config_from_env(monkeypatch, tmp_path: Path) -> N
         writes_enabled=True,
         max_read_bytes=123,
         max_write_bytes=456,
+        code_execution_enabled=True,
+        docker_image="python:3.13-slim",
+        docker_timeout_seconds=12,
+        docker_network_enabled=True,
+        docker_idle_timeout_seconds=34,
+        allow_host_docker_install=True,
     )
+
+
+def test_sandbox_config_defaults_support_dependency_installation() -> None:
+    """默认 Docker 沙箱应支持模型安装 Python 依赖。"""
+
+    config = SlotFlowSandboxConfig()
+
+    assert config.docker_image == "python:3.12"
+    assert config.docker_timeout_seconds == 120
+    assert config.docker_network_enabled is True
+    assert config.docker_idle_timeout_seconds == 600
+    assert config.allow_host_docker_install is True
 
 
 def test_positive_int_env_validation(monkeypatch) -> None:
@@ -232,11 +285,11 @@ def test_harness_builder_passes_sandbox_config_to_tool_registry(
         captured_tools_kwargs.update(kwargs)
         return []
 
-    def fake_create_agent_graph(**kwargs):
+    def fake_build_slotflow_graph(**kwargs):
         return object()
 
     monkeypatch.setattr(builder_module, "build_harness_tools", fake_build_harness_tools)
-    monkeypatch.setattr(builder_module, "_create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(builder_module, "build_slotflow_graph", fake_build_slotflow_graph)
 
     builder_module.build_slotflow_harness_graph(
         model=ToolAwareFakeListChatModel(responses=["ok"]),
@@ -248,3 +301,478 @@ def test_harness_builder_passes_sandbox_config_to_tool_registry(
     )
 
     assert captured_tools_kwargs["sandbox_config"] is sandbox_config
+
+
+def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
+    """容器懒加载为持久具名容器(无 --rm);uploads/skills 只读,artifacts/work 可写。"""
+
+    FakeTimer.instances = []
+    calls: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    root = tmp_path / "workspace"
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=root,
+            docker_image="python:test",
+            docker_idle_timeout_seconds=42,
+        ),
+        thread_id="thread-1",
+        skills_root=skills_root,
+        runner=fake_runner,
+        timer_factory=FakeTimer,
+    )
+
+    assert sandbox.started is False
+    assert calls == []
+
+    result = sandbox.exec("python -V")
+
+    assert result["ok"] is True
+    assert sandbox.started is True
+    assert calls[0][:2] == ["docker", "inspect"]
+    assert calls[1][:2] == ["docker", "run"]
+    assert calls[2][:2] == ["docker", "exec"]
+    assert result["idle_timeout_seconds"] == 42
+    assert FakeTimer.instances[-1].interval == 42
+    assert FakeTimer.instances[-1].started is True
+    run_command = calls[1]
+    # 持久容器:具名、不 --rm、常驻 sleep infinity
+    assert "--name" in run_command
+    assert sandbox.container_name in run_command
+    assert sandbox.container_name.startswith("slotflow-sandbox-")
+    assert "--rm" not in run_command
+    assert run_command[-2:] == ["sleep", "infinity"]
+    assert "--init" in run_command
+    assert "--network" in run_command
+    assert "bridge" in run_command
+    assert "PYTHONUNBUFFERED=1" in run_command
+    assert "PIP_DISABLE_PIP_VERSION_CHECK=1" in run_command
+    assert "python:test" in run_command
+    mounts = [
+        run_command[index + 1]
+        for index, value in enumerate(run_command)
+        if value == "--mount"
+    ]
+    assert any("/workspace/uploads" in mount and "readonly=true" in mount for mount in mounts)
+    assert any("/workspace/skills" in mount and "readonly=true" in mount for mount in mounts)
+    assert any("/workspace/artifacts" in mount and "readonly" not in mount for mount in mounts)
+    assert any("/workspace/work" in mount and "readonly" not in mount for mount in mounts)
+    # exec 以线程隔离的工作目录运行,容器按名字引用
+    exec_command = calls[2]
+    assert "/workspace/work/thread-1" in exec_command
+    assert sandbox.container_name in exec_command
+    assert (root / "artifacts" / "thread-1").is_dir()
+    assert (root / ".sandbox" / "thread-1").is_dir()
+
+
+def test_lazy_docker_sandbox_stops_after_idle_and_restarts_same_container(tmp_path: Path) -> None:
+    """空闲只 stop 不 rm;再次使用 docker start 同一容器,内容(已装依赖)保留。"""
+
+    FakeTimer.instances = []
+    calls: list[list[str]] = []
+    container_exists = {"value": False}
+    container_running = {"value": False}
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            if not container_exists["value"]:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
+            running = "true" if container_running["value"] else "false"
+            return subprocess.CompletedProcess(args, 0, stdout=f"{running}\n", stderr="")
+        if args[:2] == ["docker", "run"]:
+            container_exists["value"] = True
+            container_running["value"] = True
+            return subprocess.CompletedProcess(args, 0, stdout="container1\n", stderr="")
+        if args[:2] == ["docker", "start"]:
+            container_running["value"] = True
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "stop"]:
+            container_running["value"] = False
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            docker_idle_timeout_seconds=7,
+        ),
+        thread_id="thread-1",
+        runner=fake_runner,
+        timer_factory=FakeTimer,
+    )
+
+    assert sandbox.exec("python -V")["ok"] is True
+    first_timer = FakeTimer.instances[-1]
+    assert sandbox.started is True
+
+    first_timer.fire()
+
+    assert sandbox.started is False
+    assert ["docker", "stop", sandbox.container_name] in calls
+    assert not any(call[:2] == ["docker", "rm"] for call in calls)
+
+    assert sandbox.exec("python -V")["ok"] is True
+
+    run_calls = [call for call in calls if call[:2] == ["docker", "run"]]
+    start_calls = [call for call in calls if call[:2] == ["docker", "start"]]
+    assert len(run_calls) == 1, "同一容器只应创建一次"
+    assert len(start_calls) == 1, "空闲停止后应 start 复用,而不是重建"
+
+
+def test_sandbox_exec_tool_is_disabled_by_config(tmp_path: Path) -> None:
+    """关闭代码执行时不注册 sandbox_exec。"""
+
+    tools = build_sandbox_tools(
+        SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            code_execution_enabled=False,
+        )
+    )
+
+    assert tools == []
+
+
+def test_sandbox_artifact_copy_copies_thread_file_with_guardrails(tmp_path: Path) -> None:
+    """Docker 内生成的 scratch 文件可发布到当前线程产物目录,但不越过路径边界。"""
+
+    FakeTimer.instances = []
+    calls: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="12", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            max_write_bytes=128,
+        ),
+        thread_id="thread-1",
+        runner=fake_runner,
+        timer_factory=FakeTimer,
+    )
+
+    result = sandbox.copy_to_artifacts(
+        source_path="charts/out.html",
+        artifact_path="reports/out.html",
+    )
+
+    assert result["ok"] is True
+    assert result["path"] == "artifacts/thread-1/reports/out.html"
+    assert result["bytes_copied"] == 12
+    exec_command = next(call for call in calls if call[:2] == ["docker", "exec"])
+    script = exec_command[-1]
+    assert "src=/workspace/work/thread-1/charts/out.html" in script
+    assert "dst=/workspace/artifacts/thread-1/reports/out.html" in script
+    assert "max_bytes=128" in script
+    assert "artifact_path already exists" in script
+    assert FakeTimer.instances[-1].started is True
+
+    escaped = sandbox.copy_to_artifacts(
+        source_path="/workspace/uploads/private.txt",
+        artifact_path="../bad.txt",
+    )
+
+    assert escaped["ok"] is False
+    assert "source_path must be relative" in escaped["error"]
+
+
+def test_sandbox_artifact_copy_tool_returns_structured_error_without_docker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """发布工具和 sandbox_exec 一样: Docker 不可用时返回 JSON 错误,不炸 graph。"""
+
+    def unavailable_copy(self, *, source_path: str, artifact_path: str = "", overwrite: bool = False):
+        raise DockerSandboxError("Docker CLI is required for sandbox_artifact_copy")
+
+    monkeypatch.setattr(LazyDockerSandbox, "copy_to_artifacts", unavailable_copy)
+    tools = build_sandbox_tools(SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"))
+    copy_tool = next(tool for tool in tools if tool.name == "sandbox_artifact_copy")
+
+    result = copy_tool.invoke(
+        {
+            "source_path": "out.png",
+            "artifact_path": "out.png",
+        }
+    )
+    payload = json.loads(result)
+
+    assert payload["ok"] is False
+    assert payload["error"] == "Docker CLI is required for sandbox_artifact_copy"
+    assert "Install/start Docker" in payload["hint"]
+
+
+def test_docker_engine_setup_tool_returns_install_script_when_host_install_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Docker 安装入口默认不改宿主机，只返回受控脚本和 opt-in 提示。"""
+
+    monkeypatch.setenv("SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL", "false")
+    tools = build_sandbox_tools(
+        SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            allow_host_docker_install=False,
+        )
+    )
+    setup_tool = next(tool for tool in tools if tool.name == "docker_engine_setup")
+
+    result = setup_tool.invoke(
+        {
+            "action": "install",
+            "confirm_host_install": True,
+        }
+    )
+    payload = json.loads(result)
+
+    assert payload["ok"] is False
+    assert payload["error"] == "host Docker Engine install is disabled"
+    assert "SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL=false" in payload["hint"]
+    assert "apt-get install -y docker.io docker-compose-v2" in payload["script"]
+
+
+def test_docker_engine_setup_check_reports_missing_docker(tmp_path: Path) -> None:
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nID_LIKE=debian\nPRETTY_NAME="Ubuntu"\n', encoding="utf-8")
+    setup = DockerEngineSetup(
+        config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
+        which=lambda name: None,
+        os_release_path=os_release,
+    )
+
+    result = setup.run(action="check")
+
+    assert result["ok"] is False
+    assert result["installed"] is False
+    assert result["error"] == "docker_cli_missing"
+    assert result["host"]["install_manager"] == "apt"
+    assert result["host"]["install_supported"] is True
+
+
+def test_docker_engine_setup_install_script_matches_detected_host(tmp_path: Path) -> None:
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=fedora\nPRETTY_NAME="Fedora"\n', encoding="utf-8")
+    setup = DockerEngineSetup(
+        config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
+        os_release_path=os_release,
+    )
+
+    result = setup.run(action="install_script")
+
+    assert result["ok"] is True
+    assert result["host"]["install_manager"] == "dnf"
+    assert "dnf install -y moby-engine docker-compose-plugin" in result["script"]
+    assert "apt-get" not in result["script"]
+
+
+@pytest.mark.parametrize(
+    ("os_release_text", "expected_manager", "expected_script"),
+    [
+        (
+            'ID=alpine\nPRETTY_NAME="Alpine Linux"\n',
+            "apk",
+            "apk add --no-cache docker docker-cli-compose",
+        ),
+        (
+            'ID=opensuse-leap\nID_LIKE="suse"\n',
+            "zypper",
+            "zypper --non-interactive install docker docker-compose",
+        ),
+        (
+            'ID=centos\nID_LIKE="rhel fedora"\n',
+            "yum",
+            "yum install -y docker docker-compose-plugin",
+        ),
+    ],
+)
+def test_docker_engine_setup_install_script_covers_common_linux_families(
+    tmp_path: Path,
+    os_release_text: str,
+    expected_manager: str,
+    expected_script: str,
+) -> None:
+    """运行时 Docker 安装入口覆盖常见 Linux 包管理器分支。"""
+
+    os_release = tmp_path / "os-release"
+    os_release.write_text(os_release_text, encoding="utf-8")
+    setup = DockerEngineSetup(
+        config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
+        which=lambda name: "/usr/bin/yum" if name == "yum" else None,
+        os_release_path=os_release,
+    )
+
+    result = setup.run(action="install_script")
+
+    assert result["ok"] is True
+    assert result["host"]["install_manager"] == expected_manager
+    assert expected_script in result["script"]
+
+
+def test_docker_engine_setup_install_uses_fixed_commands(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """允许自动安装时也只能执行固定 apt/systemctl/usermod 命令，不能运行模型脚本。"""
+
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nID_LIKE=debian\n', encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name in {"apt-get", "sudo", "docker"} else None
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(args, 0, stdout="26.1.0\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("app.harness.sandbox.docker_engine.os.geteuid", lambda: 1000)
+    monkeypatch.setenv("USER", "dell")
+    setup = DockerEngineSetup(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            allow_host_docker_install=True,
+        ),
+        runner=fake_runner,
+        which=fake_which,
+        os_release_path=os_release,
+    )
+
+    result = setup.run(action="install", confirm_host_install=True)
+
+    assert result["ok"] is True
+    assert calls == [
+        ["sudo", "-n", "apt-get", "update"],
+        [
+            "sudo",
+            "-n",
+            "sh",
+            "-c",
+            "apt-get install -y docker.io docker-compose-v2 || "
+            "apt-get install -y docker.io docker-compose-plugin || apt-get install -y docker.io",
+        ],
+        ["sudo", "-n", "systemctl", "enable", "--now", "docker"],
+        ["sudo", "-n", "usermod", "-aG", "docker", "dell"],
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+    ]
+
+
+def test_lazy_docker_sandbox_uses_no_network_when_disabled(tmp_path: Path) -> None:
+    """显式关闭网络时，容器启动参数必须使用 none。"""
+
+    calls: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object")
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, 0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            docker_network_enabled=False,
+        ),
+        runner=fake_runner,
+    )
+
+    sandbox.exec("python -V")
+
+    run_command = next(call for call in calls if call[:2] == ["docker", "run"])
+    assert "none" in run_command
+
+
+def test_sandbox_exec_tool_returns_structured_error_without_docker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Docker CLI 不存在时工具返回结构化错误，不让 graph 崩溃。"""
+
+    def unavailable_exec(self, command: str, *, timeout_seconds=None):
+        raise DockerSandboxError("Docker CLI is required for sandbox_exec")
+
+    monkeypatch.setattr(LazyDockerSandbox, "exec", unavailable_exec)
+    tool = build_sandbox_tools(
+        SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
+    )[0]
+
+    result = tool.invoke(
+        {
+            "command": "python -V",
+        }
+    )
+    payload = json.loads(result)
+
+    assert payload["ok"] is False
+    assert payload["error"] == "Docker CLI is required for sandbox_exec"
+    assert "Install/start Docker" in payload["hint"]
+
+
+def test_lazy_docker_sandbox_runs_real_container_when_docker_is_available(tmp_path: Path) -> None:
+    """有 Docker 时跑真实容器，验证 Python/pip/bash 基础能力。"""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed in this environment")
+    daemon_probe = subprocess.run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if daemon_probe.returncode != 0:
+        pytest.skip("Docker daemon is not reachable in this environment")
+
+    sandbox = LazyDockerSandbox(
+        config=SlotFlowSandboxConfig(
+            workspace_root=tmp_path / "workspace",
+            docker_image="python:3.12",
+            docker_timeout_seconds=120,
+        ),
+        thread_id="live",
+    )
+    try:
+        result = sandbox.exec(
+            "python -V && bash --version | head -n 1 && python -m pip --version",
+            timeout_seconds=60,
+        )
+    finally:
+        sandbox.close()
+        # 测试用 tmp workspace 的容器名是一次性的,测试后彻底清掉,不留垃圾容器。
+        subprocess.run(
+            ["docker", "rm", "-f", sandbox.container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result["ok"] is True, result
+    assert "Python 3.12" in result["stdout"]
+    assert "bash" in result["stdout"].lower()
+    assert "pip" in result["stdout"].lower()

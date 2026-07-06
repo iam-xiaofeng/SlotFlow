@@ -9,6 +9,7 @@ content block、summarization 内部消息等差异都在这里被吸收，异�
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -57,6 +58,99 @@ def projection_item_to_agent_event(
         )
 
     return None
+
+
+_TOOL_STATUS_SKIP = {
+    # 这两个工具有自己的专属 UI(澄清选择卡片/todo 面板),再叠一个状态芯片是噪音。
+    "ask_clarification",
+    "write_todos",
+}
+
+_TOOL_STATUS_MESSAGES = {
+    "sandbox_exec": "正在初始化 Docker 沙箱并执行代码",
+    "sandbox_artifact_copy": "正在发布 Docker 文件到产物",
+    "artifact_write": "正在写入产物文件",
+    "workspace_read": "正在读取工作区文件",
+    "workspace_grep": "正在检索工作区",
+    "web_search": "正在搜索网页",
+    "web_fetch": "正在抓取网页",
+    "task_tool": "正在派发子任务",
+    "memory_save": "正在保存长期记忆",
+    "memory_list": "正在查询长期记忆",
+    "skill_match": "正在匹配技能",
+    "skill_install": "正在安装技能",
+}
+
+
+def tool_status_event_from_tool_call(
+    item: Any,
+    *,
+    bundle: RunConfigBundle,
+) -> AgentEvent | None:
+    """Create a visible tool status event from a tool-call projection.
+
+    LangGraph v3 currently exposes model tool calls through the ``tool_calls`` projection,
+    but custom ``get_stream_writer()`` payloads are not exposed as a projection channel.
+    The tool-call boundary is the earliest stable point where the UI can show what the
+    agent is doing — without this, every tool run (artifact_write / web_search / ...)
+    is invisible and the user only sees a frozen "thinking" indicator.
+    """
+
+    tool_call = normalize_mapping(item)
+    tool_name = extract_tool_call_name(tool_call)
+    if tool_name is None or tool_name in _TOOL_STATUS_SKIP:
+        return None
+
+    command = extract_sandbox_command(tool_call) if tool_name == "sandbox_exec" else None
+    return AgentEvent(
+        event="tool.status",
+        data={
+            "thread_id": bundle.context.thread_id,
+            "run_id": bundle.context.run_id,
+            "tool_name": tool_name,
+            "phase": "running",
+            "message": _TOOL_STATUS_MESSAGES.get(tool_name, "正在调用工具"),
+            "command": truncate_status_text(command, 240) if command else None,
+            "source": "slotflow_tool_call_projection",
+        },
+    )
+
+
+def extract_tool_call_name(tool_call: dict[str, Any]) -> str | None:
+    name = tool_call.get("name")
+    if isinstance(name, str):
+        return name
+
+    nested = tool_call.get("tool_call")
+    if isinstance(nested, dict):
+        nested_name = nested.get("name")
+        if isinstance(nested_name, str):
+            return nested_name
+
+    return None
+
+
+def extract_sandbox_command(tool_call: dict[str, Any]) -> str | None:
+    args = tool_call.get("args")
+    if isinstance(args, dict):
+        command = args.get("command")
+        if isinstance(command, str):
+            return command
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return args
+        if isinstance(parsed, dict) and isinstance(parsed.get("command"), str):
+            return parsed["command"]
+    return None
+
+
+def truncate_status_text(value: str, max_chars: int) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}…"
 
 
 def extract_message_delta(item: Any) -> str:
@@ -195,8 +289,9 @@ def extract_standard_reasoning_text(item: Any) -> str:
 
 
 def extract_reasoning_from_content_block(item: Any) -> str:
-    # Reasoning content blocks differ by provider: DeepSeek/OpenAI use "reasoning",
-    # Anthropic extended thinking uses "thinking".
+    # Reasoning content blocks differ by provider: DeepSeek/OpenAI-compatible use a
+    # {"type": "reasoning", "reasoning": "..."} block (our ChatDeepSeek bridge emits
+    # this shape); Anthropic extended thinking uses {"type": "thinking", "thinking": ...}.
     if not isinstance(item, dict) or item.get("type") not in ("reasoning", "thinking"):
         return ""
 
@@ -204,6 +299,20 @@ def extract_reasoning_from_content_block(item: Any) -> str:
         value = item.get(key)
         if isinstance(value, str) and value:
             return value
+
+    # OpenAI Responses API emits reasoning as summary sub-blocks under the default
+    # responses/v1 output_version, not as a flat string. Flatten those texts so gpt-5 /
+    # o-series thinking reaches the reasoning channel instead of being silently dropped.
+    summary = item.get("summary")
+    if isinstance(summary, list):
+        parts: list[str] = []
+        for sub_block in summary:
+            if isinstance(sub_block, dict):
+                text = sub_block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
     return ""
 
 
@@ -313,6 +422,8 @@ def normalize_todos(value: Any) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         content = item.get("content")
+        if not isinstance(content, str):
+            content = item.get("text")
         status = item.get("status")
         if not isinstance(content, str) or not content.strip():
             continue
@@ -367,6 +478,10 @@ def normalize_message(message: Any) -> dict[str, Any]:
         reasoning = extract_reasoning_text(message)
         if reasoning:
             normalized["reasoning_content"] = reasoning
+        tool_call_count = count_message_tool_calls(message)
+        if tool_call_count:
+            normalized["has_tool_calls"] = True
+            normalized["tool_call_count"] = tool_call_count
         if isinstance(message.get("id"), str):
             normalized["id"] = message["id"]
         if isinstance(message.get("name"), str):
@@ -382,6 +497,10 @@ def normalize_message(message: Any) -> dict[str, Any]:
     reasoning = extract_reasoning_text(message)
     if reasoning:
         normalized["reasoning_content"] = reasoning
+    tool_call_count = count_message_tool_calls(message)
+    if tool_call_count:
+        normalized["has_tool_calls"] = True
+        normalized["tool_call_count"] = tool_call_count
     message_id = getattr(message, "id", None)
     if isinstance(message_id, str):
         normalized["id"] = message_id
@@ -391,29 +510,76 @@ def normalize_message(message: Any) -> dict[str, Any]:
     return normalized
 
 
+def count_message_tool_calls(message: Any) -> int:
+    """Return whether an assistant message is an intermediate tool-call step."""
+
+    if isinstance(message, dict):
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            return len(tool_calls)
+        additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict):
+            raw_tool_calls = additional_kwargs.get("tool_calls")
+            if isinstance(raw_tool_calls, list):
+                return len(raw_tool_calls)
+        return 0
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list):
+        return len(tool_calls)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        raw_tool_calls = additional_kwargs.get("tool_calls")
+        if isinstance(raw_tool_calls, list):
+            return len(raw_tool_calls)
+    return 0
+
+
+_SLOTFLOW_BLOCK_RE = re.compile(r"<slotflow-[a-z0-9-]+>[\s\S]*?</slotflow-[a-z0-9-]+>\s*")
+_SLOTFLOW_TAG_RE = re.compile(r"</?slotflow-[a-z0-9-]+>")
+
+
+def strip_slotflow_context_blocks(text: str) -> str:
+    """去掉泄漏进模型回复的 SlotFlow 内部上下文标签块。
+
+    <slotflow-todo-reminder> 等注入块是给模型看的内部协议;模型偶尔会在回复里
+    原样复读,这些内容绝不应出现在用户可见正文中(2026-07-04 真机实测踩坑)。
+    """
+
+    if "<slotflow-" not in text and "</slotflow-" not in text:
+        return text
+    cleaned = _SLOTFLOW_BLOCK_RE.sub("", text)
+    cleaned = _SLOTFLOW_TAG_RE.sub("", cleaned)
+    return cleaned
+
+
 def normalize_message_content(content: Any) -> str:
-    """把消息内容压成前端和 SSE 都容易消费的纯文本。"""
+    """把消息内容压成前端和 SSE 都容易消费的纯文本。
+
+    注意:本函数的输出是用户可见的正文通道,绝不允许 repr 兜底——
+    纯 reasoning 块的消息(模型把回答全部写进思考、正文为空)曾被
+    repr 成 "[{'type': 'reasoning', ...}]" 直接当回复展示(2026-07-04
+    真机实测踩坑)。抽不出文本就返回空串,reasoning 由专门的
+    reasoning_content 通道承载。
+    """
 
     if isinstance(content, str):
-        return content
+        return strip_slotflow_context_blocks(content)
 
     if isinstance(content, dict):
         text = content.get("text")
         if isinstance(text, str):
-            return text
+            return strip_slotflow_context_blocks(text)
         nested = content.get("content")
         if nested is not None:
             return normalize_message_content(nested)
-        return repr(to_jsonable(content))
+        return ""
 
     if isinstance(content, list):
         parts = [extract_text_block_text(item) for item in content]
-        text = "".join(part for part in parts if part)
-        if text:
-            return text
-        return repr(to_jsonable(content))
+        return strip_slotflow_context_blocks("".join(part for part in parts if part))
 
-    return repr(to_jsonable(content))
+    return ""
 
 
 def extract_text_block_text(item: Any) -> str:

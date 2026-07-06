@@ -35,6 +35,7 @@ from app.chat.models import (
     UploadedFileContext,
 )
 from app.chat.model_catalog import discover_model_catalog
+from app.chat.agent_adapter import strip_slotflow_context_blocks
 from app.chat.repository import ChatRepository, MessageNotFoundError, ThreadNotFoundError
 from app.chat.run_config import build_run_config, request_thinking_enabled
 from app.chat.sse import BusinessSseEvent, encode_sse_event, iter_business_events
@@ -240,7 +241,10 @@ async def stream_thread_run(
                     return
 
                 if event.event == "run.finished":
-                    content = snapshot_message_content or "".join(assistant_text_parts)
+                    content = select_assistant_content(
+                        snapshot_message_content=snapshot_message_content,
+                        streamed_content="".join(assistant_text_parts),
+                    )
                     reasoning_content = select_assistant_reasoning_content(
                         snapshot_reasoning_content=snapshot_reasoning_content,
                         streamed_reasoning_content="".join(assistant_reasoning_parts),
@@ -318,6 +322,32 @@ def latest_assistant_reasoning_content(event: BusinessSseEvent) -> str | None:
     return latest_assistant_message_field(event, "reasoning_content")
 
 
+def select_assistant_content(
+    *,
+    snapshot_message_content: str | None,
+    streamed_content: str,
+) -> str:
+    """Choose persisted assistant content without letting short snapshots erase live text."""
+
+    streamed = strip_slotflow_context_blocks(streamed_content).strip()
+    snapshot = (
+        strip_slotflow_context_blocks(snapshot_message_content).strip()
+        if isinstance(snapshot_message_content, str)
+        else ""
+    )
+    if streamed and snapshot:
+        if snapshot.startswith(streamed):
+            return snapshot
+        if streamed.startswith(snapshot):
+            return streamed
+        return snapshot if len(snapshot) > len(streamed) else streamed
+
+    if streamed:
+        return streamed
+
+    return snapshot
+
+
 def select_assistant_reasoning_content(
     *,
     snapshot_reasoning_content: str | None,
@@ -353,6 +383,8 @@ def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str |
             continue
         role = message.get("role")
         value = message.get(field)
+        if field == "content" and message.get("has_tool_calls") is True:
+            continue
         if role in ("assistant", "ai") and isinstance(value, str):
             return value
     return None

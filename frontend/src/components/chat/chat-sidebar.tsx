@@ -46,6 +46,7 @@ import {
   type McpServerRecord,
   type MemoryKind,
   type MemoryRecord,
+  type SkillInstallRequest,
   type SkillRecord,
   type ThreadRecord,
   type WorkspaceEntryRecord,
@@ -76,9 +77,9 @@ type ThreadSidebarProps = {
   onDeleteArtifact: (artifact: WorkspaceEntryRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
-  onInstallSkill: () => void;
+  onInstallSkill: (request?: SkillInstallRequest) => Promise<void> | void;
   onNewThread: () => void;
-  onOpenArtifacts: () => void;
+  onOpenWorkspaceDirectory: () => void;
   onPinMcpServer: (server: McpServerRecord, pinned: boolean) => void;
   onPinSkill: (skill: SkillRecord, pinned: boolean) => void;
   onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
@@ -113,7 +114,7 @@ export function ThreadSidebar({
   onEditMemory,
   onInstallSkill,
   onNewThread,
-  onOpenArtifacts,
+  onOpenWorkspaceDirectory,
   onPinMcpServer,
   onPinSkill,
   onPreviewArtifact,
@@ -247,7 +248,7 @@ export function ThreadSidebar({
                 <SidebarMenuButton
                   type="button"
                   tooltip="工作区"
-                  onClick={onOpenArtifacts}
+                  onClick={onOpenWorkspaceDirectory}
                   disabled={disabled}
                   className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
                 >
