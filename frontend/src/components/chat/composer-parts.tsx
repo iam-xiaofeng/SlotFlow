@@ -95,14 +95,21 @@ export function ComposerTodoPanel({
     previousTodoListKeyRef.current = todoListKey;
   }, [todoListKey, todos.length]);
 
+  const completedCount = todos.filter((todo) => todo.status === "completed").length;
+  const allCompleted = todos.length > 0 && completedCount === todos.length;
+
+  useEffect(() => {
+    if (allCompleted) {
+      setIsCollapsed(true);
+    }
+  }, [allCompleted]);
+
   if (todos.length === 0) {
     return null;
   }
 
-  const completedCount = todos.filter((todo) => todo.status === "completed").length;
-
   return (
-    <div className="relative z-0 mx-3 -mb-px overflow-hidden rounded-t-2xl border border-b-0 border-border/80 bg-muted/35 shadow-sm backdrop-blur-sm transition-all duration-200 ease-out">
+    <div className="relative z-0 mx-3 -mb-px overflow-hidden rounded-t-2xl bg-muted/35 shadow-[0_-10px_34px_-30px_rgba(15,23,42,0.35)] backdrop-blur-sm transition-all duration-200 ease-out">
       <button
         type="button"
         aria-expanded={!isCollapsed}

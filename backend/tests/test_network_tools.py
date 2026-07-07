@@ -46,13 +46,13 @@ def test_web_fetch_returns_readable_text_from_html() -> None:
 
 def test_web_search_extracts_result_links() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert "duckduckgo.com" in str(request.url)
+        assert "www.bing.com" in str(request.url)
         return httpx.Response(
             200,
             headers={"content-type": "text/html"},
             text=(
-                "<a href=\"/l/?uddg=https%3A%2F%2Fexample.com%2Fskill\">"
-                "Example Skill</a>"
+                "<h2><a href=\"https://www.bing.com/ck/a?u="
+                "a1aHR0cHM6Ly9leGFtcGxlLmNvbS9za2lsbA\">Example Skill</a></h2>"
             ),
         )
 
@@ -70,6 +70,41 @@ def test_web_search_extracts_result_links() -> None:
     assert result["results"] == [
         {"title": "Example Skill", "url": "https://example.com/skill"}
     ]
+    assert result["provider"] == "bing"
+
+
+def test_web_search_falls_back_after_provider_error() -> None:
+    requested_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_hosts.append(request.url.host)
+        if request.url.host == "www.bing.com":
+            raise httpx.ConnectError("ssl handshake failed", request=request)
+        assert request.url.host == "lite.duckduckgo.com"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=(
+                "<a href=\"/l/?uddg=https%3A%2F%2Fexample.com%2Ffallback\">"
+                "Fallback Result</a>"
+            ),
+        )
+
+    result = search_web(
+        query="research skill",
+        max_results=3,
+        config=SlotFlowSandboxConfig(allow_private_network=True),
+        client_factory=lambda **kwargs: httpx.Client(
+            transport=httpx.MockTransport(handler),
+            **kwargs,
+        ),
+    )
+
+    assert requested_hosts == ["www.bing.com", "lite.duckduckgo.com"]
+    assert result["results"] == [
+        {"title": "Fallback Result", "url": "https://example.com/fallback"}
+    ]
+    assert result["provider"] == "duckduckgo_lite"
 
 
 def test_harness_registers_network_and_extension_tools(tmp_path: Path) -> None:

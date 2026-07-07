@@ -159,9 +159,7 @@
 }
 
 .slotflow-surface {
-  background:
-    linear-gradient(180deg, oklch(1 0 0 / 92%), oklch(0.985 0.004 230 / 92%)),
-    var(--background);
+  background: var(--background);
 }
 
 .dark .slotflow-app-bg {
@@ -171,9 +169,7 @@
 }
 
 .dark .slotflow-surface {
-  background:
-    linear-gradient(180deg, oklch(0.19 0.01 250 / 94%), oklch(0.15 0.006 250 / 94%)),
-    var(--background);
+  background: var(--background);
 }
 
 @keyframes slotflow-rise-in {

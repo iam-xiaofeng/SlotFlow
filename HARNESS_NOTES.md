@@ -2093,3 +2093,80 @@ SlotFlow 所有环境配好,尤其 Docker 不要脆弱;同时新增一个可提�
 
 真实新机器 Docker 安装不可在当前已配置工作站完整模拟,所以 bootstrap 的跨发行版覆盖主要依赖语法检查、
 分支单测、跳过系统包/Docker 的 bootstrap 跑通,以及对固定命令的代码审计。
+
+## 36. 迭代 28(2026-07-07):web_search DuckDuckGo TLS 回退 + 新消息顶部锚定补强
+
+### 36.1 web_search SSL 握手失败
+
+用户复测 `web_search` 搜索 `"China economy"` 仍返回 SSL 握手失败。按当前代码核对,根因不是工具没注册,
+而是 `harness/tools/network.py::search_web` 只有一个搜索入口:
+`https://lite.duckduckgo.com/lite/?q=...`。在本机真实网络下复现结果:
+
+- `https://lite.duckduckgo.com/lite/?q=China+economy` -> `UNEXPECTED_EOF_WHILE_READING`
+- `https://html.duckduckgo.com/html/?q=China+economy` -> 同样握手失败
+- `https://duckduckgo.com/html/?q=China+economy` -> 同样握手失败
+- `https://www.bing.com/search?q=China+economy` -> 200,可返回 HTML
+
+所以这不是模型调用方式问题,也不是证书校验开关应该默认放松的问题。默认禁用 TLS verify 会降低
+`web_fetch`/`web_search` 的安全边界,且不能解释为什么 Bing 正常。修复方向是让搜索工具具备搜索源回退。
+
+本轮代码改动:
+
+- `SEARCH_PROVIDERS` 替代单个 `SEARCH_URL`,顺序为 Bing HTML -> DuckDuckGo Lite。
+- `search_web(...)` 对每个 provider 调 `fetch_url(..., include_raw=True)`,第一个返回可解析结果的 provider
+  直接返回;失败或无结果时继续尝试下一个 provider。
+- 所有 provider 都失败时,返回 `attempts=[{provider,error},...]`,让模型/调试者能看到具体是哪一层失败。
+- `extract_search_results` 先抓常见结果标题块 `<h2><a ...>`,再退回普通 `<a>` 扫描。
+- `normalize_search_result_url` 继续解 DuckDuckGo `/l/?uddg=...`,并新增 Bing `/ck/a?u=...` 解码。Bing 的
+  `u=` 常见形态是 `a1` 前缀 + URL-safe base64;解码后返回真实目标 URL,不把 Bing 跳转 URL 暴露给模型。
+- 解析结果会过滤 Bing/DuckDuckGo 自身导航页,避免把 Images/Videos/News 等搜索引擎内部入口当成答案来源。
+
+这保持了网络工具的原有安全边界:`fetch_url` 仍只允许 HTTP/HTTPS,默认阻断私网/localhost,仍走
+`SlotFlowSandboxConfig` 的超时和最大字节限制。搜索源回退只改变公共搜索入口和 HTML 解析,没有引入
+任意代理、无证书校验或宿主机命令。
+
+### 36.2 新消息没有显示到屏幕最上面
+
+上一轮已经把新 turn 从“跟随底部”改为“锚定最新 user bubble”,但用户复测仍看到新消息在底部。再次读
+`frontend/src/components/chat/message-list.tsx` 后,实际根因是滚动几何条件不满足:
+
+- 旧代码只加了固定 `h-[58vh]` 底部 spacer。
+- 当 assistant 输出还很短、最新 user bubble 高度较小、视口较高时,`scrollHeight - clientHeight`
+  的最大滚动值不够大,浏览器根本不允许把最新 user bubble 滚到视口顶部。
+- 另外,程序化 `scrollTo` 触发的 scroll 事件会进入同一套 near-bottom/manual intent 判定,后续流式输出有机会
+  把视口重新带回底部。
+
+本轮补强:
+
+- 底部 spacer 改为按真实 viewport 高度与最新 user bubble 高度计算:
+  `viewport.clientHeight - userBubbleHeight + 24`。这样即使 assistant 尚未输出,最大滚动距离也足够把
+  user bubble 放到顶部附近。
+- spacer 只在 `isStreaming && latestUserMessageId` 时存在,并且不再做 height 过渡。这里要优先保证锚定正确,
+  否则动画期间 `maxScrollTop` 仍不足。
+- `scrollUserMessageToTurnTop` 连续两帧校准,第一帧处理新 DOM,第二帧处理 spacer/内容高度变化后的最终几何。
+  新 turn 首次锚定用 `behavior="auto"`,避免用户先看到消息停在底部再平滑滑到顶部。
+- 新增 `programmaticScrollUntilRef`,程序化滚动后的短窗口内忽略 scroll 事件对手动滚动意图的影响,避免
+  自己的 `scrollTo` 把 auto-follow 状态写坏。
+- assistant 首 token 到来时,如果存在最新 user message,继续锚定 user bubble,不滚到底部。
+
+消息数组仍保持时间顺序,没有把 DOM 顺序反转;只是滚动视口位置改变。这符合用户说的“新发送的消息显示到
+屏幕最上面”:屏幕从本轮问题开始往下读,assistant 从下面长出来。
+
+### 36.3 验证
+
+本轮验证:
+
+- `cd backend && uv run pytest tests/test_network_tools.py tests/test_tool_registry.py tests/test_harness_builder.py -q`
+  -> 19 passed。
+- `cd backend && uv run ruff check app tests` -> passed。
+- `cd frontend && pnpm typecheck` -> passed。
+- `cd frontend && pnpm build` -> passed。
+- `git diff --check` -> passed。
+- 真实 `web_search("China economy")` 调用 -> 返回 5 条结果,`provider="bing"`,不再出现 DuckDuckGo SSL
+  握手错误。
+
+尝试补 Playwright 浏览器验证:用临时 spec 拦截聊天 API/SSE,但本仓库未安装 `@playwright/test`,
+`pnpm dlx playwright` / `pnpm dlx --package @playwright/test playwright test ...` 都无法让项目内 spec
+解析 `@playwright/test` import。没有把 Playwright 依赖加入仓库,临时 spec 和 `test-results` 已删除。仍需
+人工在浏览器里确认:实际发送新消息后,最新用户消息应立即贴近聊天视口顶部,assistant 内容从其下方流出;
+用户手动滚动后不应被完成态强行拉回。

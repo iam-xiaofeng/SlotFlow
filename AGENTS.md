@@ -165,6 +165,10 @@ frontend/src/
   `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup. Bootstrap-only knobs:
   `SLOTFLOW_NODE_VERSION`, `SLOTFLOW_PNPM_VERSION`, `SLOTFLOW_DOCKER_REGISTRY_MIRRORS`,
   `SLOTFLOW_DOCKER_DAEMON_WAIT_SECONDS`.
+- **README onboarding**: `README.md` and `README_zh.md` are the first-run/onboarding
+  documents. Their `bootstrap.sh` and `Makefile` sections must stay mechanically consistent
+  with the actual root `bootstrap.sh`, root `Makefile`, `frontend/package.json`
+  `packageManager`, and `backend/.env_example`; verify those files before changing setup docs.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
@@ -207,14 +211,25 @@ frontend/src/
   the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
   assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
   normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
+- **Network tools**: `web_fetch` and `web_search` live in `harness/tools/network.py` and remain
+  read-only, public-URL-only tools under `SlotFlowSandboxConfig` limits. `web_search` uses plain
+  HTML search endpoints with fallback: Bing HTML first, then DuckDuckGo Lite. The parser filters
+  search-engine navigation/self links, decodes Bing `/ck/a?u=...` redirect targets, and decodes
+  DuckDuckGo `/l/?uddg=...` targets before returning compact `{title,url}` results. This fallback is
+  intentional because some networks terminate DuckDuckGo TLS with
+  `UNEXPECTED_EOF_WHILE_READING`; do not collapse it back to a single search URL.
 - **Chat scroll behavior**: `frontend/src/components/chat/message-list.tsx` anchors each newly
   sent user message near the top of the chat viewport while the assistant response streams below
   it, so a new turn starts where the user can read from the question downward instead of being
-  pushed to the bottom. A temporary bottom spacer exists only during that streaming turn so the
-  latest user message can reach the top even when there is little assistant output yet; bottom
-  scrolling still targets the real message end, not the spacer. If the user scrolls manually during
-  generation, automatic turn anchoring/auto-follow stops and the completed answer must not force
-  scroll.
+  pushed to the bottom. A temporary bottom spacer is measured from the real scroll viewport height
+  and the latest user-bubble height, exists only during that streaming turn, and is not animated;
+  otherwise the browser's `maxScrollTop` can make the "top" anchor impossible while assistant output
+  is still short. While the answer is still streaming, once the real output end grows below the
+  visible viewport, auto-follow switches to the latest assistant output so long responses keep
+  revealing the newest text. Programmatic scroll events are ignored for manual-intent tracking.
+  Bottom scrolling still targets the real message end, not the spacer. If the user scrolls manually
+  during generation, automatic turn anchoring/auto-follow stops and the completed answer must not
+  force scroll.
 - **Thinking toggle**: `RunContext.thinking_enabled` (flash mode = off). DeepSeek-V4 thinks
   by default, so OFF must send `extra_body={"thinking":{"type":"disabled"}}` explicitly
   (`runtime/models.py`). Anthropic thinking / OpenAI o-series reasoning are enabled only
@@ -442,14 +457,17 @@ frontend/src/
   message list; duplicate panels make the single source of truth look inconsistent. The composer
   panel auto-expands only when a genuinely new todo content list appears (`todoListKey` changes);
   status-only updates and a new streaming answer must not override the user's manual collapsed
-  state. If the model creates a different todo list, clear/replace the old list first so the new
-  list can expand as a new panel state. `state.snapshot`
+  state, but the panel auto-collapses when every todo is completed. If the model creates a different
+  todo list, clear/replace the old list first so the new list can expand as a new panel state.
+  `state.snapshot`
   todos are also consumed as a frontend fallback in case an intermediate `todo.updated` event is
   missed. Backend streaming emits `todo.updated` for every values snapshot with todos; frontend
   signature dedupe prevents repeated identical events from flickering the panel. Todo items normalize
   to the public `{content, status}` shape; accept legacy/model-emitted
   `{text, status}` only at the tool/projection/frontend parsing boundaries so the panel never shows
-  status icons without labels. The Skills/MCP/Memory
+  status icons without labels. The center conversation section uses one uniform `slotflow-surface`
+  background from message area through composer; the composer footer and todo/input stack must not
+  reintroduce translucent bands or hard horizontal border/ring dividers. The Skills/MCP/Memory
   directory uses native `overflow-y-auto` containers (including sub-skill lists) because Base UI
   `ScrollArea` did not reliably wheel-scroll inside the centered dialog. The chat composer should
   not show non-functional placeholder affordances: the lower-left `+` is a direct attachment button,

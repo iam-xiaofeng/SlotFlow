@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import ipaddress
 import json
@@ -19,7 +20,10 @@ from app.harness.sandbox import SlotFlowSandboxConfig
 
 DEFAULT_USER_AGENT = "SlotFlow/0.1 (+https://slotflow.local)"
 MAX_REDIRECTS = 5
-SEARCH_URL = "https://lite.duckduckgo.com/lite/?q={query}"
+SEARCH_PROVIDERS: tuple[tuple[str, str], ...] = (
+    ("bing", "https://www.bing.com/search?q={query}"),
+    ("duckduckgo_lite", "https://lite.duckduckgo.com/lite/?q={query}"),
+)
 
 
 class NetworkToolError(ValueError):
@@ -117,32 +121,43 @@ def search_web(
     config: SlotFlowSandboxConfig,
     client_factory: Callable[..., httpx.Client] = httpx.Client,
 ) -> dict[str, Any]:
-    """Run a lightweight public web search through DuckDuckGo Lite."""
+    """Run a lightweight public web search with provider fallback."""
 
     stripped_query = re.sub(r"\s+", " ", query).strip()
     if not stripped_query:
         return {"query": query, "results": [], "error": "empty_query", "source": "slotflow_network"}
 
     safe_limit = max(1, min(max_results, 10))
-    search_url = SEARCH_URL.format(query=quote_plus(stripped_query[:200]))
-    fetched = fetch_url(
-        url=search_url,
-        config=config,
-        include_raw=True,
-        client_factory=client_factory,
-    )
-    if fetched.get("error"):
-        return {
-            "query": stripped_query,
-            "results": [],
-            "error": fetched["error"],
-            "source": "slotflow_network",
-        }
+    encoded_query = quote_plus(stripped_query[:200])
+    attempts: list[dict[str, str]] = []
+    for provider, url_template in SEARCH_PROVIDERS:
+        search_url = url_template.format(query=encoded_query)
+        fetched = fetch_url(
+            url=search_url,
+            config=config,
+            include_raw=True,
+            client_factory=client_factory,
+        )
+        if fetched.get("error"):
+            attempts.append({"provider": provider, "error": str(fetched["error"])})
+            continue
 
-    results = extract_search_results(str(fetched.get("_raw_content") or ""), safe_limit)
+        results = extract_search_results(str(fetched.get("_raw_content") or ""), safe_limit)
+        if results:
+            return {
+                "query": stripped_query,
+                "results": results,
+                "provider": provider,
+                "source": "slotflow_network",
+            }
+        attempts.append({"provider": provider, "error": "no_results"})
+
+    last_error = attempts[-1]["error"] if attempts else "no_results"
     return {
         "query": stripped_query,
-        "results": results,
+        "results": [],
+        "error": last_error,
+        "attempts": attempts,
         "source": "slotflow_network",
     }
 
@@ -237,31 +252,103 @@ def extract_html_title(text: str) -> str | None:
 
 def extract_search_results(content: str, max_results: int) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
-    for match in re.finditer(r"(?is)<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", content):
-        href = html.unescape(match.group(1))
-        title = compact_text(strip_html(match.group(2)))
-        if not title:
-            continue
-        url = normalize_search_result_url(href)
-        if not url.startswith(("http://", "https://")):
-            continue
-        if any(item["url"] == url for item in results):
-            continue
-        results.append({"title": title[:200], "url": url})
-        if len(results) >= max_results:
-            break
+    seen_candidates: set[tuple[str, str]] = set()
+    candidate_patterns = (
+        r"(?is)<h2[^>]*>\s*<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>\s*</h2>",
+        r"(?is)<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+    )
+    for pattern in candidate_patterns:
+        for match in re.finditer(pattern, content):
+            candidate = (match.group(1), match.group(2))
+            if candidate in seen_candidates:
+                continue
+            seen_candidates.add(candidate)
+            append_search_result(results, candidate[0], candidate[1], max_results)
+            if len(results) >= max_results:
+                return results
     return results
+
+
+def append_search_result(
+    results: list[dict[str, str]],
+    raw_href: str,
+    raw_title: str,
+    max_results: int,
+) -> None:
+    href = html.unescape(raw_href)
+    title = clean_search_result_title(compact_text(strip_html(raw_title)))
+    if not title:
+        return
+    url = normalize_search_result_url(href)
+    if not url.startswith(("http://", "https://")):
+        return
+    if not is_external_search_result_url(url):
+        return
+    if any(item["url"] == url for item in results):
+        return
+    results.append({"title": title[:200], "url": url})
+    if len(results) > max_results:
+        del results[max_results:]
+
+
+def clean_search_result_title(title: str) -> str:
+    lines = [line.strip() for line in title.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if len(lines) >= 2 and looks_like_url_or_domain(lines[0]):
+        return compact_text(" ".join(lines[1:]))
+    return compact_text(" ".join(lines))
+
+
+def looks_like_url_or_domain(value: str) -> bool:
+    return bool(re.match(r"(?i)^(https?://|www\.|[a-z0-9.-]+\.[a-z]{2,})(?:\s|/|$)", value))
+
+
+def is_external_search_result_url(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname in {"www.bing.com", "bing.com", "cn.bing.com"}:
+        return False
+    if hostname.endswith(".duckduckgo.com") or hostname == "duckduckgo.com":
+        return False
+    return True
 
 
 def normalize_search_result_url(url: str) -> str:
     if url.startswith("//"):
         url = f"https:{url}"
     parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
     if parsed.path.startswith("/l/"):
         target = parse_qs(parsed.query).get("uddg", [None])[0]
         if target:
             return unquote(target)
+    if hostname in {"www.bing.com", "bing.com", "cn.bing.com"} and parsed.path.startswith("/ck/"):
+        target = parse_qs(parsed.query).get("u", [None])[0]
+        decoded_target = decode_bing_result_target(target)
+        if decoded_target:
+            return urljoin("https://www.bing.com", decoded_target)
     return url
+
+
+def decode_bing_result_target(target: str | None) -> str | None:
+    if not target:
+        return None
+    unquoted = unquote(target)
+    if unquoted.startswith(("http://", "https://", "/")):
+        return unquoted
+    encoded = unquoted[2:] if unquoted.startswith("a1") else unquoted
+    padding = "=" * (-len(encoded) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{encoded}{padding}").decode(
+            "utf-8",
+            errors="replace",
+        )
+    except (ValueError, OSError):
+        return None
+    if decoded.startswith(("http://", "https://", "/")):
+        return decoded
+    return None
 
 
 class TextExtractor(HTMLParser):
