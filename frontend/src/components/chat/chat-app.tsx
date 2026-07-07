@@ -1021,7 +1021,7 @@ export function ChatApp() {
                     void handleSelectClarification(messageId, clarification, option)
                   }
                 />
-                <div className="shrink-0 border-t border-border/35 bg-background/86 px-3 pb-5 pt-3 backdrop-blur sm:px-6">
+                <div className="shrink-0 px-3 pb-5 pt-3 sm:px-6">
                   {composer}
                 </div>
               </>

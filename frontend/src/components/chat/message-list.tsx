@@ -2,6 +2,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -54,9 +55,11 @@ export function MessageList({
   const newTurnAnchoredUserIdsRef = useRef(new Set<string>());
   const autoFollowLatestAssistantRef = useRef(true);
   const userScrollIntentRef = useRef(false);
+  const programmaticScrollUntilRef = useRef(0);
   const [activeUserIndex, setActiveUserIndex] = useState(0);
   const [isNavigatorOpen, setIsNavigatorOpen] = useState(false);
   const [editingUserMessageId, setEditingUserMessageId] = useState<string | null>(null);
+  const [turnAnchorSpacerHeight, setTurnAnchorSpacerHeight] = useState(0);
   const computedUserMessages = useMemo<UserMessageNavItem[]>(() => {
     let index = 0;
     return messages.flatMap((message) => {
@@ -125,8 +128,9 @@ export function MessageList({
         return null;
       }
 
-      return window.requestAnimationFrame(() => {
+      const frame = window.requestAnimationFrame(() => {
         const endElement = messagesEndRef.current;
+        programmaticScrollUntilRef.current = performance.now() + 700;
         if (!endElement) {
           viewport.scrollTo({ top: viewport.scrollHeight, behavior });
           return;
@@ -137,8 +141,25 @@ export function MessageList({
         const targetTop = Math.max(0, endTop - viewport.clientHeight + endRect.height);
         viewport.scrollTo({ top: targetTop, behavior });
       });
+      return () => window.cancelAnimationFrame(frame);
     },
     [getViewport, messagesEndRef],
+  );
+
+  const measureTurnAnchorSpacerHeight = useCallback(
+    (messageId: string | null) => {
+      if (!messageId) {
+        return 0;
+      }
+      const viewport = getViewport();
+      if (!viewport) {
+        return 0;
+      }
+      const element = userMessageRefs.current.get(messageId);
+      const elementHeight = element?.getBoundingClientRect().height ?? 0;
+      return Math.ceil(Math.max(0, viewport.clientHeight - elementHeight + 24));
+    },
+    [getViewport],
   );
 
   const scrollUserMessageToTurnTop = useCallback(
@@ -149,17 +170,117 @@ export function MessageList({
         return null;
       }
 
-      return window.requestAnimationFrame(() => {
-        const viewportRect = viewport.getBoundingClientRect();
-        const elementRect = element.getBoundingClientRect();
-        const elementTop = elementRect.top - viewportRect.top + viewport.scrollTop;
-        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        const targetTop = Math.min(maxScrollTop, Math.max(0, elementTop - 16));
-        viewport.scrollTo({ top: targetTop, behavior });
-      });
+      const frames: number[] = [];
+      const run = (remainingFrames: number, scrollBehavior: ScrollBehavior) => {
+        const frame = window.requestAnimationFrame(() => {
+          const currentViewport = getViewport();
+          const currentElement = userMessageRefs.current.get(messageId);
+          if (!currentViewport || !currentElement) {
+            return;
+          }
+
+          programmaticScrollUntilRef.current = performance.now() + 700;
+          const viewportRect = currentViewport.getBoundingClientRect();
+          const elementRect = currentElement.getBoundingClientRect();
+          const elementTop =
+            elementRect.top - viewportRect.top + currentViewport.scrollTop;
+          const maxScrollTop = Math.max(
+            0,
+            currentViewport.scrollHeight - currentViewport.clientHeight,
+          );
+          const targetTop = Math.min(maxScrollTop, Math.max(0, elementTop - 16));
+          currentViewport.scrollTo({ top: targetTop, behavior: scrollBehavior });
+
+          if (remainingFrames > 1) {
+            run(remainingFrames - 1, "auto");
+          }
+        });
+        frames.push(frame);
+      };
+
+      run(2, behavior);
+      return () => {
+        for (const frame of frames) {
+          window.cancelAnimationFrame(frame);
+        }
+      };
     },
     [getViewport],
   );
+
+  const scrollTurnAnchorOrLatestOutput = useCallback(
+    (messageId: string) => {
+      const viewport = getViewport();
+      const element = userMessageRefs.current.get(messageId);
+      const endElement = messagesEndRef.current;
+      if (!viewport || !element || !endElement) {
+        return null;
+      }
+
+      const frame = window.requestAnimationFrame(() => {
+        const currentViewport = getViewport();
+        const currentElement = userMessageRefs.current.get(messageId);
+        const currentEndElement = messagesEndRef.current;
+        if (!currentViewport || !currentElement || !currentEndElement) {
+          return;
+        }
+
+        const viewportRect = currentViewport.getBoundingClientRect();
+        const endRect = currentEndElement.getBoundingClientRect();
+        const shouldFollowLatestOutput =
+          autoFollowLatestAssistantRef.current ||
+          endRect.bottom > viewportRect.bottom - 24;
+
+        programmaticScrollUntilRef.current = performance.now() + 700;
+        if (shouldFollowLatestOutput) {
+          autoFollowLatestAssistantRef.current = true;
+          const endTop =
+            endRect.top - viewportRect.top + currentViewport.scrollTop;
+          const targetTop = Math.max(
+            0,
+            endTop - currentViewport.clientHeight + endRect.height,
+          );
+          currentViewport.scrollTo({ top: targetTop, behavior: "auto" });
+          return;
+        }
+
+        autoFollowLatestAssistantRef.current = false;
+        const elementRect = currentElement.getBoundingClientRect();
+        const elementTop =
+          elementRect.top - viewportRect.top + currentViewport.scrollTop;
+        const maxScrollTop = Math.max(
+          0,
+          currentViewport.scrollHeight - currentViewport.clientHeight,
+        );
+        const targetTop = Math.min(maxScrollTop, Math.max(0, elementTop - 16));
+        currentViewport.scrollTo({ top: targetTop, behavior: "auto" });
+      });
+
+      return () => window.cancelAnimationFrame(frame);
+    },
+    [getViewport, messagesEndRef],
+  );
+
+  useLayoutEffect(() => {
+    const updateSpacerHeight = () => {
+      const nextHeight = measureTurnAnchorSpacerHeight(latestUserTurnAnchorKey);
+      setTurnAnchorSpacerHeight((current) =>
+        current === nextHeight ? current : nextHeight,
+      );
+    };
+
+    updateSpacerHeight();
+    if (!latestUserTurnAnchorKey) {
+      return;
+    }
+
+    window.addEventListener("resize", updateSpacerHeight);
+    return () => window.removeEventListener("resize", updateSpacerHeight);
+  }, [
+    latestUserTurnAnchorKey,
+    measureTurnAnchorSpacerHeight,
+    userMessageSignature,
+  ]);
 
   const isViewportNearBottom = useCallback((viewport: HTMLElement) => {
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
@@ -214,6 +335,9 @@ export function MessageList({
 
     const handleScroll = () => {
       updateActiveUserMessage();
+      if (performance.now() <= programmaticScrollUntilRef.current) {
+        return;
+      }
       if (isViewportNearBottom(viewport)) {
         autoFollowLatestAssistantRef.current = true;
         userScrollIntentRef.current = false;
@@ -250,15 +374,15 @@ export function MessageList({
       return;
     }
 
-    const frame = scrollUserMessageToTurnTop(messageId, "smooth");
-    if (frame === null) {
+    const cleanup = scrollUserMessageToTurnTop(messageId, "auto");
+    if (cleanup === null) {
       return;
     }
 
     autoFollowLatestAssistantRef.current = false;
     userScrollIntentRef.current = false;
     newTurnAnchoredUserIdsRef.current.add(messageId);
-    return () => window.cancelAnimationFrame(frame);
+    return cleanup;
   }, [latestUserTurnAnchorKey, scrollUserMessageToTurnTop]);
 
   useEffect(() => {
@@ -266,16 +390,16 @@ export function MessageList({
       return;
     }
 
-    const frame = scrollUserMessageToTurnTop(latestUserMessageId, "auto");
-    if (frame === null) {
+    const cleanup = scrollTurnAnchorOrLatestOutput(latestUserMessageId);
+    if (cleanup === null) {
       return;
     }
 
-    return () => window.cancelAnimationFrame(frame);
+    return cleanup;
   }, [
     latestUserMessageId,
     latestUserTurnAnchorRefreshKey,
-    scrollUserMessageToTurnTop,
+    scrollTurnAnchorOrLatestOutput,
   ]);
 
   useEffect(() => {
@@ -284,21 +408,23 @@ export function MessageList({
       return;
     }
 
-    const frame = latestUserMessageId
-      ? scrollUserMessageToTurnTop(latestUserMessageId, "smooth")
+    const cleanup = latestUserMessageId
+      ? scrollTurnAnchorOrLatestOutput(latestUserMessageId)
       : scrollViewportToBottom("smooth");
-    if (frame === null) {
+    if (cleanup === null) {
       return;
     }
 
-    autoFollowLatestAssistantRef.current = !latestUserMessageId;
+    if (!latestUserMessageId) {
+      autoFollowLatestAssistantRef.current = true;
+    }
     userScrollIntentRef.current = false;
     firstTokenScrolledMessageIdsRef.current.add(messageId);
-    return () => window.cancelAnimationFrame(frame);
+    return cleanup;
   }, [
     latestAssistantFirstTokenScrollKey,
     latestUserMessageId,
-    scrollUserMessageToTurnTop,
+    scrollTurnAnchorOrLatestOutput,
     scrollViewportToBottom,
   ]);
 
@@ -307,12 +433,12 @@ export function MessageList({
       return;
     }
 
-    const frame = scrollViewportToBottom("auto");
-    if (frame === null) {
+    const cleanup = scrollViewportToBottom("auto");
+    if (cleanup === null) {
       return;
     }
 
-    return () => window.cancelAnimationFrame(frame);
+    return cleanup;
   }, [latestAssistantStreamingOutputKey, scrollViewportToBottom]);
 
   useEffect(() => {
@@ -351,6 +477,7 @@ export function MessageList({
       top: targetTop,
       behavior: "smooth",
     });
+    programmaticScrollUntilRef.current = performance.now() + 700;
   }
 
   async function submitUserMessageEdit(messageId: string, content: string) {
@@ -392,11 +519,8 @@ export function MessageList({
           <div ref={messagesEndRef} />
           <div
             aria-hidden="true"
-            className={
-              latestUserTurnAnchorKey
-                ? "h-[58vh] shrink-0 transition-[height] duration-300 ease-out"
-                : "h-0 shrink-0 transition-[height] duration-300 ease-out"
-            }
+            className="shrink-0"
+            style={{ height: latestUserTurnAnchorKey ? turnAnchorSpacerHeight : 0 }}
           />
         </div>
       </ScrollArea>
