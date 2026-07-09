@@ -2170,3 +2170,99 @@ SlotFlow 所有环境配好,尤其 Docker 不要脆弱;同时新增一个可提�
 解析 `@playwright/test` import。没有把 Playwright 依赖加入仓库,临时 spec 和 `test-results` 已删除。仍需
 人工在浏览器里确认:实际发送新消息后,最新用户消息应立即贴近聊天视口顶部,assistant 内容从其下方流出;
 用户手动滚动后不应被完成态强行拉回。
+
+## 37. 迭代 29(2026-07-09):docx 产物预览 500 根因修复
+
+用户反馈最新对话产物里的 `.docx` 打不开,右侧产物面板显示 `read artifact failed: 500`。按当前代码链路复核:
+前端预览调用 `GET /api/workspace/artifacts/read`,后端 `workspace/routes.py::read_artifact` 只做路径白名单
+(`artifacts/` / `uploads/`)后调用 `SlotFlowWorkspace.read_file`,真实解析在
+`harness/sandbox/readers.py::read_workspace_file` / `extract_docx_text`。
+
+本机最新产物是
+`backend/.slotflow/workspace/artifacts/thread_5b41a6b1208a/Nature_Review_End-to-End_Autonomous_Driving.docx`,
+大小 `1,355,271` bytes。直接调用 `extract_docx_text(path)` 可以成功抽出 `12,612` 字符,并且
+`zipfile.ZipFile(...).testzip()` 返回 `None`,说明 `word/document.xml` 和 ZIP 包本身不是导致预览 500 的根因。
+真正失败点是 `SlotFlowWorkspace.read_file(...)` 在解析格式前先调用 `_assert_readable_file`,而默认
+`SLOTFLOW_WORKSPACE_MAX_READ_BYTES` / `DEFAULT_MAX_READ_BYTES` 是 `1,048,576` bytes。这个含图片 docx 的包体
+超过 1 MiB 后抛 `WorkspaceFileTooLargeError`;路由之前只捕获 `WorkspacePathError`,所以 FastAPI 把它表现成
+500,前端只看到泛化的 `read artifact failed: 500`。
+
+修复:
+
+- `SlotFlowWorkspace.read_file` 先通过 `detect_workspace_file_extension` 判断文件类型,再做大小检查。
+- `.docx` / `.xlsx` / `.xlsm` / `.pptx` 这类 Office Open XML ZIP 包使用
+  `OPENXML_PREVIEW_MAX_READ_BYTES = 25 * 1024 * 1024` 与用户配置的 `max_read_bytes` 取较大值作为预览包体上限。
+  原因是这类生成报告经常因为嵌入图片超过普通文本 1 MiB 限额,但预览 reader 只读取 XML 文本部件,不是把图片
+  二进制内联给模型或前端。
+- `read_text()` 和普通文本/Markdown/源码预览仍受 `SLOTFLOW_WORKSPACE_MAX_READ_BYTES` 控制;没有放宽任意文本读取。
+- `workspace/routes.py::read_artifact` 现在捕获 `WorkspaceFileTooLargeError` 并返回 HTTP 413,让真正超限的文件成为
+  可理解的客户端错误,不再变成 500。
+
+验证:
+
+- 真实产物走修复后的 `SlotFlowWorkspace.read_file('artifacts/thread_5b41a6b1208a/Nature_Review_End-to-End_Autonomous_Driving.docx')`
+  返回 `kind=document`,media type 为
+  `application/vnd.openxmlformats-officedocument.wordprocessingml.document`,size `1,355,271`,content 长度 `12,612`,warning `None`。
+- 新增回归测试 `test_read_artifact_previews_large_docx_with_embedded_media`:构造一个超过 1 MiB、带 `word/media/image1.png`
+  的 docx,`/api/workspace/artifacts/read` 返回 200 且抽出文档文本。
+- 新增回归测试 `test_read_artifact_returns_413_for_oversized_plain_text`:超过 1 MiB 的 Markdown 预览返回 413,证明普通文本限额
+  没有被绕开且不再 500。
+- `cd backend && uv run pytest -q tests/test_uploads.py::test_read_artifact_previews_large_docx_with_embedded_media tests/test_uploads.py::test_read_artifact_returns_413_for_oversized_plain_text tests/test_harness_tools.py::test_workspace_read_extracts_docx_pdf_and_image_metadata`
+  -> 3 passed。
+
+注意:当前环境没有 `python-docx` / LibreOffice,所以本轮验证的是 SlotFlow 产物面板预览链路与 ZIP/XML 结构校验,不是完整
+Word/Office 渲染兼容性测试。如果用户下载后仍被桌面 Office 拒绝打开,下一步应单独审查生成器写入的 OOXML relationship、
+content types、图片 MIME/尺寸与 Word 严格兼容性。
+
+## 38. 迭代 30(2026-07-09):DeepSeek thinking 工具循环必须回传 reasoning_content
+
+用户在长任务“生成到一半”时前端报错:
+
+`Error code: 400 - {'error': {'message': 'The `reasoning_content` in the thinking mode must be passed back to the API.', 'type': 'invalid_request_error', ...}}`
+
+这类错误发生在 DeepSeek thinking mode 的多步 ReAct 链路里:第一轮模型返回 assistant 消息和 tool call,SlotFlow
+执行工具后要把 `assistant(tool_calls=...) + ToolMessage(...)` 一起发回模型继续生成。DeepSeek 的 thinking mode
+要求上一条 assistant 的 `reasoning_content` 也必须随 assistant 消息原样回传,否则下一次 `/chat/completions` 请求会被
+400 拒绝。
+
+代码核对后的真实机制:
+
+- `langchain_deepseek.ChatDeepSeek._convert_chunk_to_generation_chunk` 会从流式
+  `choices[].delta.reasoning_content` 解析出 `AIMessageChunk.additional_kwargs["reasoning_content"]`。
+- SlotFlow 的 `_SlotFlowChatDeepSeek._convert_chunk_to_generation_chunk` 已经把它桥到
+  `{"type":"reasoning","reasoning": ...}` content block,所以前端 reasoning 流能看到思考。
+- `AIMessageChunk` 合并会把多段 `additional_kwargs["reasoning_content"]` 拼成完整字符串,所以 state 里的
+  `AIMessage.additional_kwargs` 有足够信息。
+- 但请求序列化走的是 `langchain_openai.chat_models.base._convert_message_to_dict`,它只写 OpenAI 标准字段
+  `content` / `tool_calls` / `function_call` / `audio`,不会把 DeepSeek 私有的 `reasoning_content` 写回 payload。
+- `langchain_deepseek.ChatDeepSeek._get_request_payload` 只把 assistant list content 压成字符串,也没有补
+  `reasoning_content`。于是工具执行后的第二次模型请求丢字段,触发 DeepSeek 400。
+
+修复在 `chat/runtime/models.py` 的 SlotFlow DeepSeek 子类里完成:
+
+- 新增 `inject_reasoning_content_into_deepseek_payload(payload, messages)`。
+- `_SlotFlowChatDeepSeek._get_request_payload(...)` 先调用父类构造 OpenAI-compatible payload,再用
+  `self._convert_input(input_).to_messages()` 与 `payload["messages"]` 按顺序对齐。
+- 对每个 source `AIMessage`,如果 `additional_kwargs["reasoning_content"]` 是非空字符串且 payload role 是
+  `assistant`,就把同名字段注入 payload message。
+- 这只影响实际携带 reasoning 的 assistant 消息;普通 DeepSeek flash / thinking off / custom relay 不产生该字段时不会额外写入。
+  `custom` 仍不发送 DeepSeek 的 `extra_body.thinking` 开关,但如果某个 OpenAI-compatible relay 本身返回 DeepSeek-like
+  `reasoning_content`,后续 tool loop 也能把它回传。
+
+为什么不在 projection 层修:projection 只负责把 LangGraph v3 流映射成前端 `AgentEvent`,不参与下一轮 provider 请求。
+真正丢字段的位置是 provider payload 序列化边界,所以必须在 `ChatDeepSeek` 子类的 `_get_request_payload` 修,否则
+前端/状态快照/工具消息怎么改都只是症状补丁。
+
+验证:
+
+- 新增 `test_deepseek_payload_passes_back_reasoning_content_after_tool_call`:构造
+  `HumanMessage -> AIMessage(tool_calls, additional_kwargs={"reasoning_content": ...}) -> ToolMessage`,直接调用
+  `DeepSeekChatModel._get_request_payload(...)`,断言 assistant payload 同时包含 `tool_calls` 和原始
+  `reasoning_content`。
+- 保留并通过 `test_deepseek_chat_model_preserves_reasoning_stream_delta`,确认流式 delta 仍进入 v3 reasoning content block。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_runtime.py::test_deepseek_chat_model_preserves_reasoning_stream_delta tests/test_runtime.py::test_deepseek_payload_passes_back_reasoning_content_after_tool_call`
+  -> 2 passed。
+
+仍需真实长任务人工复测:选择 DeepSeek pro/ultra 且 thinking on,让模型至少调用一次工具后继续生成;预期不再出现
+`reasoning_content ... must be passed back` 400。如果 live API 仍报错,下一步要抓实际 payload,检查是否存在某个 LangGraph
+节点替换/裁剪了 AIMessage 且没有保留 `additional_kwargs`。

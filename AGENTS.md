@@ -192,7 +192,10 @@ frontend/src/
   `{"type":"reasoning","summary":[{"type":"summary_text","text": ...}]}` block (NOT a flat
   string) under the default `responses/v1` output_version; Anthropic `thinking`. DeepSeek
   **and** the `custom` relay use the reasoning-bridging `ChatDeepSeek` subclass
-  (`runtime/models.py`) so `delta.reasoning_content` reaches the v3 channel; the **official
+  (`runtime/models.py`) so `delta.reasoning_content` reaches the v3 channel, and the same
+  subclass injects `AIMessage.additional_kwargs["reasoning_content"]` back into later
+  assistant payload messages so DeepSeek thinking-mode ReAct/tool follow-ups satisfy the
+  provider requirement to echo reasoning_content; the **official
   OpenAI** provider uses plain `ChatOpenAI` + `reasoning_effort` (no bridge, no manual
   `use_responses_api`). `custom` sends NO provider-specific thinking flags (unknown relay
   protocol — toggle control is best-effort). The single normalization entry is
@@ -257,9 +260,13 @@ frontend/src/
   `/artifacts/raw`) is allowed for `artifacts/` and `uploads/` only — other areas stay private.
   The reader/preview path handles source/text formats (`.ts`, `.tsx`, `.js`, `.jsx`, `.css`,
   `.sql`, `.graphql`, `.svg`, etc.), Markdown/HTML/PDF/images, `.docx`, `.xlsx`/`.xlsm`,
-  `.pptx`, and `.drawio`; Office Open XML files are extracted with lightweight ZIP/XML readers,
-  while old binary `.xls`/`.ppt` files get media-type metadata plus a friendly unsupported-binary
-  preview instead of raw JSON in the UI.
+  `.pptx`, and `.drawio`; Office Open XML files are extracted with lightweight ZIP/XML readers
+  and `.docx`/`.xlsx`/`.xlsm`/`.pptx` package previews get a larger 25 MiB package-size ceiling
+  because generated reports often exceed the generic 1 MiB text-read limit due to embedded images
+  while the preview reads only XML text parts. Plain oversized text previews still return HTTP 413
+  instead of a server 500 when they exceed `SLOTFLOW_WORKSPACE_MAX_READ_BYTES`, while old binary
+  `.xls`/`.ppt` files get media-type metadata plus a friendly unsupported-binary preview instead
+  of raw JSON in the UI.
   The same right panel also has a **终端** view backed by `terminal/routes.py` at
   `/api/terminal/ws`: it is a user-operated host PTY for manual setup/debugging, not an agent
   tool and not part of model tool schemas. The frontend renders PTY output with `@xterm/xterm`

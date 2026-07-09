@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -448,6 +448,40 @@ def test_deepseek_chat_model_preserves_reasoning_stream_delta() -> None:
     assert chunk.message.content == [{"type": "reasoning", "reasoning": "先理解问题"}]
     assert chunk.message.content_blocks == [{"type": "reasoning", "reasoning": "先理解问题"}]
     assert chunk.message.additional_kwargs["reasoning_content"] == "先理解问题"
+
+
+def test_deepseek_payload_passes_back_reasoning_content_after_tool_call() -> None:
+    """DeepSeek thinking mode rejects ReAct follow-ups unless reasoning_content is echoed."""
+
+    model = DeepSeekChatModel(
+        model="deepseek-v4-pro",
+        api_key="key",
+        base_url="https://api.deepseek.com",
+        streaming=True,
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    payload = model._get_request_payload(
+        [
+            HumanMessage(content="生成报告"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "sandbox_exec",
+                        "args": {"command": "python build.py"},
+                        "id": "call_build",
+                    }
+                ],
+                additional_kwargs={"reasoning_content": "我需要先生成文件。"},
+            ),
+            ToolMessage(content="ok", tool_call_id="call_build"),
+        ]
+    )
+
+    assistant_payload = payload["messages"][1]
+    assert assistant_payload["role"] == "assistant"
+    assert assistant_payload["tool_calls"][0]["id"] == "call_build"
+    assert assistant_payload["reasoning_content"] == "我需要先生成文件。"
 
 
 def test_load_runtime_config_from_env_reads_real_mcp_json_config(

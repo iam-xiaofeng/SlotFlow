@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -221,6 +222,45 @@ def test_read_artifact_returns_html_as_text(tmp_path: Path) -> None:
     }
 
 
+def test_read_artifact_previews_large_docx_with_embedded_media(tmp_path: Path) -> None:
+    """A docx can exceed the generic 1 MiB text limit because images live in the package."""
+
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/thread1/report.docx")
+    artifact_path.parent.mkdir(parents=True)
+    create_docx_with_large_media(artifact_path, "Docx preview still works")
+
+    assert artifact_path.stat().st_size > store.workspace.config.max_read_bytes
+
+    response = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "artifacts/thread1/report.docx"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "document"
+    assert body["metadata"] == {"format": "docx"}
+    assert body["content"] == "Docx preview still works"
+
+
+def test_read_artifact_returns_413_for_oversized_plain_text(tmp_path: Path) -> None:
+    """Oversized plain text previews should be a client-visible 413, not a 500."""
+
+    client, store = _client(tmp_path)
+    artifact_path = store.workspace.resolve_path("artifacts/too-large.md")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("x" * (store.workspace.config.max_read_bytes + 1), encoding="utf-8")
+
+    response = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "artifacts/too-large.md"},
+    )
+
+    assert response.status_code == 413
+    assert "workspace read exceeds max_read_bytes" in response.json()["detail"]
+
+
 def test_read_rejects_private_workspace_paths(tmp_path: Path) -> None:
     """Read/preview is limited to artifacts/ and uploads/; other areas stay private."""
 
@@ -261,6 +301,19 @@ def test_raw_artifact_serves_html_inline(tmp_path: Path) -> None:
     assert response.headers["content-type"].startswith("text/html")
     assert response.headers["content-disposition"] == "inline"
     assert response.text == "<button>zoom</button>"
+
+
+def create_docx_with_large_media(path: Path, text: str) -> None:
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>"
+        f"{text}"
+        "</w:t></w:r></w:p></w:body></w:document>"
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/media/image1.png", b"x" * (1024 * 1024 + 1))
 
 
 def test_raw_artifact_can_be_downloaded_as_attachment(tmp_path: Path) -> None:
