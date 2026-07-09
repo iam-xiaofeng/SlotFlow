@@ -22,6 +22,8 @@ from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.tools import ask_clarification_tool
 from app.harness.tools.registry import build_harness_tools
+import app.harness.tools.sandbox as sandbox_tools_module
+import app.harness.tools.workspace as workspace_tools_module
 from app.harness.tools.workspace import build_workspace_tools
 
 
@@ -39,6 +41,77 @@ def _bundle():
         run_id="run_tool",
         request=request,
     )
+
+
+@pytest.mark.asyncio
+async def test_workspace_tool_async_path_uses_threadpool(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    (root / "note.md").parent.mkdir(parents=True, exist_ok=True)
+    (root / "note.md").write_text("# hello", encoding="utf-8")
+    calls: list[str] = []
+    original_to_thread = workspace_tools_module.asyncio.to_thread
+
+    async def spy_to_thread(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_tools_module.asyncio, "to_thread", spy_to_thread)
+    tools = {
+        tool.name: tool
+        for tool in build_workspace_tools(SlotFlowSandboxConfig(workspace_root=root))
+    }
+
+    payload = json.loads(await tools["workspace_read"].ainvoke({"path": "note.md"}))
+
+    assert payload["content"] == "# hello"
+    assert "workspace_read" in calls
+
+
+@pytest.mark.asyncio
+async def test_sandbox_tool_async_path_uses_threadpool(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    original_to_thread = sandbox_tools_module.asyncio.to_thread
+
+    async def spy_to_thread(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    def fake_exec(self, command, timeout_seconds=None):
+        return {"ok": True, "command": command, "timeout_seconds": timeout_seconds}
+
+    monkeypatch.setattr(sandbox_tools_module.asyncio, "to_thread", spy_to_thread)
+    monkeypatch.setattr(sandbox_tools_module.LazyDockerSandbox, "exec", fake_exec)
+    tools = {
+        tool.name: tool
+        for tool in sandbox_tools_module.build_sandbox_tools(
+            SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace")
+        )
+    }
+
+    payload = json.loads(
+        await tools["sandbox_exec"].ainvoke(
+            {"command": "python -V", "timeout_seconds": 3}
+        )
+    )
+
+    assert payload == {"ok": True, "command": "python -V", "timeout_seconds": 3}
+    assert "sandbox_exec" in calls
+
+
+def test_workspace_search_caps_candidate_scan(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir(parents=True)
+    for index in range(1001):
+        text = "needle" if index == 1000 else "nothing"
+        (root / f"file_{index:04d}.txt").write_text(text, encoding="utf-8")
+    tools = {
+        tool.name: tool
+        for tool in build_workspace_tools(SlotFlowSandboxConfig(workspace_root=root))
+    }
+
+    payload = json.loads(tools["workspace_search"].invoke({"query": "needle"}))
+
+    assert payload["matches"] == []
 
 
 @pytest.mark.asyncio

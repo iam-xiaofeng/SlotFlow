@@ -2315,3 +2315,42 @@ ChatRepository/MemoryStore 抽成真正 async 接口。
 
 - `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run ruff check app/chat/routes.py app/memory/routes.py app/harness/graph.py app/harness/steps/long_term_memory.py tests/test_chat_routes.py tests/test_harness_memory.py` -> passed。
 - `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_chat_routes.py::test_chat_thread_creation_uses_threadpool_for_repository tests/test_harness_memory.py::test_async_memory_retrieval_uses_threadpool tests/test_harness_memory.py::test_memory_routes_use_threadpool_for_store tests/test_harness_memory.py::test_explicit_save_update_saves_latest_turn tests/test_harness_memory.py::test_harness_graph_runs_long_term_memory_middleware_async` -> 5 passed。
+
+## 40. 迭代 32(2026-07-09):async 边界审计第二阶段——工具层双 sync/async 实现
+
+继续处理用户要求的“每批优化”。第三批目标是模型工具层:这些工具本身仍要支持测试/脚本直接 `.invoke()`,但在
+LangGraph async graph 的工具节点里不能把 Docker subprocess、同步 httpx、工作区递归读文件这类阻塞操作压在事件循环上。
+
+修复:
+
+- `harness/tools/workspace.py`
+  - `workspace_list` / `workspace_read` / `workspace_tree` / `workspace_search` / `workspace_grep` /
+    `artifact_list` / `artifact_write` 改为 `StructuredTool.from_function(func=..., coroutine=...)`。
+  - 同步 `func` 保持原行为,所以现有 `.invoke()` 单测和脚本不需要重写。
+  - async `coroutine` 统一 `await asyncio.to_thread(func, ...)`,让 async ToolNode 路径把本地文件扫描、Office/PDF
+    解析、artifact 写入等同步工作放到 worker thread。
+  - `workspace_search` 增加候选处理上限:每次最多解析前 1000 个排序候选路径,再按 `max_results` 返回命中。这样大工作区
+    不会在一次工具调用里无边界地解析所有文件。
+- `harness/tools/network.py`
+  - `web_fetch` / `web_search` 改为双 sync/async `StructuredTool`。
+  - 同步实现继续使用既有 `httpx.Client`、SSRF/私网阻断、Bing -> DuckDuckGo Lite 回退解析。
+  - async 实现用 `asyncio.to_thread` 包住同步实现,避免工具网络请求占用 event loop。
+- `harness/tools/sandbox.py`
+  - `sandbox_exec` / `sandbox_artifact_copy` / `docker_engine_setup` 改为双 sync/async `StructuredTool`。
+  - Docker start/run/copy/host setup 仍走原 `LazyDockerSandbox` / `DockerEngineSetup` 逻辑,但 async graph 路径通过
+    `asyncio.to_thread` 执行 subprocess 边界。
+
+为什么不用一次性重写成纯 async HTTP/Docker:网络和 Docker helper 已经有较完整的同步安全边界、测试和错误包装。
+本轮优先保证 async graph 不被阻塞,同时保留 `.invoke()` 兼容性;后续若需要更细粒度取消/超时控制,可以再把网络层改成
+`httpx.AsyncClient`,Docker 层改成 asyncio subprocess。
+
+验证:
+
+- 新增 `test_workspace_tool_async_path_uses_threadpool`,断言 `workspace_read.ainvoke(...)` 经 `asyncio.to_thread`。
+- 新增 `test_sandbox_tool_async_path_uses_threadpool`,mock `LazyDockerSandbox.exec`,断言 `sandbox_exec.ainvoke(...)` 经
+  `asyncio.to_thread` 且不触碰真实 Docker。
+- 新增 `test_network_tool_async_path_uses_threadpool`,断言 `web_fetch.ainvoke(...)` 经 `asyncio.to_thread`。
+- 新增 `test_workspace_search_caps_candidate_scan`,构造 1001 个文件并把命中放在第 1001 个排序候选,确认一次搜索不解析超过
+  1000 个候选。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run ruff check app/harness/tools/workspace.py app/harness/tools/network.py app/harness/tools/sandbox.py tests/test_harness_tools.py tests/test_network_tools.py` -> passed。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_harness_tools.py::test_workspace_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_sandbox_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_workspace_search_caps_candidate_scan tests/test_network_tools.py::test_network_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_workspace_read_extracts_docx_pdf_and_image_metadata tests/test_network_tools.py tests/test_tool_registry.py` -> 17 passed。

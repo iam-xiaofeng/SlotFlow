@@ -178,7 +178,10 @@ frontend/src/
   deletes, and external CLI invocations behind the same boundary unless the implementation is truly
   async. Chat and memory SQLite stores are still synchronous internally, but async routes call them
   through `run_in_threadpool`; graph long-term-memory retrieval/save paths use `asyncio.to_thread`,
-  and the `prepare` graph node is async so memory search does not occupy the event loop.
+  and the `prepare` graph node is async so memory search does not occupy the event loop. Model-facing
+  workspace, network, and sandbox tools keep synchronous `.invoke()` compatibility for tests/scripts
+  while exposing async `StructuredTool` coroutines that dispatch blocking local file parsing,
+  `httpx.Client`, and Docker subprocess work through `asyncio.to_thread` during async graph runs.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
@@ -230,7 +233,9 @@ frontend/src/
   search-engine navigation/self links, decodes Bing `/ck/a?u=...` redirect targets, and decodes
   DuckDuckGo `/l/?uddg=...` targets before returning compact `{title,url}` results. This fallback is
   intentional because some networks terminate DuckDuckGo TLS with
-  `UNEXPECTED_EOF_WHILE_READING`; do not collapse it back to a single search URL.
+  `UNEXPECTED_EOF_WHILE_READING`; do not collapse it back to a single search URL. The tools are
+  dual sync/async `StructuredTool`s: `.invoke()` remains synchronous, while async graph execution
+  runs the blocking `httpx.Client` fetch/search in `asyncio.to_thread`.
 - **Chat scroll behavior**: `frontend/src/components/chat/message-list.tsx` anchors each newly
   sent user message near the top of the chat viewport while the assistant response streams below
   it, so a new turn starts where the user can read from the question downward instead of being
@@ -277,6 +282,10 @@ frontend/src/
   instead of a server 500 when they exceed `SLOTFLOW_WORKSPACE_MAX_READ_BYTES`, while old binary
   `.xls`/`.ppt` files get media-type metadata plus a friendly unsupported-binary preview instead
   of raw JSON in the UI.
+  Model-facing workspace tools are also dual sync/async `StructuredTool`s. The async path runs local
+  file listing/read/write/search work in `asyncio.to_thread`; `workspace_search` processes at most
+  the first 1000 sorted candidate paths per call before applying `max_results`, so a huge workspace
+  cannot force unbounded file parsing in one tool call.
   The same right panel also has a **终端** view backed by `terminal/routes.py` at
   `/api/terminal/ws`: it is a user-operated host PTY for manual setup/debugging, not an agent
   tool and not part of model tool schemas. The frontend renders PTY output with `@xterm/xterm`
@@ -321,7 +330,9 @@ frontend/src/
   covers apt/dnf/yum/pacman/apk/zypper hosts and daemon start tries systemctl/service/rc-service/
   direct dockerd. Do not replace `tool.status` with
   `get_stream_writer()` unless LangGraph v3 exposes a custom projection channel in the current
-  dependency version.
+  dependency version. Sandbox tools are dual sync/async `StructuredTool`s: direct `.invoke()` keeps
+  existing tests/scripts working, while async graph execution runs Docker subprocess operations in
+  `asyncio.to_thread`.
 - **Todo tool availability and enforcement**: `write_todos` is registered in every mode, including
   Flash, so explicit todo requests can drive the real visual panel instead of prose simulation.
   Todo planning is no longer a static system-prompt constraint: `harness/steps/todo.py` keeps the

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from app.harness.sandbox.config import SlotFlowSandboxConfig
 from app.harness.sandbox.docker import DockerSandboxError, LazyDockerSandbox
@@ -31,7 +32,6 @@ def build_sandbox_tools(
     )
     docker_engine_setup = DockerEngineSetup(config=sandbox_config)
 
-    @tool("sandbox_exec")
     def sandbox_exec(command: str, timeout_seconds: int | None = None) -> str:
         """Run code or scripts inside a lazy Docker sandbox.
 
@@ -63,7 +63,9 @@ def build_sandbox_tools(
             }
         return json.dumps(result, ensure_ascii=False)
 
-    @tool("sandbox_artifact_copy")
+    async def asandbox_exec(command: str, timeout_seconds: int | None = None) -> str:
+        return await asyncio.to_thread(sandbox_exec, command, timeout_seconds)
+
     def sandbox_artifact_copy(
         source_path: str,
         artifact_path: str = "",
@@ -95,7 +97,18 @@ def build_sandbox_tools(
             }
         return json.dumps(result, ensure_ascii=False)
 
-    @tool("docker_engine_setup")
+    async def asandbox_artifact_copy(
+        source_path: str,
+        artifact_path: str = "",
+        overwrite: bool = False,
+    ) -> str:
+        return await asyncio.to_thread(
+            sandbox_artifact_copy,
+            source_path,
+            artifact_path,
+            overwrite,
+        )
+
     def docker_engine_setup_tool(
         action: str = "check",
         confirm_host_install: bool = False,
@@ -120,4 +133,30 @@ def build_sandbox_tools(
         )
         return json.dumps(result, ensure_ascii=False)
 
-    return [sandbox_exec, sandbox_artifact_copy, docker_engine_setup_tool]
+    async def adocker_engine_setup_tool(
+        action: str = "check",
+        confirm_host_install: bool = False,
+    ) -> str:
+        return await asyncio.to_thread(
+            docker_engine_setup_tool,
+            action,
+            confirm_host_install,
+        )
+
+    return [
+        StructuredTool.from_function(
+            func=sandbox_exec,
+            coroutine=asandbox_exec,
+            name="sandbox_exec",
+        ),
+        StructuredTool.from_function(
+            func=sandbox_artifact_copy,
+            coroutine=asandbox_artifact_copy,
+            name="sandbox_artifact_copy",
+        ),
+        StructuredTool.from_function(
+            func=docker_engine_setup_tool,
+            coroutine=adocker_engine_setup_tool,
+            name="docker_engine_setup",
+        ),
+    ]
