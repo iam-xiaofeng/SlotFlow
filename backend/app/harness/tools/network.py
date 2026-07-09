@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import ipaddress
@@ -14,7 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import httpx
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from app.harness.sandbox import SlotFlowSandboxConfig
 
@@ -39,7 +40,6 @@ def build_network_tools(
     if not resolved_config.network_enabled:
         return []
 
-    @tool("web_fetch")
     def web_fetch(url: str) -> str:
         """Fetch a public HTTP/HTTPS URL and return bounded readable content."""
 
@@ -48,7 +48,9 @@ def build_network_tools(
             ensure_ascii=False,
         )
 
-    @tool("web_search")
+    async def aweb_fetch(url: str) -> str:
+        return await asyncio.to_thread(web_fetch, url)
+
     def web_search(query: str, max_results: int = 5) -> str:
         """Search the public web and return a compact list of result links."""
 
@@ -57,7 +59,21 @@ def build_network_tools(
             ensure_ascii=False,
         )
 
-    return [web_fetch, web_search]
+    async def aweb_search(query: str, max_results: int = 5) -> str:
+        return await asyncio.to_thread(web_search, query, max_results)
+
+    return [
+        StructuredTool.from_function(
+            func=web_fetch,
+            coroutine=aweb_fetch,
+            name="web_fetch",
+        ),
+        StructuredTool.from_function(
+            func=web_search,
+            coroutine=aweb_search,
+            name="web_search",
+        ),
+    ]
 
 
 def fetch_url(

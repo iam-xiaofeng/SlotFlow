@@ -22,12 +22,15 @@ from app.harness.memory.extractor import (
 )
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.steps.long_term_memory import (
+    aretrieve_memories,
     aexplicit_save_update,
     append_memory_system_message,
     build_extraction_conversation,
     build_turn_memory_candidate,
     retrieve_memories,
 )
+import app.harness.steps.long_term_memory as long_term_memory_module
+import app.memory.routes as memory_routes
 from app.harness.tools.memory import build_memory_tools
 from app.main import create_app
 
@@ -57,6 +60,29 @@ def test_memory_store_adds_lists_searches_and_dedupes_by_run(tmp_path: Path) -> 
     assert duplicate.id == first.id
     assert [item.id for item in store.list_memories(thread_id="thread_a")] == [first.id]
     assert store.search_memories(query="怎么回答更简洁", thread_id="thread_b")[0].id == first.id
+
+
+@pytest.mark.asyncio
+async def test_async_memory_retrieval_uses_threadpool(monkeypatch, tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    store.add_memory(thread_id="thread_memory", content="用户喜欢简洁回答")
+    calls: list[str] = []
+    original_to_thread = long_term_memory_module.asyncio.to_thread
+
+    async def spy_to_thread(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(long_term_memory_module.asyncio, "to_thread", spy_to_thread)
+
+    memories = await aretrieve_memories(
+        messages=[HumanMessage(content="怎么更简洁")],
+        context=_context(),
+        memory_store=store,
+    )
+
+    assert memories
+    assert "retrieve_memories" in calls
 
 
 def test_memory_store_normalization_is_hygiene_only(tmp_path: Path) -> None:
@@ -389,6 +415,23 @@ def test_memory_api_create_update_and_delete(tmp_path: Path) -> None:
 
     assert delete_response.status_code == 204
     assert client.get("/api/memory").json() == []
+
+
+def test_memory_routes_use_threadpool_for_store(monkeypatch, tmp_path: Path) -> None:
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    client = TestClient(create_app(runtime_config=SlotFlowRuntimeConfig(memory_store=store)))
+    calls: list[str] = []
+
+    async def spy_run_in_threadpool(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_routes, "run_in_threadpool", spy_run_in_threadpool)
+
+    response = client.post("/api/memory", json={"content": "用户喜欢简洁回答"})
+
+    assert response.status_code == 200
+    assert "add_memory" in calls
 
 
 @pytest.mark.asyncio

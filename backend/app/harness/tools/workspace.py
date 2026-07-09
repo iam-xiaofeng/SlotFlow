@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from app.harness.sandbox import SlotFlowSandboxConfig, build_slotflow_workspace
 from app.harness.sandbox.readers import plain_text_excerpt
@@ -26,7 +29,6 @@ def build_workspace_tools(
     workspace = build_slotflow_workspace(config)
     artifact_root = artifact_dir_for_thread(thread_id)
 
-    @tool("workspace_list")
     def workspace_list(path: str = ".") -> str:
         """List immediate files and directories under a SlotFlow workspace path."""
 
@@ -47,13 +49,11 @@ def build_workspace_tools(
             ensure_ascii=False,
         )
 
-    @tool("workspace_read")
     def workspace_read(path: str) -> str:
         """Read a text, markdown, docx, PDF, or image file from the workspace."""
 
         return json.dumps(workspace.read_file(path).model_dump(), ensure_ascii=False)
 
-    @tool("workspace_tree")
     def workspace_tree(path: str = ".", max_depth: int = 3, max_entries: int = 120) -> str:
         """List workspace files recursively with depth and result limits."""
 
@@ -72,7 +72,6 @@ def build_workspace_tools(
             ensure_ascii=False,
         )
 
-    @tool("workspace_search")
     def workspace_search(query: str, path: str = ".", max_results: int = 20) -> str:
         """Search readable workspace files for a literal text query."""
 
@@ -92,7 +91,6 @@ def build_workspace_tools(
             ensure_ascii=False,
         )
 
-    @tool("workspace_grep")
     def workspace_grep(pattern: str, path: str = ".", max_results: int = 20) -> str:
         """Grep readable SlotFlow workspace files for a literal pattern without Docker."""
 
@@ -112,7 +110,6 @@ def build_workspace_tools(
             ensure_ascii=False,
         )
 
-    @tool("artifact_list")
     def artifact_list() -> str:
         """List this conversation's artifacts (uploads + generated files)."""
 
@@ -137,17 +134,16 @@ def build_workspace_tools(
         )
 
     tools: list[BaseTool] = [
-        workspace_list,
-        workspace_read,
-        workspace_tree,
-        workspace_search,
-        workspace_grep,
-        artifact_list,
+        threaded_structured_tool(workspace_list, name="workspace_list"),
+        threaded_structured_tool(workspace_read, name="workspace_read"),
+        threaded_structured_tool(workspace_tree, name="workspace_tree"),
+        threaded_structured_tool(workspace_search, name="workspace_search"),
+        threaded_structured_tool(workspace_grep, name="workspace_grep"),
+        threaded_structured_tool(artifact_list, name="artifact_list"),
     ]
 
     if workspace.config.writes_enabled:
 
-        @tool("artifact_write")
         def artifact_write(path: str, content: str) -> str:
             """Write a user-visible file into this conversation's artifact folder.
 
@@ -170,9 +166,19 @@ def build_workspace_tools(
                 ensure_ascii=False,
             )
 
-        tools.append(artifact_write)
+        tools.append(threaded_structured_tool(artifact_write, name="artifact_write"))
 
     return tools
+
+
+def threaded_structured_tool(func: Callable[..., str], *, name: str) -> StructuredTool:
+    """Build a tool whose async path runs blocking local file work in a worker thread."""
+
+    async def coroutine(*args: Any, **kwargs: Any) -> str:
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    coroutine.__name__ = f"a{func.__name__}"
+    return StructuredTool.from_function(func=func, coroutine=coroutine, name=name)
 
 
 def list_workspace_tree(
@@ -233,7 +239,11 @@ def search_workspace_text(
         return []
 
     root = workspace.resolve_path(path)
-    candidates = [root] if root.is_file() else sorted(root.rglob("*"))
+    max_candidates = 1000
+    if root.is_file():
+        candidates = [root]
+    else:
+        candidates = sorted(root.rglob("*"))[:max_candidates]
     needle = stripped_query.lower()
     safe_max_results = max(1, min(max_results, 100))
     matches: list[dict[str, object]] = []

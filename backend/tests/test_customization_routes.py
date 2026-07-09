@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import app.skills.routes as skills_routes
 from app.chat.runtime import SlotFlowRuntimeConfig
 from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpConfigStore, SlotFlowMcpServerConfig
 from app.harness.skills import SlotFlowSkillsConfigStore
@@ -180,6 +181,42 @@ def test_install_skill_uses_skills_cli(
     assert response.json()["name"] == "research-helper"
     assert response.json()["source"] == "skills.sh"
     assert (runtime_config.skills_root / "research-helper" / "SKILL.md").is_file()
+
+
+def test_install_skill_runs_registry_install_in_threadpool(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    client, _ = _client(tmp_path)
+    calls: list[str] = []
+
+    async def spy_run_in_threadpool(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    def fake_run(args, *, cwd, check, capture_output, text, timeout):
+        _ = check, capture_output, text, timeout
+        skill_dir = Path(cwd) / ".agents" / "skills" / "research-helper"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: research-helper\ndescription: Research helper\n---\n\n# Research\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(skills_routes, "run_in_threadpool", spy_run_in_threadpool)
+    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run)
+
+    response = client.post(
+        "/api/skills/install",
+        json={
+            "package_url": "https://github.com/example/skills",
+            "skill_name": "research-helper",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "install_skill_from_registry" in calls
 
 
 def test_install_skill_groups_dependency_skills(

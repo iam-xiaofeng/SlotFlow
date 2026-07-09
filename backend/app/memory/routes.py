@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import get_memory_store
 from app.harness.memory import MemoryKind, MemoryNotFoundError, MemoryRecord
@@ -21,7 +22,8 @@ async def list_memories(
 ) -> list[MemoryRecord]:
     """List persisted long-term memories."""
 
-    return get_memory_store(request).list_memories(
+    return await run_in_threadpool(
+        get_memory_store(request).list_memories,
         thread_id=thread_id,
         kind=kind,
         limit=limit,
@@ -33,7 +35,8 @@ async def create_memory(body: MemoryCreateRequest, request: Request) -> MemoryRe
     """Create a user-managed long-term memory item."""
 
     try:
-        return get_memory_store(request).add_memory(
+        return await run_in_threadpool(
+            get_memory_store(request).add_memory,
             thread_id=body.thread_id,
             kind=body.kind,
             content=body.content,
@@ -55,7 +58,8 @@ async def update_memory(
     """Update one long-term memory item."""
 
     try:
-        return get_memory_store(request).update_memory(
+        return await run_in_threadpool(
+            get_memory_store(request).update_memory,
             memory_id,
             kind=body.kind,
             content=body.content,
@@ -75,7 +79,7 @@ async def delete_memory(memory_id: str, request: Request) -> Response:
     """Delete one long-term memory item."""
 
     try:
-        get_memory_store(request).delete_memory(memory_id)
+        await run_in_threadpool(get_memory_store(request).delete_memory, memory_id)
     except MemoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail="memory not found") from exc
     return Response(status_code=204)

@@ -49,6 +49,24 @@ def retrieve_memories(
     )
 
 
+async def aretrieve_memories(
+    *,
+    messages: list[Any],
+    context: RunContext,
+    memory_store: SlotFlowMemoryStore,
+    max_results: int = 5,
+) -> list[MemoryRecord]:
+    """Async wrapper for local SQLite memory search used by graph async nodes."""
+
+    return await asyncio.to_thread(
+        retrieve_memories,
+        messages=messages,
+        context=context,
+        memory_store=memory_store,
+        max_results=max_results,
+    )
+
+
 def append_memory_system_message(
     system_message: SystemMessage,
     *,
@@ -219,7 +237,8 @@ async def aextract_and_save(
     facts = await extractor.aextract(conversation)
     for fact in facts:
         try:
-            memory_store.add_memory(
+            await asyncio.to_thread(
+                memory_store.add_memory,
                 thread_id=context.thread_id,
                 source_run_id=None,
                 kind=fact["kind"],
@@ -264,7 +283,8 @@ async def aexplicit_save_update(
     saved: list[dict[str, Any]] = []
     for index, fact in enumerate(facts):
         try:
-            memory = memory_store.add_memory(
+            memory = await asyncio.to_thread(
+                memory_store.add_memory,
                 thread_id=context.thread_id,
                 # source_run_id 有唯一约束：首条携带 run 去重键，其余条不带。
                 source_run_id=context.run_id if index == 0 else None,

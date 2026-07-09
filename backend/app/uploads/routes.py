@@ -6,6 +6,7 @@ import mimetypes
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import get_upload_store
 from app.uploads.models import UploadedFileRecord
@@ -28,7 +29,8 @@ async def upload_file(
     store = get_upload_store(request)
     data = await file.read(store.max_upload_bytes + 1)
     try:
-        return store.save_upload(
+        return await run_in_threadpool(
+            store.save_upload,
             filename=file.filename or "upload.bin",
             content_type=file.content_type,
             data=data,
@@ -45,7 +47,7 @@ async def get_uploaded_file(
     """Return uploaded file metadata by file ID."""
 
     try:
-        return get_upload_store(request).get_upload(file_id)
+        return await run_in_threadpool(get_upload_store(request).get_upload, file_id)
     except UploadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="upload not found") from exc
 
@@ -59,8 +61,8 @@ async def raw_uploaded_file(
 
     store = get_upload_store(request)
     try:
-        record = store.get_upload(file_id)
-        target = store.get_upload_path(file_id)
+        record = await run_in_threadpool(store.get_upload, file_id)
+        target = await run_in_threadpool(store.get_upload_path, file_id)
     except UploadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="upload not found") from exc
     if not target.is_file():

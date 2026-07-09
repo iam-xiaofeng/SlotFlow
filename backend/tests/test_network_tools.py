@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 
+import app.harness.tools.network as network_tools_module
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.mcp import SlotFlowMcpConfigStore
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -21,6 +23,24 @@ def test_web_fetch_blocks_localhost_by_default() -> None:
     )
 
     assert result["error"] == "private or localhost network targets are blocked"
+
+
+@pytest.mark.asyncio
+async def test_network_tool_async_path_uses_threadpool(monkeypatch) -> None:
+    calls: list[str] = []
+    original_to_thread = network_tools_module.asyncio.to_thread
+
+    async def spy_to_thread(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(network_tools_module.asyncio, "to_thread", spy_to_thread)
+    tools = {tool.name: tool for tool in network_tools_module.build_network_tools()}
+
+    payload = await tools["web_fetch"].ainvoke({"url": "http://localhost:8000/health"})
+
+    assert "private or localhost" in payload
+    assert "web_fetch" in calls
 
 
 def test_web_fetch_returns_readable_text_from_html() -> None:

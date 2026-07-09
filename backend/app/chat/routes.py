@@ -23,6 +23,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.chat.models import (
     ChatStreamRequest,
@@ -66,14 +67,14 @@ async def create_thread(
     `runs/stream` 接口。
     """
 
-    return get_chat_repo(request).create_thread(title=body.title)
+    return await run_in_threadpool(get_chat_repo(request).create_thread, title=body.title)
 
 
 @router.get("/threads", response_model=list[ThreadRecord])
 async def list_threads(request: Request) -> list[ThreadRecord]:
     """列出所有会话，最近活动的排在前面。"""
 
-    return get_chat_repo(request).list_threads()
+    return await run_in_threadpool(get_chat_repo(request).list_threads)
 
 
 @router.get("/search", response_model=list[ThreadSearchResultRecord])
@@ -84,7 +85,7 @@ async def search_threads(
 ) -> list[ThreadSearchResultRecord]:
     """Search stored thread titles and message content."""
 
-    return get_chat_repo(request).search_threads(q, limit=limit)
+    return await run_in_threadpool(get_chat_repo(request).search_threads, q, limit=limit)
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadRecord)
@@ -93,7 +94,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadRecord:
 
     repo = get_chat_repo(request)
     try:
-        return repo.get_thread(thread_id)
+        return await run_in_threadpool(repo.get_thread, thread_id)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
@@ -104,7 +105,7 @@ async def delete_thread(thread_id: str, request: Request) -> None:
 
     repo = get_chat_repo(request)
     try:
-        repo.delete_thread(thread_id)
+        await run_in_threadpool(repo.delete_thread, thread_id)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
@@ -115,7 +116,7 @@ async def list_messages(thread_id: str, request: Request) -> list[MessageRecord]
 
     repo = get_chat_repo(request)
     try:
-        return repo.list_messages(thread_id)
+        return await run_in_threadpool(repo.list_messages, thread_id)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
@@ -144,26 +145,29 @@ async def stream_thread_run(
     adapter = get_agent_adapter(request)
 
     try:
-        repo.get_thread(thread_id)
+        await run_in_threadpool(repo.get_thread, thread_id)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
 
     upload_store = get_upload_store(request)
-    validate_uploaded_files_exist(body.files, store=upload_store)
+    await run_in_threadpool(validate_uploaded_files_exist, body.files, store=upload_store)
     if body.reuse_user_message_id:
-        reuse_user_message(
+        await run_in_threadpool(
+            reuse_user_message,
             repo,
             thread_id=thread_id,
             message_id=body.reuse_user_message_id,
             content=body.message,
         )
-    run = repo.create_run(
+    run = await run_in_threadpool(
+        repo.create_run,
         thread_id,
         model_name=body.model_name,
         mode=body.mode,
         agent_name=body.agent_name,
     )
-    uploaded_files = stage_uploaded_files(
+    uploaded_files = await run_in_threadpool(
+        stage_uploaded_files,
         body.files,
         run_id=run.id,
         store=upload_store,
@@ -174,7 +178,8 @@ async def stream_thread_run(
     ]
 
     if body.reuse_user_message_id is None:
-        repo.add_message(
+        await run_in_threadpool(
+            repo.add_message,
             thread_id,
             role="user",
             content=body.message,
@@ -193,7 +198,7 @@ async def stream_thread_run(
         request=body,
         uploaded_files=uploaded_files,
     )
-    repo.update_run_status(run.id, status="running")
+    await run_in_threadpool(repo.update_run_status, run.id, status="running")
 
     async def frames() -> AsyncIterator[str]:
         assistant_text_parts: list[str] = []
@@ -219,7 +224,8 @@ async def stream_thread_run(
                     snapshot_reasoning_content = latest_assistant_reasoning_content(event)
 
                 if event.event == "clarification.requested" and not clarification_saved:
-                    repo.add_message(
+                    await run_in_threadpool(
+                        repo.add_message,
                         thread_id,
                         role="assistant",
                         content=format_clarification_content(event.data),
@@ -232,7 +238,8 @@ async def stream_thread_run(
                     clarification_saved = True
 
                 if event.event == "run.error":
-                    repo.update_run_status(
+                    await run_in_threadpool(
+                        repo.update_run_status,
                         run.id,
                         status="failed",
                         error=str(event.data.get("message", "agent stream failed")),
@@ -250,7 +257,8 @@ async def stream_thread_run(
                         streamed_reasoning_content="".join(assistant_reasoning_parts),
                     )
                     if content and not clarification_saved:
-                        repo.add_message(
+                        await run_in_threadpool(
+                            repo.add_message,
                             thread_id,
                             role="assistant",
                             content=content,
@@ -266,16 +274,16 @@ async def stream_thread_run(
                             model_name=body.model_name,
                             provider=body.provider,
                         )
-                    repo.update_run_status(run.id, status="completed")
+                    await run_in_threadpool(repo.update_run_status, run.id, status="completed")
                     completed = True
 
                 yield encode_sse_event(event)
         except asyncio.CancelledError:
-            repo.update_run_status(run.id, status="cancelled")
+            await run_in_threadpool(repo.update_run_status, run.id, status="cancelled")
             raise
 
         if not completed:
-            repo.update_run_status(run.id, status="completed")
+            await run_in_threadpool(repo.update_run_status, run.id, status="completed")
 
     return StreamingResponse(
         frames(),
@@ -304,8 +312,8 @@ async def update_thread_title_after_first_exchange(
     model_name: str,
     provider: ModelProvider | None = None,
 ) -> None:
-    thread = repo.get_thread(thread_id)
-    messages = repo.list_messages(thread_id)
+    thread = await run_in_threadpool(repo.get_thread, thread_id)
+    messages = await run_in_threadpool(repo.list_messages, thread_id)
     title = await maybe_generate_thread_title(
         thread=thread,
         messages=messages,
@@ -313,7 +321,7 @@ async def update_thread_title_after_first_exchange(
         provider=provider,
     )
     if title and title != thread.title:
-        repo.update_thread_title(thread_id, title)
+        await run_in_threadpool(repo.update_thread_title, thread_id, title)
 
 
 def latest_assistant_reasoning_content(event: BusinessSseEvent) -> str | None:

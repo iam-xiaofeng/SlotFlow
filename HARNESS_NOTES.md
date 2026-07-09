@@ -2266,3 +2266,91 @@ content types、图片 MIME/尺寸与 Word 严格兼容性。
 仍需真实长任务人工复测:选择 DeepSeek pro/ultra 且 thinking on,让模型至少调用一次工具后继续生成;预期不再出现
 `reasoning_content ... must be passed back` 400。如果 live API 仍报错,下一步要抓实际 payload,检查是否存在某个 LangGraph
 节点替换/裁剪了 AIMessage 且没有保留 `additional_kwargs`。
+
+## 39. 迭代 31(2026-07-09):async 边界审计第一阶段——路由 I/O 与长期记忆 SQLite 出线程池
+
+用户要求审计“该 async 的地方是否异步”并逐批优化。第一、二批先处理不改变模型语义但会阻塞 FastAPI
+事件循环的本地 I/O 边界。
+
+### 39.1 路由层文件/CLI 操作
+
+原状:FastAPI route 是 `async def`,但里面直接执行本地同步文件写入/读取/删除或 Skills CLI 安装:
+
+- `uploads/routes.py::upload_file` 在 `await file.read(...)` 后直接 `SlotFlowUploadStore.save_upload`,后者写上传文件和
+  metadata JSON。
+- `workspace/routes.py::read_artifact` 直接 `SlotFlowWorkspace.read_file`,可能解析 `.docx`/`.xlsx`/`.pptx` ZIP、PDF、图片
+  metadata;`list_artifacts`/`delete_artifact` 也直接碰文件系统。
+- `skills/routes.py` 的 upload/install/update/reorder/delete 直接执行 `Path.write_bytes`,扫描 Skill 文件,
+  `subprocess.run` 调 skills.sh CLI,以及 `shutil.rmtree`/`move`/`copytree` 类操作。
+
+修复:这些 route 仍保持 async API,但慢的同步边界改走 `starlette.concurrency.run_in_threadpool`。这不是把底层 store
+改成真正 async,而是把本地阻塞 I/O 从 event loop 让到 Starlette 线程池。补了 spy 测试确认关键边界确实经过线程池:
+
+- `test_upload_file_persists_via_threadpool`
+- `test_read_artifact_uses_threadpool_for_structured_preview`
+- `test_install_skill_runs_registry_install_in_threadpool`
+
+### 39.2 ChatRepository / MemoryStore SQLite
+
+原状:`SQLiteChatRepository` 是同步 sqlite3,但已使用 `check_same_thread=False` + `RLock`,适合先以 threadpool 方式接入
+async route,不用一次性重写成 `aiosqlite`。`SlotFlowMemoryStore` 也是同步 SQLite,并且长期记忆检索/显式保存处在
+LangGraph async run 的 prepare/finalize 生命周期里。
+
+修复:
+
+- `chat/routes.py` 中 thread 创建/列表/搜索/读取/删除、stream run 初始化、SSE 完成/失败/取消时的 message/run 写入、
+  标题生成前后的 repo 读取/更新都改为 `run_in_threadpool`。
+- `memory/routes.py` 的 CRUD 改为 `run_in_threadpool`。
+- `harness/steps/long_term_memory.py` 新增 `aretrieve_memories(...)`,内部用 `asyncio.to_thread(retrieve_memories, ...)`。
+- `harness/graph.py::prepare` 从 sync node 改成 async node,这样长期记忆检索能 `await aretrieve_memories`。其余 prepare
+  的 runtime summary/uploads/skills preflight 仍是快速本地处理,后续如发现大目录/大文件扫描再独立外移。
+- `aexplicit_save_update` 和后台 `aextract_and_save` 的 `memory_store.add_memory` 改为 `asyncio.to_thread`,避免 LLM
+  抽取完成后的 SQLite 写入占用 event loop。
+
+为什么不是马上重写 async repository:当前 SQLite 仓库 API 被路由、测试和标题生成链路广泛使用;直接迁到 async repository
+会扩大改动面。先用线程池保护 event loop,保留同步 store 的锁/事务语义,是本轮低风险优化。未来若多用户并发增加,再把
+ChatRepository/MemoryStore 抽成真正 async 接口。
+
+验证:
+
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run ruff check app/chat/routes.py app/memory/routes.py app/harness/graph.py app/harness/steps/long_term_memory.py tests/test_chat_routes.py tests/test_harness_memory.py` -> passed。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_chat_routes.py::test_chat_thread_creation_uses_threadpool_for_repository tests/test_harness_memory.py::test_async_memory_retrieval_uses_threadpool tests/test_harness_memory.py::test_memory_routes_use_threadpool_for_store tests/test_harness_memory.py::test_explicit_save_update_saves_latest_turn tests/test_harness_memory.py::test_harness_graph_runs_long_term_memory_middleware_async` -> 5 passed。
+
+## 40. 迭代 32(2026-07-09):async 边界审计第二阶段——工具层双 sync/async 实现
+
+继续处理用户要求的“每批优化”。第三批目标是模型工具层:这些工具本身仍要支持测试/脚本直接 `.invoke()`,但在
+LangGraph async graph 的工具节点里不能把 Docker subprocess、同步 httpx、工作区递归读文件这类阻塞操作压在事件循环上。
+
+修复:
+
+- `harness/tools/workspace.py`
+  - `workspace_list` / `workspace_read` / `workspace_tree` / `workspace_search` / `workspace_grep` /
+    `artifact_list` / `artifact_write` 改为 `StructuredTool.from_function(func=..., coroutine=...)`。
+  - 同步 `func` 保持原行为,所以现有 `.invoke()` 单测和脚本不需要重写。
+  - async `coroutine` 统一 `await asyncio.to_thread(func, ...)`,让 async ToolNode 路径把本地文件扫描、Office/PDF
+    解析、artifact 写入等同步工作放到 worker thread。
+  - `workspace_search` 增加候选处理上限:每次最多解析前 1000 个排序候选路径,再按 `max_results` 返回命中。这样大工作区
+    不会在一次工具调用里无边界地解析所有文件。
+- `harness/tools/network.py`
+  - `web_fetch` / `web_search` 改为双 sync/async `StructuredTool`。
+  - 同步实现继续使用既有 `httpx.Client`、SSRF/私网阻断、Bing -> DuckDuckGo Lite 回退解析。
+  - async 实现用 `asyncio.to_thread` 包住同步实现,避免工具网络请求占用 event loop。
+- `harness/tools/sandbox.py`
+  - `sandbox_exec` / `sandbox_artifact_copy` / `docker_engine_setup` 改为双 sync/async `StructuredTool`。
+  - Docker start/run/copy/host setup 仍走原 `LazyDockerSandbox` / `DockerEngineSetup` 逻辑,但 async graph 路径通过
+    `asyncio.to_thread` 执行 subprocess 边界。
+
+为什么不用一次性重写成纯 async HTTP/Docker:网络和 Docker helper 已经有较完整的同步安全边界、测试和错误包装。
+本轮优先保证 async graph 不被阻塞,同时保留 `.invoke()` 兼容性;后续若需要更细粒度取消/超时控制,可以再把网络层改成
+`httpx.AsyncClient`,Docker 层改成 asyncio subprocess。
+
+验证:
+
+- 新增 `test_workspace_tool_async_path_uses_threadpool`,断言 `workspace_read.ainvoke(...)` 经 `asyncio.to_thread`。
+- 新增 `test_sandbox_tool_async_path_uses_threadpool`,mock `LazyDockerSandbox.exec`,断言 `sandbox_exec.ainvoke(...)` 经
+  `asyncio.to_thread` 且不触碰真实 Docker。
+- 新增 `test_network_tool_async_path_uses_threadpool`,断言 `web_fetch.ainvoke(...)` 经 `asyncio.to_thread`。
+- 新增 `test_workspace_search_caps_candidate_scan`,构造 1001 个文件并把命中放在第 1001 个排序候选,确认一次搜索不解析超过
+  1000 个候选。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run ruff check app/harness/tools/workspace.py app/harness/tools/network.py app/harness/tools/sandbox.py tests/test_harness_tools.py tests/test_network_tools.py` -> passed。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_harness_tools.py::test_workspace_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_sandbox_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_workspace_search_caps_candidate_scan tests/test_network_tools.py::test_network_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_workspace_read_extracts_docx_pdf_and_image_metadata tests/test_network_tools.py tests/test_tool_registry.py` -> 17 passed。
