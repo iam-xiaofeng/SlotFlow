@@ -7,7 +7,11 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from app.harness.sandbox.config import SlotFlowSandboxConfig
-from app.harness.sandbox.readers import WorkspaceReadResult, read_workspace_file
+from app.harness.sandbox.readers import (
+    WorkspaceReadResult,
+    detect_workspace_file_extension,
+    read_workspace_file,
+)
 
 
 class WorkspacePathError(ValueError):
@@ -23,6 +27,10 @@ class WorkspaceFileTooLargeError(ValueError):
 
 
 WorkspaceEntryKind = Literal["file", "directory"]
+
+
+OPENXML_PREVIEW_EXTENSIONS = {".docx", ".xlsx", ".xlsm", ".pptx"}
+OPENXML_PREVIEW_MAX_READ_BYTES = 25 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +95,12 @@ class SlotFlowWorkspace:
         """Read a workspace file into a model-readable structured payload."""
 
         target = self.resolve_path(relative_path)
-        self._assert_readable_file(target, relative_path)
+        extension = detect_workspace_file_extension(target)
+        self._assert_readable_file(
+            target,
+            relative_path,
+            max_bytes=self._max_read_bytes_for_structured_preview(extension),
+        )
         return read_workspace_file(
             target,
             relative_path=target.relative_to(self.root).as_posix(),
@@ -140,15 +153,35 @@ class SlotFlowWorkspace:
         target.write_bytes(data)
         return target
 
-    def _assert_readable_file(self, target: Path, relative_path: str | Path) -> None:
+    def _assert_readable_file(
+        self,
+        target: Path,
+        relative_path: str | Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         if not target.is_file():
             raise WorkspacePathError(f"workspace path is not a file: {relative_path!r}")
 
         size = target.stat().st_size
-        if size > self.config.max_read_bytes:
+        limit = max_bytes if max_bytes is not None else self.config.max_read_bytes
+        if size > limit:
             raise WorkspaceFileTooLargeError(
-                f"workspace read exceeds max_read_bytes: {size} > {self.config.max_read_bytes}",
+                f"workspace read exceeds max_read_bytes: {size} > {limit}",
             )
+
+    def _max_read_bytes_for_structured_preview(self, extension: str) -> int:
+        """Return the byte ceiling for structured preview extraction.
+
+        OpenXML documents often exceed the generic text-read limit because embedded
+        images live in the same ZIP package, while preview extraction only reads the
+        document XML parts. Give those formats a larger package-size ceiling without
+        weakening `read_text()` or plain text workspace reads.
+        """
+
+        if extension in OPENXML_PREVIEW_EXTENSIONS:
+            return max(self.config.max_read_bytes, OPENXML_PREVIEW_MAX_READ_BYTES)
+        return self.config.max_read_bytes
 
 
 def validate_relative_workspace_path(relative_path: str | Path) -> Path:

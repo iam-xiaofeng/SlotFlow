@@ -17,6 +17,7 @@ from app.chat.models import ModelProvider, RunContext
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from langchain_core.messages import BaseMessage
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import BaseMessageChunk
 
@@ -50,6 +51,38 @@ def message_has_content(message: "BaseMessageChunk") -> bool:
     if isinstance(content, list):
         return bool(content)
     return content is not None
+
+
+def inject_reasoning_content_into_deepseek_payload(
+    *,
+    payload: dict[str, Any],
+    messages: list["BaseMessage"],
+) -> None:
+    """Preserve DeepSeek thinking-mode reasoning on multi-step requests.
+
+    DeepSeek's thinking mode requires the assistant message's returned
+    ``reasoning_content`` to be passed back on later turns (notably the ReAct
+    request after tool results). ``langchain_deepseek`` parses streaming deltas
+    into ``AIMessage.additional_kwargs['reasoning_content']``, but the inherited
+    OpenAI message converter does not serialize that provider-specific field.
+    Patch the final chat/completions payload in-place so tool loops keep the
+    exact reasoning text DeepSeek expects.
+    """
+
+    from langchain_core.messages import AIMessage
+
+    payload_messages = payload.get("messages")
+    if not isinstance(payload_messages, list):
+        return
+
+    for source_message, payload_message in zip(messages, payload_messages, strict=False):
+        if not isinstance(source_message, AIMessage) or not isinstance(payload_message, dict):
+            continue
+        if payload_message.get("role") != "assistant":
+            continue
+        reasoning_content = source_message.additional_kwargs.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            payload_message["reasoning_content"] = reasoning_content
 
 
 def create_model_for_context(
@@ -170,6 +203,20 @@ def _deepseek_chat_model_class() -> type:
     from langchain_deepseek import ChatDeepSeek
 
     class _SlotFlowChatDeepSeek(ChatDeepSeek):
+        def _get_request_payload(
+            self,
+            input_: Any,
+            *,
+            stop: list[str] | None = None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            inject_reasoning_content_into_deepseek_payload(
+                payload=payload,
+                messages=self._convert_input(input_).to_messages(),
+            )
+            return payload
+
         def _convert_chunk_to_generation_chunk(
             self,
             chunk: dict[str, Any],

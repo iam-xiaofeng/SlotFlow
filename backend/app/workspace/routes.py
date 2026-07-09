@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from app.dependencies import get_chat_repo, get_upload_store
-from app.harness.sandbox import WorkspacePathError
+from app.harness.sandbox import WorkspaceFileTooLargeError, WorkspacePathError
 from app.harness.sandbox.workspace import SlotFlowWorkspace
 from app.workspace.models import (
     ThreadWorkspaceRecord,
@@ -78,6 +78,8 @@ async def read_artifact(
         result = workspace.read_file(path)
     except WorkspacePathError as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
+    except WorkspaceFileTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
 
     return WorkspaceReadRecord.model_validate(result.model_dump())
 
