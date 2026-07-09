@@ -176,7 +176,9 @@ frontend/src/
   update/reorder/delete filesystem or CLI operations (`skills/routes.py`) are dispatched through
   Starlette `run_in_threadpool`. Keep new route-level file parsing, large writes, recursive copies,
   deletes, and external CLI invocations behind the same boundary unless the implementation is truly
-  async.
+  async. Chat and memory SQLite stores are still synchronous internally, but async routes call them
+  through `run_in_threadpool`; graph long-term-memory retrieval/save paths use `asyncio.to_thread`,
+  and the `prepare` graph node is async so memory search does not occupy the event loop.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
@@ -410,7 +412,9 @@ frontend/src/
   fact learned in one conversation is retrievable in any other. Logic lives in
   `harness/steps/long_term_memory.py`, called from graph nodes: `prepare` retrieves and `pre_model`
   injects relevant memories as **background context, not commands** (the agent must still answer the
-  current question). Saving has three paths:
+  current question). The store remains synchronous SQLite, but graph async nodes call retrieval and
+  saves via `asyncio.to_thread` (`aretrieve_memories`, `aexplicit_save_update`, background
+  extraction) so local DB I/O does not block the event loop. Saving has three paths:
   (1) explicit `memory_save` tool — the model is nudged to call it proactively for durable facts;
   (2) an explicit `请记住X` synchronous fast-path in `finalize` (`explicit_save_update`); (3)
   **proactive background extraction** — `finalize` fires `memory/extractor.py`

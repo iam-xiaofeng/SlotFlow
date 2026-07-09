@@ -50,8 +50,8 @@ from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.long_term_memory import (
     aexplicit_save_update,
     append_memory_system_message,
+    aretrieve_memories,
     maybe_schedule_extraction,
-    retrieve_memories,
 )
 from app.harness.steps.runtime_summary import runtime_summary_update
 from app.harness.steps.skills_preflight import (
@@ -122,7 +122,7 @@ class _GraphInputs:
 def make_prepare_node(inputs: _GraphInputs):
     flags = inputs.config_flags
 
-    def prepare(
+    async def prepare(
         state: SlotFlowAgentState,
         runtime: Runtime[RunContext],
     ) -> dict[str, Any]:
@@ -169,7 +169,7 @@ def make_prepare_node(inputs: _GraphInputs):
         # long-term memory retrieval -> system prompt section (stored for pre_model)
         memories: list[Any] = []
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
-            memories = retrieve_memories(
+            memories = await aretrieve_memories(
                 messages=messages,
                 context=ctx,
                 memory_store=inputs.memory_store,

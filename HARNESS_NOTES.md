@@ -2266,3 +2266,52 @@ content types、图片 MIME/尺寸与 Word 严格兼容性。
 仍需真实长任务人工复测:选择 DeepSeek pro/ultra 且 thinking on,让模型至少调用一次工具后继续生成;预期不再出现
 `reasoning_content ... must be passed back` 400。如果 live API 仍报错,下一步要抓实际 payload,检查是否存在某个 LangGraph
 节点替换/裁剪了 AIMessage 且没有保留 `additional_kwargs`。
+
+## 39. 迭代 31(2026-07-09):async 边界审计第一阶段——路由 I/O 与长期记忆 SQLite 出线程池
+
+用户要求审计“该 async 的地方是否异步”并逐批优化。第一、二批先处理不改变模型语义但会阻塞 FastAPI
+事件循环的本地 I/O 边界。
+
+### 39.1 路由层文件/CLI 操作
+
+原状:FastAPI route 是 `async def`,但里面直接执行本地同步文件写入/读取/删除或 Skills CLI 安装:
+
+- `uploads/routes.py::upload_file` 在 `await file.read(...)` 后直接 `SlotFlowUploadStore.save_upload`,后者写上传文件和
+  metadata JSON。
+- `workspace/routes.py::read_artifact` 直接 `SlotFlowWorkspace.read_file`,可能解析 `.docx`/`.xlsx`/`.pptx` ZIP、PDF、图片
+  metadata;`list_artifacts`/`delete_artifact` 也直接碰文件系统。
+- `skills/routes.py` 的 upload/install/update/reorder/delete 直接执行 `Path.write_bytes`,扫描 Skill 文件,
+  `subprocess.run` 调 skills.sh CLI,以及 `shutil.rmtree`/`move`/`copytree` 类操作。
+
+修复:这些 route 仍保持 async API,但慢的同步边界改走 `starlette.concurrency.run_in_threadpool`。这不是把底层 store
+改成真正 async,而是把本地阻塞 I/O 从 event loop 让到 Starlette 线程池。补了 spy 测试确认关键边界确实经过线程池:
+
+- `test_upload_file_persists_via_threadpool`
+- `test_read_artifact_uses_threadpool_for_structured_preview`
+- `test_install_skill_runs_registry_install_in_threadpool`
+
+### 39.2 ChatRepository / MemoryStore SQLite
+
+原状:`SQLiteChatRepository` 是同步 sqlite3,但已使用 `check_same_thread=False` + `RLock`,适合先以 threadpool 方式接入
+async route,不用一次性重写成 `aiosqlite`。`SlotFlowMemoryStore` 也是同步 SQLite,并且长期记忆检索/显式保存处在
+LangGraph async run 的 prepare/finalize 生命周期里。
+
+修复:
+
+- `chat/routes.py` 中 thread 创建/列表/搜索/读取/删除、stream run 初始化、SSE 完成/失败/取消时的 message/run 写入、
+  标题生成前后的 repo 读取/更新都改为 `run_in_threadpool`。
+- `memory/routes.py` 的 CRUD 改为 `run_in_threadpool`。
+- `harness/steps/long_term_memory.py` 新增 `aretrieve_memories(...)`,内部用 `asyncio.to_thread(retrieve_memories, ...)`。
+- `harness/graph.py::prepare` 从 sync node 改成 async node,这样长期记忆检索能 `await aretrieve_memories`。其余 prepare
+  的 runtime summary/uploads/skills preflight 仍是快速本地处理,后续如发现大目录/大文件扫描再独立外移。
+- `aexplicit_save_update` 和后台 `aextract_and_save` 的 `memory_store.add_memory` 改为 `asyncio.to_thread`,避免 LLM
+  抽取完成后的 SQLite 写入占用 event loop。
+
+为什么不是马上重写 async repository:当前 SQLite 仓库 API 被路由、测试和标题生成链路广泛使用;直接迁到 async repository
+会扩大改动面。先用线程池保护 event loop,保留同步 store 的锁/事务语义,是本轮低风险优化。未来若多用户并发增加,再把
+ChatRepository/MemoryStore 抽成真正 async 接口。
+
+验证:
+
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run ruff check app/chat/routes.py app/memory/routes.py app/harness/graph.py app/harness/steps/long_term_memory.py tests/test_chat_routes.py tests/test_harness_memory.py` -> passed。
+- `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_chat_routes.py::test_chat_thread_creation_uses_threadpool_for_repository tests/test_harness_memory.py::test_async_memory_retrieval_uses_threadpool tests/test_harness_memory.py::test_memory_routes_use_threadpool_for_store tests/test_harness_memory.py::test_explicit_save_update_saves_latest_turn tests/test_harness_memory.py::test_harness_graph_runs_long_term_memory_middleware_async` -> 5 passed。

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import app.chat.routes as chat_routes
 from app.chat.agent_adapter import AgentEvent
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 from app.chat.repository import ChatRepository, SQLiteChatRepository
@@ -356,6 +357,23 @@ def _client(
             upload_store=upload_store,
         )
     )
+
+
+def test_chat_thread_creation_uses_threadpool_for_repository(monkeypatch) -> None:
+    repo = SQLiteChatRepository(":memory:")
+    client = _client(repo)
+    calls: list[str] = []
+
+    async def spy_run_in_threadpool(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(chat_routes, "run_in_threadpool", spy_run_in_threadpool)
+
+    response = client.post("/api/chat/threads", json={"title": "threadpool"})
+
+    assert response.status_code == 200
+    assert "create_thread" in calls
 
 
 def test_create_app_can_use_sqlite_repository_from_env(
