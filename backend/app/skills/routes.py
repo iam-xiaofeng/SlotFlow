@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.chat.runtime import (
     DEFAULT_SKILLS_ROOT,
@@ -70,28 +71,29 @@ async def upload_skill(
         if total_bytes > MAX_SKILL_FOLDER_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="skill folder too large")
 
-        target = root / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        await run_in_threadpool(write_uploaded_skill_file, root, relative_path, data)
         uploaded_paths.append(relative_path)
 
-    skills = uploaded_skills(root=root, uploaded_paths=uploaded_paths)
+    skills = await run_in_threadpool(uploaded_skills, root=root, uploaded_paths=uploaded_paths)
     if not skills:
         raise HTTPException(status_code=400, detail="uploaded folder must contain a valid SKILL.md")
 
     inferred_parents = infer_uploaded_skill_parents(skills)
     skill_names = {skill.name for skill in skills}
-    relocate_uploaded_skill_dependencies(root=root, skills=skills, parents=inferred_parents)
-    skills = [
-        skill
-        for skill in load_enabled_skills(skills_root=root, enabled_names=None)
-        if skill.name in skill_names
-    ]
+    await run_in_threadpool(
+        relocate_uploaded_skill_dependencies,
+        root=root,
+        skills=skills,
+        parents=inferred_parents,
+    )
+    loaded_skills = await run_in_threadpool(load_enabled_skills, skills_root=root, enabled_names=None)
+    skills = [skill for skill in loaded_skills if skill.name in skill_names]
     for skill in skills:
         if store is not None and store.is_protected(skill.name):
             raise HTTPException(status_code=403, detail="protected skill cannot be overwritten")
         if store is not None:
-            store.mark_skill(
+            await run_in_threadpool(
+                store.mark_skill,
                 skill.name,
                 enabled=True,
                 protected=False,
@@ -116,7 +118,8 @@ async def install_skill(
         raise HTTPException(status_code=503, detail="skills config store is not configured")
 
     try:
-        store.install_skill_from_registry(
+        await run_in_threadpool(
+            store.install_skill_from_registry,
             package_url=body.package_url,
             skill_name=body.skill_name,
         )
@@ -128,7 +131,7 @@ async def install_skill(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     refresh_runtime_skills_config(get_runtime_config(request))
-    skill = find_skill_by_name(root, body.skill_name)
+    skill = await run_in_threadpool(find_skill_by_name, root, body.skill_name)
     if skill is None:
         raise HTTPException(status_code=500, detail="installed skill is not readable")
     return skill_to_record(root, skill, store=store)
@@ -146,16 +149,16 @@ async def update_skill(
     store = get_skills_config_store(request)
     if store is None:
         raise HTTPException(status_code=503, detail="skills config store is not configured")
-    skill = find_skill_by_name(root, skill_name)
+    skill = await run_in_threadpool(find_skill_by_name, root, skill_name)
     if skill is None:
         raise HTTPException(status_code=404, detail="skill not found")
 
     if body.enabled is None and body.pinned is None:
         raise HTTPException(status_code=400, detail="no skill update fields provided")
     if body.enabled is not None:
-        store.set_enabled(skill.name, body.enabled)
+        await run_in_threadpool(store.set_enabled, skill.name, body.enabled)
     if body.pinned is not None:
-        store.set_pinned(skill.name, body.pinned)
+        await run_in_threadpool(store.set_pinned, skill.name, body.pinned)
     refresh_runtime_skills_config(get_runtime_config(request))
     return skill_to_record(root, skill, store=store)
 
@@ -172,17 +175,19 @@ async def reorder_skills(
     if store is None:
         raise HTTPException(status_code=503, detail="skills config store is not configured")
 
-    known_names = {skill.name for skill in load_enabled_skills(skills_root=root, enabled_names=None)}
+    loaded_skills = await run_in_threadpool(load_enabled_skills, skills_root=root, enabled_names=None)
+    known_names = {skill.name for skill in loaded_skills}
     unknown_names = [name for name in body.names if name not in known_names]
     if unknown_names:
         raise HTTPException(status_code=404, detail=f"skill not found: {unknown_names[0]}")
 
-    store.reorder_skills(body.names)
+    await run_in_threadpool(store.reorder_skills, body.names)
     refresh_runtime_skills_config(get_runtime_config(request))
+    loaded_skills = await run_in_threadpool(load_enabled_skills, skills_root=root, enabled_names=None)
     return sort_skill_records(
         [
             skill_to_record(root, skill, store=store)
-            for skill in load_enabled_skills(skills_root=root, enabled_names=None)
+            for skill in loaded_skills
         ]
     )
 
@@ -194,24 +199,29 @@ async def delete_skill(skill_name: str, request: Request) -> Response:
     root = get_skills_root(request)
     store = get_skills_config_store(request)
     if store is not None:
-        store.infer_missing_dependency_parents()
-    skill = find_skill_by_name(root, skill_name)
+        await run_in_threadpool(store.infer_missing_dependency_parents)
+    skill = await run_in_threadpool(find_skill_by_name, root, skill_name)
     if skill is None:
         raise HTTPException(status_code=404, detail="skill not found")
     if store is not None and store.is_protected(skill.name):
         raise HTTPException(status_code=403, detail="protected skill cannot be deleted")
 
-    skills_to_delete = skill_tree_for_delete(root=root, root_skill_name=skill.name, store=store)
+    skills_to_delete = await run_in_threadpool(
+        skill_tree_for_delete,
+        root=root,
+        root_skill_name=skill.name,
+        store=store,
+    )
     for candidate in skills_to_delete:
         if store is not None and store.is_protected(candidate.name):
             raise HTTPException(status_code=403, detail="protected skill cannot be deleted")
         ensure_skill_dir_under_root(root=root, skill_dir=candidate.skill_dir)
 
     for skill_dir in minimal_delete_dirs([candidate.skill_dir for candidate in skills_to_delete]):
-        shutil.rmtree(skill_dir)
+        await run_in_threadpool(shutil.rmtree, skill_dir)
     if store is not None:
         try:
-            store.remove_skill_tree_config(skill.name)
+            await run_in_threadpool(store.remove_skill_tree_config, skill.name)
         except ProtectedSkillError as exc:
             raise HTTPException(status_code=403, detail="protected skill cannot be deleted") from exc
     invalidate_skill_scan_cache()
@@ -231,6 +241,13 @@ def get_skills_root(request: Request) -> Path:
 
 def get_skills_config_store(request: Request) -> SlotFlowSkillsConfigStore | None:
     return get_runtime_config(request).skills_config_store
+
+
+def write_uploaded_skill_file(root: Path, relative_path: Path, data: bytes) -> Path:
+    target = root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return target
 
 
 def enable_skill_for_runtime(request: Request, skill_name: str) -> None:

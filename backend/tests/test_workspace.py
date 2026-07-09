@@ -11,6 +11,7 @@ from app.chat.repository import SQLiteChatRepository
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
+import app.workspace.routes as workspace_routes
 from app.workspace.routes import _collect_thread_uploads
 
 
@@ -90,6 +91,26 @@ def test_read_allows_uploads_but_not_other_areas(tmp_path: Path) -> None:
         "/api/workspace/artifacts/read", params={"path": "skills/secret/SKILL.md"}
     )
     assert blocked.status_code == 400
+
+
+def test_read_artifact_uses_threadpool_for_structured_preview(monkeypatch, tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _write(store, "artifacts/report.md", "# report")
+    calls: list[str] = []
+
+    async def spy_run_in_threadpool(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_routes, "run_in_threadpool", spy_run_in_threadpool)
+
+    response = client.get(
+        "/api/workspace/artifacts/read",
+        params={"path": "artifacts/report.md"},
+    )
+
+    assert response.status_code == 200
+    assert "read_file" in calls
 
 
 def test_collect_thread_uploads_dedupes_and_filters_missing(tmp_path: Path) -> None:

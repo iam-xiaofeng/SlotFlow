@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import app.uploads.routes as upload_routes
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.tools.workspace import build_workspace_tools
 from app.main import create_app
@@ -47,6 +48,25 @@ def test_upload_file_stores_bytes_and_metadata_under_workspace(tmp_path: Path) -
 
     assert stored_path.read_bytes() == b"hello"
     assert json.loads(metadata_path.read_text(encoding="utf-8"))["id"] == body["id"]
+
+
+def test_upload_file_persists_via_threadpool(monkeypatch, tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    calls: list[str] = []
+
+    async def spy_run_in_threadpool(func, /, *args, **kwargs):
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(upload_routes, "run_in_threadpool", spy_run_in_threadpool)
+
+    response = client.post(
+        "/api/uploads",
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert "save_upload" in calls
 
 
 def test_sanitize_upload_filename_preserves_suffix_for_chinese_docx_name() -> None:

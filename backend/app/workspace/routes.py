@@ -6,6 +6,7 @@ import mimetypes
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import get_chat_repo, get_upload_store
 from app.harness.sandbox import WorkspaceFileTooLargeError, WorkspacePathError
@@ -49,7 +50,7 @@ async def list_artifacts(
 
     workspace = get_upload_store(request).workspace
     try:
-        entries = workspace.list_entries(path)
+        entries = await run_in_threadpool(workspace.list_entries, path)
     except WorkspacePathError:
         return []
 
@@ -75,7 +76,7 @@ async def read_artifact(
 
     workspace = get_upload_store(request).workspace
     try:
-        result = workspace.read_file(path)
+        result = await run_in_threadpool(workspace.read_file, path)
     except WorkspacePathError as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
     except WorkspaceFileTooLargeError as exc:
@@ -97,7 +98,7 @@ async def raw_artifact(
 
     workspace = get_upload_store(request).workspace
     try:
-        target = workspace.resolve_path(path)
+        target = await run_in_threadpool(workspace.resolve_path, path)
     except WorkspacePathError as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
     if not target.is_file():
@@ -131,13 +132,13 @@ async def delete_artifact(
 
     workspace = get_upload_store(request).workspace
     try:
-        target = workspace.resolve_path(path)
+        target = await run_in_threadpool(workspace.resolve_path, path)
     except WorkspacePathError as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
     if not target.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
 
-    target.unlink()
+    await run_in_threadpool(target.unlink)
     return Response(status_code=204)
 
 

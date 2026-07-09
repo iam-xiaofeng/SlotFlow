@@ -169,6 +169,14 @@ frontend/src/
   documents. Their `bootstrap.sh` and `Makefile` sections must stay mechanically consistent
   with the actual root `bootstrap.sh`, root `Makefile`, `frontend/package.json`
   `packageManager`, and `backend/.env_example`; verify those files before changing setup docs.
+- **Async route boundary**: FastAPI endpoints remain `async`, but any potentially slow local
+  filesystem/subprocess work must not run directly on the event loop. Upload persistence
+  (`uploads/routes.py` -> `SlotFlowUploadStore.save_upload`), artifact directory/preview/delete
+  work (`workspace/routes.py` -> `SlotFlowWorkspace`), and user-managed Skills upload/install/
+  update/reorder/delete filesystem or CLI operations (`skills/routes.py`) are dispatched through
+  Starlette `run_in_threadpool`. Keep new route-level file parsing, large writes, recursive copies,
+  deletes, and external CLI invocations behind the same boundary unless the implementation is truly
+  async.
 - **Providers / models**: models are discovered at runtime from each configured provider's
   `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
   lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
