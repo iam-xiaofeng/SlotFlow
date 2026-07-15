@@ -76,6 +76,8 @@ const defaultMode: ChatMode = "pro";
 
 type QueuedChatMessage = {
   id: string;
+  /** 排队时所在的线程;null 表示"新聊天"视图。只在用户回到该线程时出队。 */
+  threadId: string | null;
   text: string;
   files: string[];
   metadata: Record<string, unknown>;
@@ -116,6 +118,7 @@ export function ChatApp() {
     todos,
     todoListKey,
     isStreaming,
+    runStates,
     error,
     sendMessage,
     cancelStream,
@@ -204,7 +207,14 @@ export function ChatApp() {
     }
     return filterThreadArtifacts(thread.id, artifactFiles, threadArtifactPaths, messages);
   }, [artifactFiles, messages, thread?.id, threadArtifactPaths]);
-  const isConversationBusy = isStreaming || isQueueDraining || queuedMessages.length > 0;
+  // 忙碌只作用于"当前查看的线程":其他线程后台生成时,这里的一切照常可用。
+  const activeThreadKey = thread?.id ?? null;
+  const queuedForActiveThread = useMemo(
+    () => queuedMessages.filter((message) => message.threadId === activeThreadKey),
+    [activeThreadKey, queuedMessages],
+  );
+  const isConversationBusy =
+    isStreaming || isQueueDraining || queuedForActiveThread.length > 0;
   const isRunSettingsLocked = messages.length > 0;
 
   const sendPreparedMessage = useCallback(
@@ -309,11 +319,17 @@ export function ChatApp() {
       return;
     }
 
-    const nextMessage = queuedMessages[0];
+    // 队列按线程归属出队:只发当前正在查看的线程的排队消息,切走的线程等用户回来再发。
+    const nextMessage = queuedMessages.find(
+      (message) => message.threadId === (thread?.id ?? null),
+    );
+    if (!nextMessage) {
+      return;
+    }
     isDrainingQueueRef.current = true;
     setIsQueueDraining(true);
     setQueuedMessages((current) =>
-      current[0]?.id === nextMessage.id ? current.slice(1) : current,
+      current.filter((message) => message.id !== nextMessage.id),
     );
     void sendPreparedMessage({
       text: nextMessage.text,
@@ -328,26 +344,24 @@ export function ChatApp() {
       isDrainingQueueRef.current = false;
       setIsQueueDraining(false);
     });
-  }, [isQueueDraining, isStreaming, isUploading, queuedMessages, sendPreparedMessage]);
+  }, [isQueueDraining, isStreaming, isUploading, queuedMessages, sendPreparedMessage, thread?.id]);
 
   async function handleSelectThread(nextThread: ThreadRecord) {
-    if (isConversationBusy || nextThread.id === thread?.id) {
+    if (nextThread.id === thread?.id) {
       return;
     }
 
+    // 允许在其他线程生成时切走查看;当前线程的运行继续在后台进行。
     const loaded = await loadThread(nextThread);
     if (loaded) {
       setAttachments([]);
-      setQueuedMessages([]);
       setSelectedArtifactPath(null);
-      clearError();
     }
   }
 
   function handleNewThread() {
     if (resetThread()) {
       setAttachments([]);
-      setQueuedMessages([]);
       setSelectedArtifactPath(null);
     }
   }
@@ -361,16 +375,14 @@ export function ChatApp() {
   }
 
   async function handleDeleteThread(targetThread: ThreadRecord) {
-    if (isConversationBusy) {
-      return;
-    }
-
     try {
       await deleteThread(targetThread.id);
+      setQueuedMessages((current) =>
+        current.filter((message) => message.threadId !== targetThread.id),
+      );
       if (targetThread.id === thread?.id) {
         resetThread();
         setAttachments([]);
-        setQueuedMessages([]);
         setSelectedArtifactPath(null);
       }
       setThreadArtifactPaths((current) => {
@@ -431,11 +443,12 @@ export function ChatApp() {
       thinking_enabled: selectedThinkingEnabled,
     };
 
-    if (isStreaming || isQueueDraining || queuedMessages.length > 0) {
+    if (isConversationBusy) {
       setQueuedMessages((current) => [
         ...current,
         {
           id: makeQueueId(),
+          threadId: thread?.id ?? null,
           text,
           files,
           metadata,
@@ -734,7 +747,7 @@ export function ChatApp() {
 
       const confirmed = window.confirm(
         `该文件属于另一个对话「${targetThread.title || "未命名会话"}」。\n` +
-          "切换过去查看吗？当前未发送的附件与排队消息会被清空。",
+          "切换过去查看吗？当前未发送的附件会被清空。",
       );
       if (!confirmed) {
         return;
@@ -746,8 +759,6 @@ export function ChatApp() {
         return;
       }
       setAttachments([]);
-      setQueuedMessages([]);
-      clearError();
     }
 
     setSelectedArtifactPath(file.path);
@@ -892,7 +903,7 @@ export function ChatApp() {
       fileInputRef={fileInputRef}
       isStreaming={isStreaming}
       isUploading={isUploading}
-      queuedMessages={queuedMessages.map((message, index) => ({
+      queuedMessages={queuedForActiveThread.map((message, index) => ({
         id: message.id,
         text: message.text,
         attachmentCount: message.attachmentCount,
@@ -936,10 +947,9 @@ export function ChatApp() {
       <Sidebar collapsible="icon" resizable className="border-r-0">
         <ThreadSidebar
           activeThreadId={thread?.id ?? null}
-          disabled={isConversationBusy}
+          disabled={false}
+          runStates={runStates}
           filteredThreads={threads}
-          artifacts={artifacts}
-          threadArtifactPaths={threadArtifactPaths}
           skills={skills}
           mcpServers={mcpServers}
           memories={memories}
@@ -951,13 +961,11 @@ export function ChatApp() {
           onDeleteMcpServer={(server) => void handleDeleteMcpServer(server)}
           onDeleteMemory={(memory) => void handleDeleteMemory(memory)}
           onDeleteSkill={(skill) => void handleDeleteSkill(skill)}
-          onDeleteArtifact={(artifact) => void handleDeleteArtifact(artifact)}
           onDeleteThread={(targetThread) => void handleDeleteThread(targetThread)}
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
           onInstallSkill={handleInstallSkillFromRegistry}
           onNewThread={handleNewThread}
           onOpenWorkspaceDirectory={handleOpenWorkspaceDirectory}
-          onPreviewArtifact={handlePreviewArtifact}
           onQueryChange={setThreadQuery}
           onPinMcpServer={(server, pinned) => void handlePinMcpServer(server, pinned)}
           onPinSkill={(skill, pinned) => void handlePinSkill(skill, pinned)}

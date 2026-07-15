@@ -157,10 +157,22 @@ export function MessageList({
         return 0;
       }
       const element = userMessageRefs.current.get(messageId);
-      const elementHeight = element?.getBoundingClientRect().height ?? 0;
-      return Math.ceil(Math.max(0, viewport.clientHeight - elementHeight + 24));
+      const endElement = messagesEndRef.current;
+      if (!element) {
+        return 0;
+      }
+      // 只补足"把本轮用户消息锚到视口顶部"所缺的高度:随着回答长高,spacer 同步收缩,
+      // 输出填满一屏后归零。否则流式期间往下滚会滚进一整屏空白。
+      const elementTop = element.getBoundingClientRect().top;
+      const contentBottom = endElement
+        ? endElement.getBoundingClientRect().bottom
+        : element.getBoundingClientRect().bottom;
+      const turnContentHeight = Math.max(0, contentBottom - elementTop);
+      return Math.ceil(
+        Math.max(0, viewport.clientHeight - turnContentHeight - 16),
+      );
     },
-    [getViewport],
+    [getViewport, messagesEndRef],
   );
 
   const scrollUserMessageToTurnTop = useCallback(
@@ -279,6 +291,7 @@ export function MessageList({
     return () => window.removeEventListener("resize", updateSpacerHeight);
   }, [
     latestUserTurnAnchorKey,
+    latestUserTurnAnchorRefreshKey,
     measureTurnAnchorSpacerHeight,
     userMessageSignature,
   ]);

@@ -4,24 +4,21 @@ import { useMemo, useState } from "react";
 import {
   Blocks,
   Brain,
-  FileText,
   Folder,
+  Loader2,
   MessageSquarePlus,
   MoreHorizontal,
   Plug,
   Trash2,
 } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -47,32 +44,29 @@ import {
   type SkillInstallRequest,
   type SkillRecord,
   type ThreadRecord,
-  type WorkspaceEntryRecord,
 } from "@/lib/chat-stream";
+import { type ThreadRunStatus } from "@/hooks/use-chat-stream";
 
-import { filterThreadArtifacts } from "./chat-format";
 import { DirectoryModal, type DirectoryTab } from "./directory-modal";
 import { SearchMenu } from "./chat-sidebar-search";
 import { SlotFlowLogo } from "./slotflow-logo";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
-  artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
+  runStates: Record<string, ThreadRunStatus>;
   filteredThreads: ThreadRecord[];
   isLoading: boolean;
   memories: MemoryRecord[];
   mcpServers: McpServerRecord[];
   query: string;
   skills: SkillRecord[];
-  threadArtifactPaths: Record<string, string[]>;
   threadListError: string | null;
   onAddHttpMcpServer: () => void;
   onAddMemory: (content: string, kind: MemoryKind) => void;
   onDeleteMcpServer: (server: McpServerRecord) => void;
   onDeleteMemory: (memory: MemoryRecord) => void;
   onDeleteSkill: (skill: SkillRecord) => void;
-  onDeleteArtifact: (artifact: WorkspaceEntryRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
   onInstallSkill: (request?: SkillInstallRequest) => Promise<void> | void;
@@ -80,7 +74,6 @@ type ThreadSidebarProps = {
   onOpenWorkspaceDirectory: () => void;
   onPinMcpServer: (server: McpServerRecord, pinned: boolean) => void;
   onPinSkill: (skill: SkillRecord, pinned: boolean) => void;
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onQueryChange: (query: string) => void;
   onReorderMcpServers: (names: string[]) => void;
   onReorderSkills: (names: string[]) => void;
@@ -92,22 +85,20 @@ type ThreadSidebarProps = {
 
 export function ThreadSidebar({
   activeThreadId,
-  artifacts,
   disabled,
+  runStates,
   filteredThreads,
   isLoading,
   memories,
   mcpServers,
   query,
   skills,
-  threadArtifactPaths,
   threadListError,
   onAddHttpMcpServer,
   onAddMemory,
   onDeleteMcpServer,
   onDeleteMemory,
   onDeleteSkill,
-  onDeleteArtifact,
   onDeleteThread,
   onEditMemory,
   onInstallSkill,
@@ -115,7 +106,6 @@ export function ThreadSidebar({
   onOpenWorkspaceDirectory,
   onPinMcpServer,
   onPinSkill,
-  onPreviewArtifact,
   onQueryChange,
   onReorderMcpServers,
   onReorderSkills,
@@ -207,13 +197,11 @@ export function ThreadSidebar({
         <ThreadHistory
           activeThreadId={activeThreadId}
           disabled={disabled}
+          runStates={runStates}
           filteredThreads={filteredThreads}
-          artifacts={artifacts}
           isLoading={isLoading}
           query={query}
-          threadArtifactPaths={threadArtifactPaths}
           threadListError={threadListError}
-          onPreviewArtifact={onPreviewArtifact}
           onSelectThread={onSelectThread}
           onDeleteThread={onDeleteThread}
         />
@@ -324,17 +312,46 @@ export function UserMenu() {
 
 type ThreadHistoryProps = {
   activeThreadId: string | null;
-  artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
+  runStates: Record<string, ThreadRunStatus>;
   filteredThreads: ThreadRecord[];
   isLoading: boolean;
   query: string;
-  threadArtifactPaths: Record<string, string[]>;
   threadListError: string | null;
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onSelectThread: (thread: ThreadRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
 };
+
+/** 线程行右侧的运行状态指示:转圈=生成中,蓝点=有新结果,闪烁蓝点=等待输入,红点=出错。 */
+function ThreadRunBadge({ status }: { status: ThreadRunStatus | undefined }) {
+  if (!status) {
+    return null;
+  }
+  if (status === "streaming") {
+    return (
+      <Loader2
+        className="size-3.5 shrink-0 animate-spin text-primary"
+        aria-label="正在生成"
+      />
+    );
+  }
+  return (
+    <span
+      aria-label={
+        status === "needs_input"
+          ? "等待你的输入"
+          : status === "error"
+            ? "运行出错"
+            : "有新结果"
+      }
+      className={cn(
+        "size-2 shrink-0 rounded-full",
+        status === "error" ? "bg-destructive" : "bg-primary",
+        status === "needs_input" && "animate-pulse",
+      )}
+    />
+  );
+}
 
 function groupThreadsByTime(threads: ThreadRecord[]): Array<{
   label: string;
@@ -363,21 +380,15 @@ function groupThreadsByTime(threads: ThreadRecord[]): Array<{
 
 function ThreadHistory({
   activeThreadId,
-  artifacts,
   disabled,
+  runStates,
   filteredThreads,
   isLoading,
   query,
-  threadArtifactPaths,
   threadListError,
-  onPreviewArtifact,
   onSelectThread,
   onDeleteThread,
 }: ThreadHistoryProps) {
-  const artifactFiles = useMemo(
-    () => artifacts.filter((artifact) => artifact.kind === "file"),
-    [artifacts],
-  );
   const groups = useMemo(
     () => groupThreadsByTime(filteredThreads),
     [filteredThreads],
@@ -407,11 +418,7 @@ function ThreadHistory({
                 </SidebarGroupLabel>
                 <SidebarMenu className="gap-0.5 pr-1">
                   {group.threads.map((item) => {
-                    const threadArtifacts = filterThreadArtifacts(
-                      item.id,
-                      artifactFiles,
-                      threadArtifactPaths,
-                    );
+                    const runStatus = runStates[item.id];
                     return (
                       <SidebarMenuItem key={item.id} className="group/thread-row">
                         <SidebarMenuButton
@@ -421,9 +428,15 @@ function ThreadHistory({
                           onClick={() => onSelectThread(item)}
                           className="h-8 rounded-md px-2 text-[0.94rem] font-normal text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-active:bg-accent data-active:font-medium data-active:text-accent-foreground"
                         >
-                          <span className="block min-w-0 truncate" title={item.title}>
+                          <span className="block min-w-0 flex-1 truncate" title={item.title}>
                             {item.title}
                           </span>
+                          {/* 悬停时菜单按钮会盖住行尾;徽标留在行尾但悬停时让位隐藏 */}
+                          {runStatus ? (
+                            <span className="ml-auto flex shrink-0 items-center pr-0.5 group-hover/thread-row:opacity-0">
+                              <ThreadRunBadge status={runStatus} />
+                            </span>
+                          ) : null}
                         </SidebarMenuButton>
                         <DropdownMenu>
                           <DropdownMenuTrigger
@@ -442,25 +455,20 @@ function ThreadHistory({
                             <span className="sr-only">更多操作</span>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="start" side="right" sideOffset={8} className="w-44 rounded-lg p-1.5">
-                            <ThreadArtifactSubmenu
-                              artifacts={threadArtifacts}
-                              onPreviewArtifact={onPreviewArtifact}
-                            />
-                            <DropdownMenuSeparator />
                             <DropdownMenuItem
-                              disabled={disabled}
+                              disabled={disabled || runStatus === "streaming"}
                               variant="destructive"
                               className="gap-2 rounded-md"
                               onClick={(event) => {
                                 event.preventDefault();
                                 event.stopPropagation();
-                                if (!disabled) {
+                                if (!disabled && runStatus !== "streaming") {
                                   onDeleteThread(item);
                                 }
                               }}
                             >
                               <Trash2 className="size-4" />
-                              删除
+                              {runStatus === "streaming" ? "生成中，不能删除" : "删除"}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -474,45 +482,6 @@ function ThreadHistory({
         </ScrollArea>
       </SidebarGroupContent>
     </SidebarGroup>
-  );
-}
-
-function ThreadArtifactSubmenu({
-  artifacts,
-  onPreviewArtifact,
-}: {
-  artifacts: WorkspaceEntryRecord[];
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
-}) {
-  return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger disabled={artifacts.length === 0}>
-        <FileText className="size-4" />
-        产物
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent className="w-72">
-        {artifacts.length === 0 ? (
-          <DropdownMenuItem disabled>这个聊天暂无产物</DropdownMenuItem>
-        ) : (
-          artifacts.map((artifact) => (
-            <DropdownMenuItem
-              key={artifact.path}
-              className="min-w-0 gap-2"
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onPreviewArtifact(artifact);
-              }}
-            >
-              <FileText className="size-4" />
-              <span className="min-w-0 truncate">
-                {artifact.path.replace(/^artifacts\//, "")}
-              </span>
-            </DropdownMenuItem>
-          ))
-        )}
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
   );
 }
 
