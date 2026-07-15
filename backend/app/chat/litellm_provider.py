@@ -12,22 +12,199 @@ os.environ["LITELLM_MODE"] = "PRODUCTION"
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import litellm  # noqa: E402
-from langchain_core.messages import BaseMessage  # noqa: E402
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage  # noqa: E402
 from langchain_litellm import ChatLiteLLM as _ChatLiteLLM  # noqa: E402
+from langchain_litellm.chat_models import litellm as _langchain_litellm_module  # noqa: E402
 from litellm.types.router import LiteLLM_Params  # noqa: E402
 
 
 CUSTOM_RELAY_USER_AGENT = os.environ.get("SLOTFLOW_RELAY_USER_AGENT") or "SlotFlow/1.0"
 
+# Reasoning metadata must never travel as assistant *content*: DeepSeek rejects the
+# block types outright and other providers would re-read their own reasoning as
+# prose. Opaque reasoning state rides the two top-level carriers LiteLLM
+# normalizes for every provider instead: ``reasoning_content`` (text) and
+# ``thinking_blocks`` (signed/opaque blocks).
+_REASONING_METADATA_BLOCK_TYPES = {"reasoning", "thinking", "redacted_thinking"}
+
+
+def _thinking_blocks_from_provider_payload(payload: Any) -> list[dict[str, Any]]:
+    """Read LiteLLM's typed ``thinking_blocks`` off a response message or delta."""
+
+    if isinstance(payload, dict):
+        blocks = payload.get("thinking_blocks")
+    else:
+        blocks = getattr(payload, "thinking_blocks", None)
+    if not isinstance(blocks, list):
+        return []
+    return [dict(block) for block in blocks if isinstance(block, dict)]
+
+
+def _convert_dict_to_message_preserving_thinking_blocks(_dict: Any) -> Any:
+    message = _upstream_convert_dict_to_message(_dict)
+    if isinstance(message, AIMessage):
+        blocks = _thinking_blocks_from_provider_payload(_dict)
+        if blocks:
+            message.additional_kwargs["thinking_blocks"] = blocks
+    return message
+
+
+def _convert_delta_to_message_chunk_preserving_thinking_blocks(
+    delta: Any, default_class: Any
+) -> Any:
+    chunk = _upstream_convert_delta_to_message_chunk(delta, default_class)
+    if isinstance(chunk, AIMessageChunk):
+        blocks = _thinking_blocks_from_provider_payload(delta)
+        if blocks:
+            chunk.additional_kwargs["thinking_blocks"] = blocks
+    return chunk
+
+
+# langchain-litellm 0.7.0 drops LiteLLM's typed ``thinking_blocks`` (the carrier for
+# Anthropic/Bedrock signed thinking and Gemini thought state) in both conversion
+# directions, which silently disables extended thinking on tool-loop continuations.
+# The converters are module globals resolved at call time by
+# ChatLiteLLM._stream/_astream/_create_chat_result, so restoring the field requires
+# rebinding them here. The dependency is pinned to ==0.7.0 and the provider
+# reasoning contract tests drive the real stream path, so an upgrade that moves
+# these internals fails loudly instead of silently dropping state again.
+_upstream_convert_dict_to_message = _langchain_litellm_module._convert_dict_to_message
+_upstream_convert_delta_to_message_chunk = (
+    _langchain_litellm_module._convert_delta_to_message_chunk
+)
+_langchain_litellm_module._convert_dict_to_message = (
+    _convert_dict_to_message_preserving_thinking_blocks
+)
+_langchain_litellm_module._convert_delta_to_message_chunk = (
+    _convert_delta_to_message_chunk_preserving_thinking_blocks
+)
+
+
+def _without_reasoning_metadata_blocks(content: list[Any]) -> list[Any] | str:
+    """Drop reasoning metadata blocks and re-normalize text-only content to a string.
+
+    Streamed chunk merging leaves assistant text as a BARE string inside the content
+    list (``[{"type": "thinking", ...}, "answer"]``). After filtering, ``["answer"]``
+    is invalid Chat Completions schema: LiteLLM's DeepSeek transform crashes on the
+    non-dict item, strict endpoints reject the request, and lenient relays silently
+    drop the text — the model then never sees its own earlier replies (observed as
+    lost short-term memory). Text-only content therefore collapses back to a plain
+    string; when structural blocks remain, the list keeps its original order with
+    bare strings wrapped as text blocks (same semantics as the upstream PR).
+    """
+
+    filtered: list[Any] = []
+    for block in content:
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            if block_type in _REASONING_METADATA_BLOCK_TYPES:
+                continue
+            if block_type == "non_standard":
+                value = block.get("value")
+                if (
+                    isinstance(value, dict)
+                    and value.get("type") in _REASONING_METADATA_BLOCK_TYPES
+                ):
+                    continue
+        filtered.append(block)
+
+    has_structural_blocks = any(
+        not (
+            isinstance(block, str)
+            or (isinstance(block, dict) and block.get("type") == "text")
+        )
+        for block in filtered
+    )
+    if has_structural_blocks:
+        # Empty text items are dropped rather than wrapped: several providers
+        # (e.g. Anthropic) reject empty text content blocks outright.
+        return [
+            {"type": "text", "text": block} if isinstance(block, str) else block
+            for block in filtered
+            if not _is_empty_text_item(block)
+        ]
+    return "".join(
+        block if isinstance(block, str) else str(block.get("text") or "")
+        for block in filtered
+    )
+
+
+def _is_empty_text_item(block: Any) -> bool:
+    if isinstance(block, str):
+        return not block
+    return (
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and not (block.get("text") or "")
+    )
+
+
+def _source_thinking_blocks(source: BaseMessage) -> list[Any]:
+    additional_kwargs = getattr(source, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return []
+    blocks = additional_kwargs.get("thinking_blocks")
+    if isinstance(blocks, list):
+        return blocks
+    provider_fields = additional_kwargs.get("provider_specific_fields")
+    if isinstance(provider_fields, dict):
+        fallback = provider_fields.get("thinking_blocks")
+        if isinstance(fallback, list):
+            return fallback
+    return []
+
+
+def _consolidated_thinking_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
+    """Collapse streamed thinking-block partials into complete provider blocks.
+
+    LiteLLM's streaming handlers emit an unsigned partial ``thinking`` block per
+    reasoning delta and repeat the *full* accumulated text on the block that
+    carries the signature, so signed blocks subsume the partials.
+    ``redacted_thinking`` blocks arrive complete. Unsigned text is only kept when
+    no signed block exists at all; providers that verify signatures drop it
+    downstream (`_drop_unsignable_thinking_blocks`).
+    """
+
+    complete: list[dict[str, Any]] = []
+    unsigned_parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "redacted_thinking":
+            complete.append({"type": "redacted_thinking", "data": block.get("data") or ""})
+        elif block_type == "thinking":
+            signature = block.get("signature")
+            if isinstance(signature, str) and signature:
+                complete.append(
+                    {
+                        "type": "thinking",
+                        "thinking": block.get("thinking") or "",
+                        "signature": signature,
+                    }
+                )
+            elif isinstance(block.get("thinking"), str) and block["thinking"]:
+                unsigned_parts.append(block["thinking"])
+    if complete:
+        return complete
+    if unsigned_parts:
+        return [{"type": "thinking", "thinking": "".join(unsigned_parts)}]
+    return []
+
 
 class ChatLiteLLM(_ChatLiteLLM):
-    """ChatLiteLLM with reasoning metadata removed from outbound content blocks.
+    """ChatLiteLLM with lossless reasoning-state handling at the request boundary.
 
-    langchain-litellm already forwards the canonical top-level ``reasoning_content``
-    field, but its serializer only removes ``thinking`` blocks. LangChain-normalized
-    ``reasoning`` blocks can therefore leak into a later provider request even though
-    they are metadata, not assistant text. DeepSeek rejects that block type before
-    LiteLLM can complete a thinking-mode tool loop.
+    Outbound assistant ``content`` carries only text/media. langchain-litellm
+    already forwards the top-level ``reasoning_content`` carrier but its
+    serializer only removes ``thinking`` blocks, so LangChain-normalized
+    ``reasoning`` blocks leak into provider requests (DeepSeek rejects the block
+    type before LiteLLM can complete a thinking-mode tool loop), and it drops the
+    ``thinking_blocks`` carrier entirely (LiteLLM then silently disables extended
+    thinking on Anthropic tool-loop continuations). This subclass strips the
+    metadata blocks from content and restores ``thinking_blocks`` — only ever
+    echoing back what the provider itself produced, with no per-provider
+    branches.
     """
 
     def _create_message_dicts(
@@ -36,31 +213,17 @@ class ChatLiteLLM(_ChatLiteLLM):
         stop: list[str] | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         message_dicts, params = super()._create_message_dicts(messages, stop)
-        for message in message_dicts:
-            content = message.get("content")
-            if message.get("role") != "assistant" or not isinstance(content, list):
+        for source, message in zip(messages, message_dicts):
+            if message.get("role") != "assistant":
                 continue
-
-            filtered_content: list[Any] = []
-            for block in content:
-                if isinstance(block, dict):
-                    block_type = block.get("type")
-                    if block_type in {
-                        "reasoning",
-                        "thinking",
-                        "redacted_thinking",
-                    }:
-                        continue
-                    if block_type == "non_standard":
-                        value = block.get("value")
-                        if isinstance(value, dict) and value.get("type") in {
-                            "reasoning",
-                            "thinking",
-                            "redacted_thinking",
-                        }:
-                            continue
-                filtered_content.append(block)
-            message["content"] = filtered_content or ""
+            content = message.get("content")
+            if isinstance(content, list):
+                message["content"] = _without_reasoning_metadata_blocks(content)
+            thinking_blocks = _consolidated_thinking_blocks(
+                _source_thinking_blocks(source)
+            )
+            if thinking_blocks:
+                message["thinking_blocks"] = thinking_blocks
         return message_dicts, params
 
 

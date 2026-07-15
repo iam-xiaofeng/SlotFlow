@@ -197,13 +197,19 @@ frontend/src/
   Gemini/Bedrock/Mistral/etc. lists or credential maps.
 - **Reasoning streaming**: every provider is constructed through the minimal
   `chat/litellm_provider.py::ChatLiteLLM` subclass of `langchain_litellm.ChatLiteLLM`.
-  The subclass has one provider-agnostic serialization fix: before a follow-up request it removes
-  assistant `reasoning`/`thinking` metadata blocks (including `non_standard` wrappers) from
-  `content`, while preserving the top-level `reasoning_content` field required by thinking-mode
-  tool loops. This works around the `langchain-litellm==0.7.0` leak where canonical LangChain
-  `reasoning` blocks reach DeepSeek and fail with `unknown variant reasoning, expected text`; do not
-  remove the top-level field or move the workaround into provider branches. LiteLLM owns provider
-  request translation, streamed
+  The boundary rule is provider-agnostic: outbound assistant `content` carries only text/media;
+  opaque reasoning state rides the two top-level carriers LiteLLM normalizes for every provider —
+  `reasoning_content` (text, forwarded by upstream) and `thinking_blocks` (signed/opaque blocks,
+  restored by the subclass and by two module-converter wrappers because
+  `langchain-litellm==0.7.0` drops the field in both directions). Before a follow-up request the
+  subclass removes assistant `reasoning`/`thinking` metadata blocks (including `non_standard`
+  wrappers) from `content` — canonical LangChain `reasoning` blocks otherwise reach DeepSeek and
+  fail with `unknown variant reasoning, expected text` — and consolidates streamed
+  `thinking_blocks` partials into complete signed blocks (missing `thinking_blocks` silently
+  disables Anthropic extended thinking on tool-loop continuations). Only state the provider itself
+  produced is echoed back; do not remove the top-level carriers, move the workaround into provider
+  branches, or bump `langchain-litellm` without `tests/test_provider_reasoning_contract.py` green.
+  LiteLLM owns provider request translation, streamed
   reasoning/thinking normalization, tool-call chunks, usage, and assistant reasoning round-trips
   after tool results. SlotFlow checks only LiteLLM's public
   `get_supported_openai_params(model=...)`: when `reasoning_effort` is supported, thinking ON sends
