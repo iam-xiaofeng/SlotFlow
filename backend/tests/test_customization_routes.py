@@ -355,12 +355,12 @@ def test_delete_parent_skill_removes_legacy_same_package_children(tmp_path: Path
     assert "company-valuation" not in listed_names
 
 
-def test_sequential_same_package_installs_nest_on_disk(
+def test_sequential_same_package_installs_stay_parallel(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """主 skill 运行中逐个追加同 package 的子 skill 时,子 skill 落进主 skill 的
-    dependencies/ 而不是散落根目录(根因 B)。"""
+    """同包的多个 skills 是平级的:顺序安装不做主/子推断,各自顶层落盘。收拢由
+    创建索引 skill(/api/skills/group 或 skill_group 工具)显式完成。"""
 
     client, runtime_config = _client(tmp_path)
 
@@ -383,53 +383,104 @@ def test_sequential_same_package_installs_nest_on_disk(
     monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-citation"))
     client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-citation"})
 
+    assert (runtime_config.skills_root / "nature-writing" / "SKILL.md").is_file()
+    assert (runtime_config.skills_root / "nature-citation" / "SKILL.md").is_file()
+
+
+def test_group_skills_creates_index_and_moves_members(tmp_path: Path) -> None:
+    """分组:索引 skill 由创建者命名/描述,成员整体移入 <索引>/dependencies/,
+    面板按磁盘结构分组,即使 config 丢失也不散(根因A)。"""
+
+    client, runtime_config = _client(tmp_path)
+    for name in ["nature-writing", "nature-citation"]:
+        skill_dir = runtime_config.skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+
+    response = client.post(
+        "/api/skills/group",
+        json={
+            "name": "nature-suite",
+            "description": "Nature 论文写作全流程套件",
+            "content": "# Nature Suite\n\nUse for Nature-style paper tasks.",
+            "members": ["nature-writing", "nature-citation"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "nature-suite"
     assert (
         runtime_config.skills_root
-        / "nature-writing"
+        / "nature-suite"
         / "dependencies"
-        / "nature-citation"
+        / "nature-writing"
         / "SKILL.md"
     ).is_file()
+
     listed = client.get("/api/skills").json()
     child = next(skill for skill in listed if skill["name"] == "nature-citation")
-    assert child["parent"] == "nature-writing"
+    assert child["parent"] == "nature-suite"
+
+    # config 全部抹掉后分组仍由磁盘结构还原。
+    runtime_config.skills_config_store.path.write_text('{"skills": {}}', encoding="utf-8")
+    listed = client.get("/api/skills").json()
+    child = next(skill for skill in listed if skill["name"] == "nature-citation")
+    assert child["parent"] == "nature-suite"
 
 
-def test_grouping_survives_config_wipe(monkeypatch, tmp_path: Path) -> None:
-    """skills.json 丢失后,分组仍由磁盘结构还原(根因 A):子 skill 目录嵌在主 skill
-    目录内即视为其子,不再塌成一堆顶层卡片。"""
-
+def test_group_skills_rejects_missing_member_and_duplicate_name(tmp_path: Path) -> None:
     client, runtime_config = _client(tmp_path)
-
-    def fake_run_for(skill_name: str):
-        def fake_run(args, *, cwd, check, capture_output, text, timeout):
-            _ = args, check, capture_output, text, timeout
-            skill_dir = Path(cwd) / ".agents" / "skills" / skill_name
-            skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text(
-                f"---\nname: {skill_name}\ndescription: {skill_name}\n---\n\n# {skill_name}\n",
-                encoding="utf-8",
-            )
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
-
-        return fake_run
-
-    package = "https://github.com/example/nature-skills"
-    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-writing"))
-    client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-writing"})
-    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-citation"))
-    client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-citation"})
-
-    # 抹掉 config,只留下受保护的 find-skills——模拟 ensure_default_find_skills 重写后丢失分组。
-    runtime_config.skills_config_store.path.write_text(
-        '{"skills": {"find-skills": {"enabled": true, "protected": true,'
-        ' "source": "skills.sh", "order": 0, "pinned": true}}}',
+    skill_dir = runtime_config.skills_root / "alpha"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: Alpha\n---\n\n# Alpha\n",
         encoding="utf-8",
     )
 
-    listed = client.get("/api/skills").json()
-    child = next(skill for skill in listed if skill["name"] == "nature-citation")
-    assert child["parent"] == "nature-writing"
+    missing = client.post(
+        "/api/skills/group",
+        json={"name": "suite", "description": "d", "members": ["nope"]},
+    )
+    assert missing.status_code == 404
+
+    conflict = client.post(
+        "/api/skills/group",
+        json={"name": "alpha", "description": "d", "members": ["alpha"]},
+    )
+    assert conflict.status_code == 400
+
+
+def test_grouped_members_are_excluded_from_skills_prompt(tmp_path: Path) -> None:
+    """分组的意义:prompt 只列索引 skill,成员不再逐个占模型注意力。"""
+
+    from app.harness.skills import build_skills_prompt, load_enabled_skills
+
+    client, runtime_config = _client(tmp_path)
+    for name in ["nature-writing", "nature-citation"]:
+        skill_dir = runtime_config.skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+    client.post(
+        "/api/skills/group",
+        json={
+            "name": "nature-suite",
+            "description": "Nature 论文写作全流程套件",
+            "members": ["nature-writing", "nature-citation"],
+        },
+    )
+
+    prompt = build_skills_prompt(
+        load_enabled_skills(skills_root=runtime_config.skills_root, enabled_names=None)
+    )
+    assert "nature-suite: Nature 论文写作全流程套件" in prompt
+    assert "nature-writing:" not in prompt
+    assert "nature-citation:" not in prompt
 
 
 def test_skill_pin_and_reorder_routes(tmp_path: Path) -> None:

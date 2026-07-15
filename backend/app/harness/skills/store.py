@@ -230,18 +230,13 @@ class SlotFlowSkillsConfigStore:
     ) -> Path:
         """Install one skill through the public skills CLI into skills_root.
 
-        同一个 package 的后续安装(主 skill 运行中逐个追加下载它的子 skills)会物理落进
-        主 skill 的 ``dependencies/`` 目录并标记 parent——分组由磁盘结构承载,config 丢失
-        也不会散落成一堆顶层卡片。
+        同包的多个 skills 是平级的,安装时不做主/子推断;需要收拢时由模型或用户创建
+        索引 skill(``create_skill_group``),分组关系由磁盘结构(dependencies/ 嵌套)承载。
         """
 
         if self.is_protected(skill_name):
             raise ProtectedSkillError(skill_name)
         validate_install_request(package_url=package_url, skill_name=skill_name)
-
-        parent_name = self.find_same_package_root(
-            package_url=package_url, skill_name=skill_name
-        )
 
         with tempfile.TemporaryDirectory(prefix="slotflow-skills-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -274,12 +269,7 @@ class SlotFlowSkillsConfigStore:
             if parse_skill_file(skill_file) is None:
                 raise RuntimeError("installed skill is missing a valid SKILL.md")
 
-            if parent_name is not None:
-                target_dir = (
-                    self.skills_root / parent_name / "dependencies" / skill_name
-                )
-            else:
-                target_dir = self.skills_root / skill_name
+            target_dir = self.skills_root / skill_name
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -303,9 +293,9 @@ class SlotFlowSkillsConfigStore:
             skill_name,
             enabled=True,
             protected=False,
-            source="skills.sh" if parent_name is None else "skills.sh dependency",
+            source="skills.sh",
             package_url=package_url,
-            parent=parent_name,
+            parent=None,
         )
         for child_name, _ in dependency_records:
             self.mark_skill(
@@ -316,29 +306,73 @@ class SlotFlowSkillsConfigStore:
                 package_url=package_url,
                 parent=skill_name,
             )
-        if parent_name is not None:
-            return self.skills_root / parent_name / "dependencies" / skill_name
         return self.skills_root / skill_name
 
-    def find_same_package_root(
-        self, *, package_url: str, skill_name: str
-    ) -> str | None:
-        """Return the root skill an install of ``skill_name`` should nest under.
+    def create_skill_group(
+        self,
+        *,
+        name: str,
+        description: str,
+        content: str,
+        member_dirs: dict[str, Path],
+    ) -> Path:
+        """Create an index skill that groups existing top-level skills.
 
-        规则:同 package_url、非 protected(排除 find-skills 这类注册表入口)、自身是根
-        (parent 为空)的既有 skill 即为主 skill。找不到则本次安装自己就是根。
+        没有天然的主/子 skill:一批平行 skills(比如一个论文流水线包的十几个技能)会把
+        system prompt 撑爆,所以由模型或用户写一个索引 skill(名称/描述/正文自定),成员
+        整体移动到 ``<索引>/dependencies/`` 下。分组由磁盘结构承载;prompt 只列顶层
+        skill,成员内容由模型按索引 skill 的指引按需读取。
         """
 
-        for name, config in sorted(self.configs().items(), key=skill_config_sort_key):
-            if (
-                name != skill_name
-                and not config.protected
-                and config.parent is None
-                and config.package_url == package_url
-                and config.source.startswith("skills.sh")
-            ):
-                return name
-        return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+            raise ValueError("group name must use letters, numbers, dots, underscores, or hyphens")
+        if not description.strip():
+            raise ValueError("group description must not be empty")
+        if not member_dirs:
+            raise ValueError("group needs at least one member skill")
+        if self.is_protected(name):
+            raise ProtectedSkillError(name)
+
+        group_dir = self.skills_root / name
+        if group_dir.exists():
+            raise ValueError(f"skill directory already exists: {name}")
+
+        resolved_root = self.skills_root.resolve()
+        for member_name, member_dir in member_dirs.items():
+            resolved = member_dir.resolve()
+            if self.is_protected(member_name):
+                raise ProtectedSkillError(member_name)
+            if resolved.parent != resolved_root:
+                raise ValueError(
+                    f"member skill is not a top-level skill directory: {member_name}"
+                )
+
+        dependencies_dir = group_dir / "dependencies"
+        dependencies_dir.mkdir(parents=True)
+        (group_dir / SKILL_FILE_NAME).write_text(
+            build_skill_group_markdown(
+                name=name,
+                description=description,
+                content=content,
+                member_dirs=member_dirs,
+            ),
+            encoding="utf-8",
+        )
+        for member_dir in member_dirs.values():
+            shutil.move(str(member_dir), str(dependencies_dir / member_dir.name))
+
+        configs = self.configs()
+        configs[name] = SkillConfig(
+            enabled=True,
+            protected=False,
+            source="group",
+            order=next_skill_order(configs),
+        )
+        for member_name in member_dirs:
+            current = configs.get(member_name, SkillConfig())
+            configs[member_name] = replace_skill_config(current, parent=name)
+        self._write_configs(configs)
+        return group_dir
 
     def _read_data(self) -> dict[str, Any]:
         if not self.path.is_file():
@@ -376,6 +410,55 @@ def validate_install_request(*, package_url: str, skill_name: str) -> None:
         raise ValueError("package_url must start with http:// or https://")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", skill_name):
         raise ValueError("skill_name must use letters, numbers, dots, underscores, or hyphens")
+
+
+def build_skill_group_markdown(
+    *,
+    name: str,
+    description: str,
+    content: str,
+    member_dirs: dict[str, Path],
+) -> str:
+    """Render the index skill's SKILL.md.
+
+    正文由创建者(模型或用户)提供;成员清单(名字/相对目录/描述)自动追加,保证无论正文
+    写得如何,模型都能从索引 skill 定位到每个成员的 SKILL.md。
+    """
+
+    member_lines = []
+    for member_name in sorted(member_dirs):
+        member_skill = parse_skill_file(
+            member_dirs[member_name] / SKILL_FILE_NAME
+        )
+        summary = member_skill.description.strip() if member_skill else ""
+        first_sentence = summary.split("\n")[0][:200] if summary else ""
+        member_lines.append(
+            f"- `{member_name}` — read `dependencies/{member_dirs[member_name].name}/SKILL.md`"
+            + (f" — {first_sentence}" if first_sentence else "")
+        )
+
+    body = content.strip() or f"# {name}\n\nIndex skill grouping related member skills."
+    # 用单行标量描述:parser 只认极简 frontmatter(不支持 YAML block scalar),否则索引
+    # skill 自身的 description 会被解析成空、整条 skill 被丢弃。
+    inline_description = " ".join(description.strip().split())
+    return (
+        "---\n"
+        f"name: {name}\n"
+        f"description: {_yaml_inline_quote(inline_description)}\n"
+        "---\n\n"
+        f"{body}\n\n"
+        "## Member skills\n\n"
+        "Each member below is a full skill. When this index skill matches the task,\n"
+        "read the relevant member's SKILL.md (path relative to this directory) and\n"
+        "follow it.\n\n" + "\n".join(member_lines) + "\n"
+    )
+
+
+def _yaml_inline_quote(value: str) -> str:
+    """Quote a one-line description so the minimal frontmatter parser reads it back whole."""
+
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def replace_skill_config(config: SkillConfig, **updates: Any) -> SkillConfig:

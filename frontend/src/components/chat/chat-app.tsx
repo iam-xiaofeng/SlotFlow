@@ -39,6 +39,7 @@ import {
   deleteMemory,
   deleteSkill,
   deleteThread,
+  groupSkills,
   installSkill,
   listThreads,
   reorderMcpServers,
@@ -560,6 +561,22 @@ export function ChatApp() {
     }
   }
 
+  async function handleGroupSkills(input: {
+    name: string;
+    description: string;
+    content: string;
+    members: string[];
+  }) {
+    try {
+      const group = await groupSkills(input);
+      await refreshSkills();
+      toast.success(`已合成索引 Skill：${group.name}`);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "group skills failed";
+      toast.error(message);
+    }
+  }
+
   async function handleToggleSkill(skill: SkillRecord, enabled: boolean) {
     try {
       await setSkillEnabled(skill.name, enabled);
@@ -964,6 +981,7 @@ export function ChatApp() {
           onDeleteThread={(targetThread) => void handleDeleteThread(targetThread)}
           onEditMemory={(memory, content, kind) => void handleEditMemory(memory, content, kind)}
           onInstallSkill={handleInstallSkillFromRegistry}
+          onGroupSkills={handleGroupSkills}
           onNewThread={handleNewThread}
           onOpenWorkspaceDirectory={handleOpenWorkspaceDirectory}
           onQueryChange={setThreadQuery}

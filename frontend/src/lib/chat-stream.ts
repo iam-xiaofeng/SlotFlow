@@ -430,6 +430,33 @@ export async function installSkill(
   return response.json() as Promise<SkillRecord>;
 }
 
+export type SkillGroupRequest = {
+  name: string;
+  description: string;
+  content?: string;
+  members: string[];
+};
+
+export async function groupSkills(
+  body: SkillGroupRequest,
+  options: ChatRequestOptions = {},
+): Promise<SkillRecord> {
+  const response = await fetch("/api/skills/group", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`group skills failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<SkillRecord>;
+}
+
 async function updateSkillState(
   skillName: string,
   body: {

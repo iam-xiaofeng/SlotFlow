@@ -69,6 +69,12 @@ type ThreadSidebarProps = {
   onDeleteSkill: (skill: SkillRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
+  onGroupSkills: (input: {
+    name: string;
+    description: string;
+    content: string;
+    members: string[];
+  }) => Promise<void> | void;
   onInstallSkill: (request?: SkillInstallRequest) => Promise<void> | void;
   onNewThread: () => void;
   onOpenWorkspaceDirectory: () => void;
@@ -101,6 +107,7 @@ export function ThreadSidebar({
   onDeleteSkill,
   onDeleteThread,
   onEditMemory,
+  onGroupSkills,
   onInstallSkill,
   onNewThread,
   onOpenWorkspaceDirectory,
@@ -146,6 +153,7 @@ export function ThreadSidebar({
         mcpServers={mcpServers}
         memories={memories}
         onInstallSkill={onInstallSkill}
+        onGroupSkills={onGroupSkills}
         onUploadSkill={onUploadSkill}
         onToggleSkill={onToggleSkill}
         onPinSkill={onPinSkill}

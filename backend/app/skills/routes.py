@@ -18,6 +18,7 @@ from app.dependencies import get_runtime_config
 from app.harness.skills import invalidate_skill_scan_cache, load_enabled_skills
 from app.harness.skills.store import ProtectedSkillError, SlotFlowSkillsConfigStore
 from app.skills.models import (
+    SkillGroupRequest,
     SkillInstallRequest,
     SkillRecord,
     SkillReorderRequest,
@@ -176,6 +177,51 @@ async def install_skill(
     if skill is None:
         raise HTTPException(status_code=500, detail="installed skill is not readable")
     return skill_to_record(root, skill, store=store)
+
+
+@router.post("/group", response_model=SkillRecord)
+async def group_skills(
+    body: SkillGroupRequest,
+    request: Request,
+) -> SkillRecord:
+    """Create an index skill that groups existing top-level skills under it.
+
+    没有天然的主/子 skill:一批平行 skills 会挤占 system prompt。此接口用创建者给定的
+    名字/描述/正文建一个索引 skill,把选中的成员整体移进 ``<索引>/dependencies/``,
+    prompt 从此只列这一个索引 skill,成员由模型经索引按需读取。
+    """
+
+    root = get_skills_root(request)
+    store = get_skills_config_store(request)
+    if store is None:
+        raise HTTPException(status_code=503, detail="skills config store is not configured")
+
+    member_dirs: dict[str, Path] = {}
+    for member_name in dict.fromkeys(body.members):
+        skill = await run_in_threadpool(find_skill_by_name, root, member_name)
+        if skill is None:
+            raise HTTPException(status_code=404, detail=f"member skill not found: {member_name}")
+        member_dirs[member_name] = skill.skill_dir
+
+    try:
+        await run_in_threadpool(
+            store.create_skill_group,
+            name=body.name,
+            description=body.description,
+            content=body.content,
+            member_dirs=member_dirs,
+        )
+    except ProtectedSkillError as exc:
+        raise HTTPException(status_code=403, detail="protected skill cannot be grouped") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    invalidate_skill_scan_cache()
+    refresh_runtime_skills_config(get_runtime_config(request))
+    group_skill = await run_in_threadpool(find_skill_by_name, root, body.name)
+    if group_skill is None:
+        raise HTTPException(status_code=500, detail="group skill is not readable")
+    return skill_to_record(root, group_skill, store=store)
 
 
 @router.patch("/{skill_name}", response_model=SkillRecord)

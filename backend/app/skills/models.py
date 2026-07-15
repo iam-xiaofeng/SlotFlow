@@ -28,6 +28,25 @@ class SkillReorderRequest(BaseModel):
     names: list[str] = Field(default_factory=list)
 
 
+class SkillGroupRequest(BaseModel):
+    """Create an index skill that groups existing top-level skills.
+
+    名称/描述/正文由创建者(前端用户或模型)提供;members 是要收拢的既有顶层 skill 名。
+    """
+
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=2000)
+    content: str = Field(default="", max_length=20000)
+    members: list[str] = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_portable(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+            raise ValueError("group name must use letters, numbers, dots, underscores, or hyphens")
+        return value
+
+
 class SkillInstallRequest(BaseModel):
     package_url: str = Field(
         default="https://github.com/vercel-labs/skills",
