@@ -146,7 +146,7 @@ function MessageBubbleImpl({
             className={cn(
               "min-w-0 break-words",
               isUser
-                ? "rounded-xl border border-border/60 bg-background/88 px-4 py-2.5 shadow-sm backdrop-blur"
+                ? "rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-primary-foreground shadow-sm"
                 : "w-full",
             )}
           >

@@ -1001,8 +1001,8 @@ export function ChatApp() {
             ) : null}
             {messages.length === 0 ? (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 pb-16 sm:px-6">
-                <div className="w-full max-w-3xl -translate-y-10">
-                  <EmptyState />
+                <div className="w-full max-w-3xl -translate-y-6">
+                  <EmptyState onSuggestion={(prompt) => void submitMessage(prompt)} />
                   {composer}
                 </div>
               </div>

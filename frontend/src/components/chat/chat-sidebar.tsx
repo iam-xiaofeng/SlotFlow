@@ -301,8 +301,8 @@ function CollapsedSidebarControls({
   return (
     <SidebarHeader className="px-4 py-3">
       <div className="flex h-12 items-center gap-4">
-        <div className="grid size-9 shrink-0 place-items-center rounded-full text-sm font-semibold text-blue-600">
-          S
+        <div className="grid size-9 shrink-0 place-items-center">
+          <SlotFlowLogo className="size-7 rounded-md" />
         </div>
         <div className="flex h-12 items-center gap-1 rounded-full border border-border/80 bg-background px-2 shadow-sm">
           <SidebarTrigger className="size-9 rounded-full text-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted" />
