@@ -2677,3 +2677,221 @@ LangGraph 不会阻止 LiteLLM 在第二次工具请求时重新做厂商转换�
 `_skip_responses_api_bridge=True`；DeepSeek/Qwen/custom/native provider 都使用同一
 ChatLiteLLM construction path。完整 `make verify` 已于 2026-07-15 重新执行并通过：
 后端 `348 passed, 1 skipped`，前端 typecheck 与 Next.js production build 通过。
+## 46. 迭代 38（2026-07-15）：reasoning 状态无损往返——归属结论 + thinking_blocks 载体
+
+### 46.1 §43 遗留问题的归属结论（逐行对照锁定依赖源码）
+
+§43 修复 DeepSeek `unknown variant reasoning` 后遗留两个问题：bug 归属（ChatLiteLLM 还是
+LiteLLM），以及「ChatLiteLLM 可能不是无损适配器」还缺哪些字段。结论：
+
+- **主因是 langchain-litellm 0.7.0（ChatLiteLLM）的双向转换不对称**（它是 LangChain 集成包，
+  不属于 LangGraph）。响应侧它把 `reasoning_content` 发明成 content 里的 `{"type":"thinking"}`
+  块（`chat_models/litellm.py:114-134, 200-204`）；langchain-core 1.4.7 无 `"litellm"` 翻译器，
+  best-effort 把该块规范化为 `{"type":"reasoning"}`（未识别块包成 `non_standard`）；出站只过滤
+  `tool_use/tool_call/thinking/redacted_thinking` 四种（`litellm.py:346-352`），漏掉规范化形态。
+  发明了表示却不对称回收。
+- **LiteLLM 1.92.0 非根因**：输入契约是 OpenAI 格式消息，reasoning 块本不该出现在 content。
+  `convert_content_list_to_str` 只拼 `text` 字段、纯 reasoning 列表得空串于是原样发出
+  （`prompt_templates/common_utils.py:84-94, 163-184`）——只是未做防御。它反而已把**所有**厂商
+  opaque reasoning state 归一到 OpenAI-like 消息的两个顶层载体：`reasoning_content`（文本）与
+  `thinking_blocks`（带 signature 的不透明块）；Gemini thought signature 还编码进 `tool_call_id`
+  （`prompt_templates/factory.py:1188-1207`）随 tool_calls 自动往返。
+- **LangGraph 无关**，只忠实持久化消息。
+
+### 46.2 第二个缺口：thinking_blocks 载体整体丢失（比 DeepSeek 更隐蔽）
+
+ChatLiteLLM 0.7.0 在两个方向都丢弃 LiteLLM 的 `thinking_blocks`。后果不是报错：LiteLLM 发现
+thinking 开启但历史 assistant 消息缺 `thinking_blocks` 时**静默关闭该请求的 extended thinking**
+（`llms/anthropic/chat/transformation.py:1759-1776`，仅 verbose 警告）。即 Anthropic/Bedrock
+thinking + 工具续轮会悄悄退化成"无思考续轮"。LiteLLM 请求侧还原已就绪：assistant 顶层
+`thinking_blocks` 会被正确重建进原生请求，且无签名块会被丢弃（`factory.py:2322-2339, 2530-2688`）。
+
+流式形状（`llms/anthropic/chat/handler.py:654-696`）：每个 thinking delta 产出**无签名分片**
+`{"type":"thinking","thinking":"<partial>"}`；signature_delta 到达时产出**自带全量累积文本**的
+签名块；`redacted_thinking` 在 content_block_start 一次性完整产出。langchain-core 的 chunk 合并
+对无 `index` 列表元素是顺序追加（`utils/_merge.py::merge_lists`），分片全部保留进
+`additional_kwargs`。
+
+### 46.3 修法：边界原则从「只删」升级为「载体往返」
+
+`chat/litellm_provider.py` 现在实现统一规则：**assistant content 只携带 text/media；opaque
+reasoning state 走顶层载体；只回传 provider 自己产出过的状态；无厂商分支**。
+
+1. 响应侧捕获：包装 langchain-litellm 的模块级 `_convert_dict_to_message` /
+   `_convert_delta_to_message_chunk`（它们被 `_stream/_astream/_create_chat_result` 以模块全局
+   引用，call-time 解析，重绑即生效），把 message/delta 的 typed `thinking_blocks` 存进
+   `additional_kwargs["thinking_blocks"]`。依赖精确锁定 `langchain-litellm==0.7.0`；契约测试驱动
+   真实 astream 路径，升级若挪动内部实现会红灯而不是静默丢字段。
+2. 请求侧还原：`ChatLiteLLM._create_message_dicts` 覆盖里 `zip(messages, message_dicts)` 对齐，
+   assistant 消息做两件事：content 清理（§43 原逻辑，`_without_reasoning_metadata_blocks`）+
+   `_consolidated_thinking_blocks` 合并分片后写回 assistant dict 顶层。合并规则：有签名块/
+   redacted 块则取它们（签名块已含全量文本，无签名分片是被 subsume 的过程量）、全部无签名才拼接
+   成单块（下游 `_drop_unsignable_thinking_blocks` 兜底）。另接受
+   `additional_kwargs["provider_specific_fields"]["thinking_blocks"]` 作为 fallback 来源。
+3. 对称性保证安全：DeepSeek/OpenAI/多数 relay 从不产出 `thinking_blocks` → 该键永不出现在其
+   payload；产出过的（Anthropic/Bedrock/Gemini/代理 Anthropic 的 relay）才会收到回传。
+
+### 46.4 契约测试矩阵（按载体形状，不按厂商名）
+
+`tests/test_provider_reasoning_contract.py` 新增 6 例，断言到最终 provider payload 字段级：
+
+- 签名块流式往返（Anthropic/Bedrock 形状）：无签名分片 + 签名全量块 + tool call 经真实
+  `astream` → 合并 chunk 捕获载体 → 续轮 payload 顶层 `thinking_blocks` 只含签名块、content 空、
+  `reasoning_content`/tool_call id 原样。
+- 非流式响应捕获；分片合并优先完整块且保序（含 redacted）；全无签名时拼接单块。
+- Gemini 形状：`__thought__` 后缀 tool_call_id 逐字节往返。
+- OpenAI CC 形状：无 reasoning 状态时 payload 完全不被改写（无新键、content 原样）。
+- §43 原 DeepSeek 往返/泄漏用例保持，并补断言「无 thinking_blocks 输入时不注入该键」。
+
+### 46.5 上游行动
+
+**已提交（2026-07-15）**：issue
+https://github.com/langchain-ai/langchain-litellm/issues/222 + PR
+https://github.com/langchain-ai/langchain-litellm/pull/223（`Fixes #222`，上游 CI 全绿：
+Python 3.10-3.13 测试/format/lockfile/CodeQL）。PR 在上游代码里完成同等修复（过滤
+`reasoning`/`non_standard`、text-only 折叠、`thinking_blocks` 双向往返 + 分片合并），含 8 个新
+单测；详见 `docs/upstream-reasoning-roundtrip-drafts.md`（已回填真实链接）。归属确认时上游状态：
+PyPI 最新即 0.7.0，main 同样存在缺口；相关前案 #71/#85（非流式 reasoning_content 修复、但引入
+content 注入）、#139/#159（thinking 块过滤，不含 reasoning 形态）、#216（open：注入设计本身）、
+#218（open PR：流式分片合并）。上游合入发布后：升级依赖、删除本地对应 wrapper/过滤、契约矩阵
+作为回归门。
+
+### 46.6 不变量（勿回归）
+
+- opaque reasoning state 只走顶层载体（`reasoning_content`/`thinking_blocks`），content 不携带
+  reasoning 元数据；只回传 provider 自己产出过的状态；不加 `if provider ==` 分支。
+- `langchain-litellm` 升级必须过 `tests/test_provider_reasoning_contract.py`（模块 wrapper 依赖
+  0.7.0 内部结构，靠该矩阵红灯拦截）。
+- 新增 provider/载体形状时先在契约矩阵加对应用例，再动边界代码。
+- tool_call id 必须逐字节保留（Gemini thought signature 寄生其中）。
+
+### 46.7 验证
+
+- `uv run pytest tests/test_provider_reasoning_contract.py -q` → 16 passed（含 6 新例）。
+- `uv run pytest tests/test_runtime.py tests/test_agent_adapter.py tests/test_model_catalog.py -q`
+  → 80 passed。
+- `uv run ruff check app tests` → passed。
+- `PATH="$HOME/.volta/bin:$PATH" make verify` → 后端 `354 passed, 1 skipped`，前端 typecheck 与
+  Next.js production build 通过；`git diff --check` 通过。
+- **DeepSeek live smoke 已完成（2026-07-15 晚,用户授权付费调用）**：throwaway 探针
+  （job tmp,未提交）走生产 `build_agent_adapter`,全新 thread,`deepseek/deepseek-v4-pro`
+  + `thinking_enabled=True`,10/10 PASS：
+  - 轮 1：thinking 流出（1732 字符 reasoning delta）→ 真实调用 `artifact_write` → 工具续轮
+    **无任何 400**（`unknown variant reasoning` 与 `reasoning_content must be passed back`
+    均未出现）→ 正文回复 → 产物文件落盘且内容正确。
+  - 轮 2（同线程）：完整历史（含 reasoning+tool call 的 assistant 轮）回放被官方严格端点
+    接受,模型准确复述上一轮文件名与内容 → 短期记忆修复 live 成立。
+  - Anthropic `thinking_blocks` 载体的 live 验证仍缺（环境无 ANTHROPIC_API_KEY）,配置 key 后
+    按同法补跑,验证点：LiteLLM debug 下请求带 `thinking_blocks`、无
+    「won't use extended thinking」降级警告。
+- **live 探针顺带发现一个无关旧 bug（已修，见 §47）**：轮 1 正文 content 通道里流出了
+  `<slotflow-todo-enforcer>…` 内部控制消息全文。根因是 todo enforcer/reminder 作为
+  `HumanMessage` 注入 messages 通道,违反 §29 边界。
+
+### 46.8 补记（2026-07-15 晚）：短期记忆修复与上游 PR 的语义对齐
+
+同日下午另一会话（GPT-5.6）修复了「模型丢失自己上一轮回复」（短期记忆）问题，根因同属本节
+主题：ChatLiteLLM 注入使 content 变列表 → 流式合并留下裸字符串项 → 过滤后 `["answer"]`
+不是合法 Chat Completions content → 严格端点拒绝、宽松中转站静默丢正文。修法与上游 PR 同一
+方法：在同一边界把 text-only assistant content 折叠回普通字符串
+（`_without_reasoning_metadata_blocks`）。
+
+随后做了双向语义对齐并用 6 个载体形状对比验证 **ALL EQUAL**：
+
+- SlotFlow 侧：列表形态改为**保序**（原版会把文本块挪到结构块前面）；空文本项丢弃保留。
+  新增回归 `test_structured_assistant_content_preserves_block_order`。
+- 上游 PR #223 侧：补第二个 commit（`c95fa46`）——列表形态**丢弃空文本项**（Anthropic 拒绝
+  空 text 块，包空串等于换一种 400）。上游 53 passed + ruff + mypy 全绿。
+
+不变量补充：本地 `_without_reasoning_metadata_blocks` 与上游 PR `_collapse_text_only_content`
+必须保持语义等价（保序、空文本项丢弃、text-only 折叠字符串）；上游发布含该修复的版本后收缩
+本地实现时，以契约矩阵为验收。
+
+PR #223 合并被阻止属上游流程（分支保护要求维护者审查 + fork PR 的 CodeQL required-check
+关联延迟），10 项检查全部通过，非代码问题。
+## 47. 迭代 39（2026-07-15）：短期记忆丢失根因——assistant 历史 content 裸字符串列表
+
+### 47.1 用户报告与排查路径
+
+用户实测：LiteLLM 迁移后 agent 丢失短期记忆，怀疑 Chat Completions 被改成 Responses 调用。
+排查结论：**Responses bridge 不是原因**。仓库内 Responses 残留只有
+`runtime/models.py` 的 `_skip_responses_api_bridge=True`——它恰是强制 Chat Completions 的
+保险（litellm `main.py:4863,5325` 会 pop 并跳过 bridge），已用 fake `acompletion` 实验确认
+flag 抵达调用且 messages 全量发出，必须保留、不是多余代码。
+
+### 47.2 真正根因
+
+流式聚合时 langchain-core 的 `merge_content` 把 text delta 以**裸字符串**追加进 content 列表：
+带 thinking 的回合最终 `AIMessage.content == [{"type":"thinking",...}, "正文"]`。下一轮请求
+`_without_reasoning_metadata_blocks` 过滤 thinking 后剩 `["正文"]`——列表里是裸字符串，不合
+Chat Completions schema：
+
+- DeepSeek：LiteLLM `convert_content_list_to_str` 对非 dict 项直接 `AttributeError`（请求前崩溃）。
+- OpenAI/严格端点：400。
+- 宽松中转站：静默丢弃正文 → 模型看不到自己上一轮回复 = 用户观察到的"丢失短期记忆"。
+
+### 47.3 修复与新契约
+
+`_without_reasoning_metadata_blocks` 从"只删 reasoning 块"升级为"删 + 收敛"：纯文本内容
+（裸字符串 + `{"type":"text"}` 块）一律拼接回**普通字符串**（最通用的 assistant 形态）；
+仅存在非文本块时保留列表并把字符串包成 text 块。契约测试
+`test_plain_assistant_text_content_normalizes_to_string` 锁定两个形状：text 块列表 → 字符串、
+`[thinking块, 裸字符串]` → 字符串。离线复现脚本确认 DeepSeek transform 不再崩溃、
+正文完整回传。`uv run pytest -q -k "not live"` -> 354 passed；ruff 通过。
+
+## 48. 迭代 40（2026-07-15）：todo enforcer/reminder 控制文本泄漏进用户正文——根因修复
+
+### 48.1 症状（§46.7 live 探针顺带抓到）
+
+DeepSeek 真机探针轮 1 正文里流出了 `<slotflow-todo-enforcer>…</slotflow-todo-enforcer>` 整段
+内部控制指令,直接展示给用户。与 reasoning 修复无关,是独立旧 bug。
+
+### 48.2 根因（对照代码核实,非表面）
+
+`todo_enforcement_update` 与 `todo_reminder_update`（`harness/steps/todo.py`）把内部控制指令
+作为 `HumanMessage` 注入 `messages` 会话通道。这违反 §29 已立下的不变量——「SlotFlow 内部上下文
+必须走 slotflow state / system_prompt,不能写入会被当作对话内容的通道」。两个后果:
+
+1. **流式泄漏**：v3 messages 投影会把它看到的每个**新** message 对象当增量流给用户（按 id
+   去重,所以历史回放不重复,但当步新造的控制 HumanMessage 会 surface）。§13 节点化之后,
+   §12.3 时代「注入消息不进投影」的假设已失效——这正是本 bug 与 §32.5「模型复读注入文本」
+   同源、但更直接（不经模型、投影层直出）。
+2. **持久化污染**：`messages` 带 `add_messages` reducer,checkpointer 每轮回放该控制消息。
+
+投影层过滤（按 name 屏蔽）只能治 (1) 且治不了 (2),是表面补丁。
+
+### 48.3 根因修复：控制文本走 system_prompt 字符串通道
+
+与 §29 给 skills preflight 的同一条路径:
+
+- 新增 state 通道 `todo_enforcement`（`{pending, attempted}`）承载 post_model 的约束意图。
+- `todo_enforcement_update` 不再返回 `{"messages":[HumanMessage(...)]}`,改为写
+  `{"todo_enforcement": {"pending": <文本>, "attempted": True}}`；`attempted` 是纯标志防循环,
+  模型真的调用 `write_todos` 时由 `_reset_enforcement_update` 复位（不再扫历史找命名消息）。
+- `todo_reminder_update` 改为**只返回控制文本字符串**（或 None）。
+- `pre_model` 把 reminder 文本 + 消费到的 enforcement `pending` 追加进**当步 system_prompt**
+  （最靠后,作为最新指令）,并清空 `pending`。控制文本从不进入任何 message 对象,因此既不
+  被 messages 投影流出,也不被 checkpointer 持久化。
+- `route_after_model` 改用 `route_after_model_has_enforcement`（看 `todo_enforcement.pending`）
+  决定是否回环 pre_model,替代原来的「最后一条消息是 enforcer HumanMessage」。
+- 删除 `TODO_ENFORCER_MESSAGE_NAME`/`TODO_REMINDER_MESSAGE_NAME`/`latest_message_is_todo_enforcer`
+  /`_has_named_human_message_since_last_write_todos` 等基于「命名消息进历史」的死代码。
+
+### 48.4 验证
+
+- 新增 `tests/test_agent_adapter.py::test_todo_enforcer_control_text_never_reaches_stream_or_history`：
+  真实 graph + checkpointer 两断言——控制块不出现在 message.delta、不残留进持久 messages 历史；
+  同时断言两次模型调用的正文都正常流出（enforcement 循环仍生效）。先对修复前代码验证为红。
+- `tests/test_harness_steps.py` 的 todo enforcement/reminder 用例改为断言 `todo_enforcement`
+  state 通道与 `consume_todo_enforcement` 消费/复位/防循环语义。
+- 全量 `uv run pytest -q -k "not live"` -> **362 passed**；`ruff check app tests` 通过。
+- **真机 live（DeepSeek thinking, 全新 thread）**：触发 todo enforcement（`todo.updated`×16,
+  证明 enforcer 仍驱动模型写 todo）,正文**无** `slotflow-todo-enforcer`/`-reminder` 泄漏。
+
+### 48.5 不变量（勿回归）
+
+- SlotFlow 内部逐步控制上下文（todo reminder/enforcement、skills preflight、runtime summary
+  等）只能走 `system_prompt` 字符串通道或 `slotflow`/专用 state 通道,**绝不**构造 message 对象
+  塞进 `messages` 或 `llm_input_messages`——v3 messages 投影会把新 message 对象当可见增量流出,
+  `messages` 还会被 checkpointer 持久化回放。
+- todo enforcement 的防循环用 `todo_enforcement.attempted` 标志,不靠扫描历史里的命名消息。

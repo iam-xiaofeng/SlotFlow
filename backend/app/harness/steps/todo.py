@@ -19,9 +19,6 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from app.harness.state import SlotFlowAgentState
 from app.harness.utils import message_content_text
 
-TODO_ENFORCER_MESSAGE_NAME = "slotflow_todo_enforcer"
-TODO_REMINDER_MESSAGE_NAME = "slotflow_todo_reminder"
-
 _TODO_EXPLICIT_MARKERS = (
     "todo",
     "to-do",
@@ -120,8 +117,16 @@ def write_todos_tool(
 def todo_reminder_update(
     *,
     state: SlotFlowAgentState,
-) -> dict[str, Any] | None:
-    """Inject a reminder when active todos have left the visible message context."""
+) -> str | None:
+    """Return a reminder block when active todos have left the visible message context.
+
+    Returns the control text only; ``pre_model`` folds it into the current step's
+    system prompt. It must NOT become a message object in any state channel: the
+    v3 messages projection streams every newly-created message object it sees
+    (deduplicated by id, so replayed history stays silent but fresh control
+    messages surface), and the ``messages`` channel is additionally persisted and
+    replayed by the checkpointer (§29 boundary; 2026-07-15 live leak).
+    """
 
     todos = list(state.get("todos") or [])
     if not todos:
@@ -129,20 +134,14 @@ def todo_reminder_update(
     messages = list(state.get("messages") or [])
     if _has_write_todos_call(messages):
         return None
-    if _has_named_human_message(messages, TODO_REMINDER_MESSAGE_NAME):
-        return None
-    reminder = HumanMessage(
-        name=TODO_REMINDER_MESSAGE_NAME,
-        content=(
-            "<slotflow-todo-reminder>\n"
-            "The active todo list is no longer visible in the recent context, "
-            "but it is still part of this run state:\n\n"
-            f"{_format_todos(todos)}\n\n"
-            "Continue using `write_todos` whenever item status changes.\n"
-            "</slotflow-todo-reminder>"
-        ),
+    return (
+        "<slotflow-todo-reminder>\n"
+        "The active todo list is no longer visible in the recent context, "
+        "but it is still part of this run state:\n\n"
+        f"{_format_todos(todos)}\n\n"
+        "Continue using `write_todos` whenever item status changes.\n"
+        "</slotflow-todo-reminder>"
     )
-    return {"messages": [reminder]}
 
 
 def todo_enforcement_update(
@@ -154,6 +153,11 @@ def todo_enforcement_update(
 
     This is deliberately dynamic graph behavior, not a static system-prompt rule: the node
     inspects the just-produced AI message and active ``todos`` state after every model call.
+
+    The control instruction is returned on the ``todo_enforcement`` state channel (not as a
+    message object in any channel): ``pre_model`` folds ``pending`` into the retry step's
+    system prompt, and ``attempted`` guards against re-injecting after the model ignored one
+    request. Nothing user-facing or durable is written to the conversation history.
     """
 
     messages = list(state.get("messages") or [])
@@ -161,10 +165,12 @@ def todo_enforcement_update(
     if last_ai is None or messages[-1] is not last_ai:
         return None
     if _has_write_todos_call([last_ai]):
-        return None
+        # The model is writing todos right now: re-arm the guard so a later
+        # incomplete-todo state may enforce again.
+        return _reset_enforcement_update(state)
     if last_ai.tool_calls:
         return None
-    if _has_named_human_message_since_last_write_todos(messages, TODO_ENFORCER_MESSAGE_NAME):
+    if _enforcement_already_attempted(state):
         return None
 
     todos = list(state.get("todos") or [])
@@ -172,45 +178,77 @@ def todo_enforcement_update(
     if not todos:
         if not _should_create_initial_todos(latest_user_request, plan_enabled=plan_enabled):
             return None
-        message = HumanMessage(
-            name=TODO_ENFORCER_MESSAGE_NAME,
-            content=(
-                "<slotflow-todo-enforcer>\n"
-                "This request needs visible progress tracking. Call `write_todos` now with "
-                "3-7 concrete user-visible steps and mark the first active step "
-                "`in_progress`. Do not answer in prose before creating the todo list.\n"
-                "</slotflow-todo-enforcer>"
-            ),
+        pending = (
+            "<slotflow-todo-enforcer>\n"
+            "This request needs visible progress tracking. Call `write_todos` now with "
+            "3-7 concrete user-visible steps and mark the first active step "
+            "`in_progress`. Do not answer in prose before creating the todo list.\n"
+            "</slotflow-todo-enforcer>"
         )
-        return {"messages": [message]}
+        return {"todo_enforcement": {"pending": pending, "attempted": True}}
 
     if _all_todos_completed(todos):
         return None
-    message = HumanMessage(
-        name=TODO_ENFORCER_MESSAGE_NAME,
-        content=(
-            "<slotflow-todo-enforcer>\n"
-            "The active todo list is not complete. Before giving a final answer, call "
-            "`write_todos` with the current statuses. Mark completed work as completed and "
-            "keep exactly one current item `in_progress` when work remains.\n\n"
-            f"{_format_todos(todos)}\n"
-            "</slotflow-todo-enforcer>"
-        ),
+    pending = (
+        "<slotflow-todo-enforcer>\n"
+        "The active todo list is not complete. Before giving a final answer, call "
+        "`write_todos` with the current statuses. Mark completed work as completed and "
+        "keep exactly one current item `in_progress` when work remains.\n\n"
+        f"{_format_todos(todos)}\n"
+        "</slotflow-todo-enforcer>"
     )
-    return {"messages": [message]}
+    return {"todo_enforcement": {"pending": pending, "attempted": True}}
 
 
-def latest_message_is_todo_enforcer(state: SlotFlowAgentState) -> bool:
-    """Return true when post_model just appended the todo enforcement control message."""
+def consume_todo_enforcement(state: SlotFlowAgentState) -> tuple[str | None, dict[str, Any]]:
+    """Read a pending enforcement instruction and return the state clear-update.
 
-    messages = list(state.get("messages") or [])
-    if not messages:
-        return False
-    message = messages[-1]
+    Returns ``(pending_text, state_update)``. ``pre_model`` folds ``pending_text``
+    into THIS step's system prompt (a plain str channel — never a streamable
+    message object) and merges ``state_update`` to clear ``pending`` while keeping
+    the ``attempted`` guard, so a single ignored enforcement never loops.
+    """
+
+    enforcement = state.get("todo_enforcement")
+    if not isinstance(enforcement, dict):
+        return None, {}
+    pending = enforcement.get("pending")
+    if not isinstance(pending, str) or not pending:
+        return None, {}
+    cleared = {**enforcement, "pending": None}
+    return pending, {"todo_enforcement": cleared}
+
+
+def route_after_model_has_enforcement(state: SlotFlowAgentState) -> bool:
+    """Return true when post_model queued a todo enforcement retry for pre_model."""
+
+    enforcement = state.get("todo_enforcement")
     return (
-        isinstance(message, HumanMessage)
-        and getattr(message, "name", None) == TODO_ENFORCER_MESSAGE_NAME
+        isinstance(enforcement, dict)
+        and isinstance(enforcement.get("pending"), str)
+        and bool(enforcement.get("pending"))
     )
+
+
+def _enforcement_already_attempted(state: SlotFlowAgentState) -> bool:
+    """One ignored enforcement blocks further attempts until write_todos re-arms it.
+
+    ``attempted`` is set when an enforcement instruction is queued and reset by
+    ``todo_enforcement_update`` the moment the model actually calls ``write_todos``
+    (see ``_reset_enforcement_update``). Pure flag semantics — no history scanning.
+    """
+
+    enforcement = state.get("todo_enforcement")
+    return isinstance(enforcement, dict) and bool(enforcement.get("attempted"))
+
+
+def _reset_enforcement_update(state: SlotFlowAgentState) -> dict[str, Any] | None:
+    enforcement = state.get("todo_enforcement")
+    if isinstance(enforcement, dict) and (
+        enforcement.get("attempted") or enforcement.get("pending")
+    ):
+        return {"todo_enforcement": {"pending": None, "attempted": False}}
+    return None
 
 
 def todo_parallel_call_guard(
@@ -251,24 +289,6 @@ def _has_write_todos_call(messages: list[Any]) -> bool:
         for tool_call in message.tool_calls or []:
             if tool_call.get("name") == "write_todos":
                 return True
-    return False
-
-
-def _has_named_human_message(messages: list[Any], name: str) -> bool:
-    return any(
-        isinstance(message, HumanMessage) and getattr(message, "name", None) == name
-        for message in messages
-    )
-
-
-def _has_named_human_message_since_last_write_todos(messages: list[Any], name: str) -> bool:
-    for message in reversed(messages):
-        if isinstance(message, AIMessage):
-            for tool_call in message.tool_calls or []:
-                if tool_call.get("name") == "write_todos":
-                    return False
-        if isinstance(message, HumanMessage) and getattr(message, "name", None) == name:
-            return True
     return False
 
 
