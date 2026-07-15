@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  Check,
   ChevronDown,
   Copy,
   FileText,
@@ -15,10 +16,11 @@ import {
   RotateCcw,
   SendHorizontal,
   Terminal,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { type ChatToolStatus, type ChatUiMessage } from "@/hooks/use-chat-stream";
+import { type ChatToolActivity, type ChatUiMessage } from "@/hooks/use-chat-stream";
 import {
   type ClarificationOptionRecord,
   type ClarificationRequestRecord,
@@ -101,6 +103,8 @@ function MessageBubbleImpl({
     !isUser && !clarification && message.status === "streaming"
       ? message.toolStatus
       : undefined;
+  const toolActivities =
+    !isUser && !clarification ? message.toolActivities ?? [] : [];
   const shouldShowThinkingCard =
     !isUser &&
     !clarification &&
@@ -170,8 +174,11 @@ function MessageBubbleImpl({
                     isStreaming={message.status === "streaming"}
                   />
                 ) : null}
-                {activeToolStatus ? (
-                  <ToolStatusIndicator status={activeToolStatus} />
+                {toolActivities.length > 0 ? (
+                  <ToolActivityTimeline
+                    activities={toolActivities}
+                    isStreaming={message.status === "streaming"}
+                  />
                 ) : null}
                 {hasAssistantBody ? (
                   <SoftStreamingMarkdown
@@ -420,25 +427,75 @@ function ContextCompressingIndicator() {
   );
 }
 
-function ToolStatusIndicator({ status }: { status: ChatToolStatus }) {
-  const label = status.toolName === "sandbox_exec" ? "沙箱" : status.toolName;
+/** 一次 run 的工具调用时间线:流式时展开实时滚动,结束后折叠成一行摘要可回看。 */
+function ToolActivityTimeline({
+  activities,
+  isStreaming,
+}: {
+  activities: ChatToolActivity[];
+  isStreaming: boolean;
+}) {
+  const runningCount = activities.filter(
+    (item) => item.phase === "starting" || item.phase === "running",
+  ).length;
+  const errorCount = activities.filter((item) => item.phase === "error").length;
+  const latest = activities.at(-1);
+  const summaryLabel = isStreaming
+    ? latest
+      ? `${toolDisplayName(latest.toolName)} · ${latest.message}`
+      : "正在调用工具"
+    : `已执行 ${activities.length} 步工具调用${errorCount > 0 ? `（${errorCount} 步出错）` : ""}`;
+
   return (
-    <div className="slotflow-rise-in mb-4 rounded-lg border border-border/70 bg-background/85 px-3 py-2.5 text-sm text-muted-foreground shadow-sm backdrop-blur">
-      <div className="flex min-w-0 items-center gap-2">
-        <Terminal className="size-4 shrink-0" />
-        <span className="shrink-0 font-medium text-foreground">{label}</span>
-        <span className="min-w-0 truncate">{status.message}</span>
-        {status.phase === "running" || status.phase === "starting" ? (
-          <ActivityGlyph />
-        ) : null}
+    <details
+      className="group/activity slotflow-rise-in mb-4 w-full overflow-hidden rounded-lg border border-border/70 bg-background/85 text-sm shadow-sm backdrop-blur"
+      open={isStreaming}
+    >
+      <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+        <Terminal className="size-3.5 shrink-0" />
+        {isStreaming && runningCount > 0 ? (
+          <span className="slotflow-shimmer-text min-w-0 truncate">{summaryLabel}</span>
+        ) : (
+          <span className="min-w-0 truncate">{summaryLabel}</span>
+        )}
+        <ChevronDown className="ml-auto size-3.5 shrink-0 transition-transform group-open/activity:rotate-180" />
+      </summary>
+      <div className="max-h-52 overflow-y-auto px-3 pb-2.5">
+        <ol className="space-y-1.5">
+          {activities.map((activity) => (
+            <li key={activity.id} className="flex min-w-0 items-start gap-2 text-xs leading-5">
+              <span className="mt-0.5 shrink-0 text-muted-foreground">
+                {activity.phase === "completed" ? (
+                  <Check className="size-3.5 text-primary" />
+                ) : activity.phase === "error" ? (
+                  <X className="size-3.5 text-destructive" />
+                ) : (
+                  <span className="grid size-3.5 place-items-center">
+                    <ActivityGlyph />
+                  </span>
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                <span className="font-medium text-foreground">
+                  {toolDisplayName(activity.toolName)}
+                </span>
+                <span className="ml-1.5 text-muted-foreground">{activity.message}</span>
+                {activity.command ? (
+                  <code className="mt-1 block max-h-16 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/70 px-2 py-1 text-[0.7rem] leading-4 text-muted-foreground">
+                    {activity.command}
+                  </code>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ol>
       </div>
-      {status.command ? (
-        <code className="mt-2 block max-h-20 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/80 px-2 py-1.5 text-xs leading-5 text-muted-foreground">
-          {status.command}
-        </code>
-      ) : null}
-    </div>
+    </details>
   );
+}
+
+function toolDisplayName(toolName: string): string {
+  return toolName === "sandbox_exec" ? "沙箱" : toolName;
 }
 
 function ClarificationRequestPanel({

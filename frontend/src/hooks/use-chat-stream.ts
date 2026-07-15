@@ -27,12 +27,15 @@ import {
   parseClarificationRequest,
   parseToolStatus,
   parseTodos,
+  settleRunningToolActivities,
+  upsertToolActivity,
 } from "./use-chat-stream-helpers";
 
 export type {
   ChatTodo,
   ChatTodoStatus,
   ChatUiMessage,
+  ChatToolActivity,
   ChatToolStatus,
   ChatUiMessageRole,
   ChatUiMessageStatus,
@@ -359,6 +362,12 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
         let discoveredArtifacts: WorkspaceEntryRecord[] = [];
         let toolStatusVisible = false;
+        // ReAct 一次 run 里有多段正文(正文→工具→正文…)。模型各段独立成文,直接拼接会把
+        // "## 标题"黏进上一段行中,markdown 便不再当它是标题。以工具调用为段界,重启时补空行。
+        let contentStarted = false;
+        let reasoningStarted = false;
+        let contentBreakPending = false;
+        let reasoningBreakPending = false;
         for await (const streamEvent of streamThreadRun(activeThread.id, body, {
           signal: controller.signal,
         })) {
@@ -379,10 +388,28 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
               const channel = streamEvent.data.channel;
               if (channel === "reasoning") {
                 patchAssistant(assistantMessageId, { thinkingStarted: true });
-              } else if (toolStatusVisible) {
-                // 工具已执行完、模型恢复输出正文:清掉状态芯片,别让"running"一直挂着骗人。
-                toolStatusVisible = false;
-                patchAssistant(assistantMessageId, { toolStatus: undefined });
+                if (reasoningBreakPending && reasoningStarted) {
+                  appendAssistantDelta(assistantMessageId, "reasoning", "\n\n");
+                }
+                reasoningBreakPending = false;
+                reasoningStarted = true;
+              } else {
+                if (toolStatusVisible) {
+                  // 工具已执行完、模型恢复输出正文:清掉状态芯片,时间线里在转的行收敛为完成。
+                  toolStatusVisible = false;
+                  updateAssistantMessage(assistantMessageId, (message) => ({
+                    ...message,
+                    toolStatus: undefined,
+                    toolActivities: settleRunningToolActivities(
+                      message.toolActivities ?? [],
+                    ),
+                  }));
+                }
+                if (contentBreakPending && contentStarted) {
+                  appendAssistantDelta(assistantMessageId, "content", "\n\n");
+                }
+                contentBreakPending = false;
+                contentStarted = true;
               }
               appendAssistantDelta(
                 assistantMessageId,
@@ -392,14 +419,26 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
           }
 
+          if (streamEvent.event === "tool.delta") {
+            contentBreakPending = true;
+            reasoningBreakPending = true;
+          }
+
           if (streamEvent.event === "tool.status") {
+            contentBreakPending = true;
+            reasoningBreakPending = true;
             const toolStatus = parseToolStatus(streamEvent.data);
             if (toolStatus) {
               toolStatusVisible = true;
-              patchAssistant(assistantMessageId, {
+              updateAssistantMessage(assistantMessageId, (message) => ({
+                ...message,
                 compressionStarted: false,
                 toolStatus,
-              });
+                toolActivities: upsertToolActivity(
+                  message.toolActivities ?? [],
+                  toolStatus,
+                ),
+              }));
             }
           }
 
