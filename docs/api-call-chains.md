@@ -111,6 +111,15 @@ run config ? `SlotFlowAgentReachConfig` ? harness builder ? tools registry ?
 `~/.agent-reach` ????? allowlist?timeout?????? secret redaction????????????
 `SLOTFLOW_NETWORK_ENABLED=false` ?????????
 
+## 5.2 MarkItDown 本地转换
+
+runtime config → `SlotFlowMarkItDownConfig` → harness tools registry →
+`convert_file_to_markdown`。输入先经 workspace resolver/文件与 archive/OCR workload 上限，再调用
+`MarkItDown.convert_local`；兼容视觉的当前模型通过 LangChain facade 注入，或使用专用
+OpenAI-compatible client。纯图片走 built-in image converter，扫描/嵌图 PDF/Office 走官方
+`markitdown-ocr` plugin。可选 output_path 经 artifact normalizer 写入当前 thread；sync 解析和 Vision
+调用由 StructuredTool async coroutine 放入 worker thread。
+
 ## 6. Terminal(WS /api/terminal/ws)
 
 WebSocket → app/terminal/routes.py:宿主用户终端(PTY),协议

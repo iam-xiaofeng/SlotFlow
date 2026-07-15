@@ -78,6 +78,7 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "web_search",
         "skill_match",
         "write_todos",  # pro mode is plan_enabled -> write_todos exposed
+        "convert_file_to_markdown",
     } <= set(tool_names)
     assert len(tool_names) == len(set(tool_names)), f"duplicate tool names: {tool_names}"
     assert captured["checkpointer"] is checkpointer
@@ -95,6 +96,8 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "<slotflow-long-term-memory-status>",
         "<slotflow-agent-reach-status>",
         "agent_reach_status",
+        "<slotflow-markitdown-status>",
+        "convert_file_to_markdown",
         "<slotflow-extension-tools>",
         "<slotflow-operating-procedure>",
         "memory_list",

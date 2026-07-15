@@ -37,6 +37,7 @@ from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore, load_enabled_skills
 from app.harness.subagents import SlotFlowSubagentConfig
 from app.harness.tools.agent_reach import SlotFlowAgentReachConfig
+from app.harness.tools.markitdown import SlotFlowMarkItDownConfig
 
 
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
@@ -111,6 +112,7 @@ class SlotFlowRuntimeConfig:
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
     agent_reach_config: SlotFlowAgentReachConfig = field(default_factory=SlotFlowAgentReachConfig)
+    markitdown_config: SlotFlowMarkItDownConfig = field(default_factory=SlotFlowMarkItDownConfig)
     subagent_config: SlotFlowSubagentConfig = field(default_factory=SlotFlowSubagentConfig)
 
 
@@ -163,6 +165,7 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         middleware_config=middleware_config,
         sandbox_config=sandbox_config,
         agent_reach_config=load_agent_reach_config_from_env(),
+        markitdown_config=load_markitdown_config_from_env(),
         subagent_config=SlotFlowSubagentConfig(
             recursion_limit=load_positive_int_from_env(
                 "SLOTFLOW_SUBAGENT_RECURSION_LIMIT",
@@ -376,6 +379,54 @@ def load_agent_reach_config_from_env() -> SlotFlowAgentReachConfig:
         max_output_bytes=load_positive_int_from_env(
             "SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES",
             default=defaults.max_output_bytes,
+        ),
+    )
+
+
+def load_markitdown_config_from_env() -> SlotFlowMarkItDownConfig:
+    """Read local conversion limits and optional dedicated Vision client settings."""
+
+    defaults = SlotFlowMarkItDownConfig()
+    return SlotFlowMarkItDownConfig(
+        enabled=load_bool_from_env("SLOTFLOW_MARKITDOWN_ENABLED", default=True),
+        max_input_bytes=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_MAX_INPUT_BYTES",
+            default=defaults.max_input_bytes,
+        ),
+        max_output_chars=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_MAX_OUTPUT_CHARS",
+            default=defaults.max_output_chars,
+        ),
+        max_archive_entries=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_MAX_ARCHIVE_ENTRIES",
+            default=defaults.max_archive_entries,
+        ),
+        max_archive_uncompressed_bytes=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_MAX_ARCHIVE_UNCOMPRESSED_BYTES",
+            default=defaults.max_archive_uncompressed_bytes,
+        ),
+        vision_enabled=load_bool_from_env(
+            "SLOTFLOW_MARKITDOWN_VISION_ENABLED",
+            default=True,
+        ),
+        vision_max_pages=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_VISION_MAX_PAGES",
+            default=defaults.vision_max_pages,
+        ),
+        vision_max_images=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_VISION_MAX_IMAGES",
+            default=defaults.vision_max_images,
+        ),
+        vision_timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_MARKITDOWN_VISION_TIMEOUT_SECONDS",
+            default=defaults.vision_timeout_seconds,
+        ),
+        vision_model=load_optional_text_from_env("SLOTFLOW_MARKITDOWN_VISION_MODEL"),
+        vision_base_url=load_optional_text_from_env("SLOTFLOW_MARKITDOWN_VISION_BASE_URL"),
+        vision_api_key=load_optional_text_from_env("SLOTFLOW_MARKITDOWN_VISION_API_KEY"),
+        vision_prompt=(
+            load_optional_text_from_env("SLOTFLOW_MARKITDOWN_VISION_PROMPT")
+            or defaults.vision_prompt
         ),
     )
 

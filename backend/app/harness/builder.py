@@ -53,6 +53,7 @@ def build_slotflow_harness_graph(
         skills_config_store=harness_config.skills_config_store,
         sandbox_config=harness_config.sandbox_config,
         agent_reach_config=harness_config.agent_reach_config,
+        markitdown_config=harness_config.markitdown_config,
         subagent_config=harness_config.subagent_config,
     )
     selected_tools = built_tools if tools_supported else []
@@ -169,10 +170,25 @@ def build_system_prompt(
     )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
     sections.extend(build_agent_reach_status_prompt(harness_config))
+    sections.extend(build_markitdown_status_prompt(harness_config))
     skills_prompt = build_skills_prompt(enabled_skills)
     if skills_prompt:
         sections.extend(["", skills_prompt])
     return "\n".join(sections)
+
+
+def build_markitdown_status_prompt(harness_config: SlotFlowHarnessConfig) -> list[str]:
+    """Describe the single workspace-local document conversion boundary."""
+
+    return [
+        "",
+        "<slotflow-markitdown-status>",
+        f"enabled={harness_config.markitdown_config.enabled}",
+        f"vision_enabled={harness_config.markitdown_config.vision_enabled}",
+        "Use convert_file_to_markdown for PDF, Office, image, audio, HTML/data, EPUB, and archive content when workspace_read is insufficient.",
+        "The tool accepts workspace-relative local paths only. Prefer output_path for large results. Vision OCR automatically uses a compatible selected model or dedicated configured client; heed warnings when neither is available.",
+        "</slotflow-markitdown-status>",
+    ]
 
 
 def build_agent_reach_status_prompt(harness_config: SlotFlowHarnessConfig) -> list[str]:

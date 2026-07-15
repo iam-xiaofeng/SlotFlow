@@ -149,6 +149,7 @@ frontend/src/
 - **First-run setup**: `./bootstrap.sh` is the root setup entry for machines that cannot yet run
   `make`, `uv`, or frontend dependency commands. It installs/validates system Makefile
   prerequisites (`make`, `curl`, `git`, Python/build tools, `fuser` via `psmisc` where available),
+  installs MarkItDown's ffmpeg/ExifTool system helpers through supported package managers,
   installs `uv`, installs Node plus the `packageManager` pnpm version from `frontend/package.json`
   (Volta fallback for user-local Node), installs/refreshes Agent Reach from its configurable Git
   source with `uv tool` and prepares its zero-configuration channels on the **host**, runs `uv sync`
@@ -269,6 +270,22 @@ frontend/src/
   toggled but cannot be deleted or shadowed by a user HTTP server. `bootstrap.sh` installs the locked
   package, runs official `playwright install-deps chromium` on apt hosts, and downloads Chromium;
   non-apt hosts receive a precise shared-library warning. No separate maintenance command exists.
+- **MarkItDown local conversion**: `harness/tools/markitdown.py` exposes exactly one model tool,
+  `convert_file_to_markdown`. The top-level function of the same name calls upstream
+  `MarkItDown.convert_local()` only—never permissive URL conversion—and the tool resolves `path`
+  through `SlotFlowWorkspace`; optional output is normalized into `artifacts/<thread>/`. All-format
+  Python extras and the official `markitdown-ocr` plugin are uv-locked; bootstrap additionally
+  installs ffmpeg + ExifTool where the host package manager is supported. Archives are bounded by
+  compressed input, entry count and total uncompressed bytes; Vision work is bounded by PDF pages
+  and embedded-image count; converted output is bounded before entering model context/workspace.
+  When `use_vision=true`, a Vision-capable selected run model (checked through LiteLLM's public
+  `supports_vision`) is wrapped behind the tiny OpenAI `chat.completions.create` shape expected by
+  MarkItDown. Dedicated `SLOTFLOW_MARKITDOWN_VISION_{MODEL,BASE_URL,API_KEY}` settings can instead
+  create an OpenAI-compatible client without exposing its key. Pure images use MarkItDown's image
+  converter; embedded/scanned PDF/Office images use the upstream OCR plugin. A text-only model or
+  missing dedicated client does not trigger a blind call: standard extraction runs and the result
+  carries an explicit Vision warning. The sync conversion/LLM work runs via the existing threaded
+  StructuredTool async boundary. Main and child agents receive the same tool.
 - **Network tools**: `web_fetch` and `web_search` live in `harness/tools/network.py` and remain
   read-only, public-URL-only tools under `SlotFlowSandboxConfig` limits. `web_search` uses plain
   HTML search endpoints with fallback: Bing HTML first, then DuckDuckGo Lite. The parser filters

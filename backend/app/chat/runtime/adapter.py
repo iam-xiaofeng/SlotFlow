@@ -151,6 +151,7 @@ def create_langgraph_agent_graph(
             middleware_config=runtime_config.middleware_config,
             sandbox_config=runtime_config.sandbox_config,
             agent_reach_config=runtime_config.agent_reach_config,
+            markitdown_config=runtime_config.markitdown_config,
             subagent_config=runtime_config.subagent_config,
         ),
         checkpointer=checkpointer,

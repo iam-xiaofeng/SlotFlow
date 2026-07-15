@@ -38,6 +38,7 @@ def test_bootstrap_prepares_host_integrations_in_dependency_order() -> None:
     assert 'uv tool install --force --with-executables-from yt-dlp "$AGENT_REACH_SOURCE"' in script
     assert 'mkdir -p "$HOME/.agent-reach"' in script
     assert 'cd "$HOME/.agent-reach"\n  agent-reach install --env=auto' in script
+    assert "apt-get install -y ffmpeg libimage-exiftool-perl" in script
     assert "pnpm exec playwright install-deps chromium" in script
     assert "pnpm exec playwright install chromium" in script
     launcher = REPO_ROOT / "frontend" / "scripts" / "playwright-mcp.mjs"
@@ -47,6 +48,7 @@ def test_bootstrap_prepares_host_integrations_in_dependency_order() -> None:
 
     main = script[script.index("main() {") :]
     calls = [
+        "install_markitdown_system_dependencies",
         "install_uv",
         "install_node_and_pnpm",
         "install_agent_reach",

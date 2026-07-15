@@ -15,6 +15,7 @@ from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.subagents import SlotFlowSubagentConfig
 from app.harness.tools.agent_reach import SlotFlowAgentReachConfig
+from app.harness.tools.markitdown import SlotFlowMarkItDownConfig
 
 if TYPE_CHECKING:
     from app.harness.memory import SlotFlowMemoryStore
@@ -37,4 +38,5 @@ class SlotFlowHarnessConfig:
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
     agent_reach_config: SlotFlowAgentReachConfig = field(default_factory=SlotFlowAgentReachConfig)
+    markitdown_config: SlotFlowMarkItDownConfig = field(default_factory=SlotFlowMarkItDownConfig)
     subagent_config: SlotFlowSubagentConfig = field(default_factory=SlotFlowSubagentConfig)

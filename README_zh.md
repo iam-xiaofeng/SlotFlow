@@ -58,6 +58,7 @@ Next.js 聊天界面，支持运行时模型选择、可见 reasoning 流、Skil
 - pnpm 10.26.2，版本来自 `frontend/package.json`
 - `make`、`curl`、`git`
 - Docker Engine，用于代码执行工具和 Docker 沙箱产物
+- `ffmpeg` 和 ExifTool，用于完整的 MarkItDown 音频/元数据转换（`bootstrap.sh` 会尽可能安装）
 
 `./bootstrap.sh` 可以在常见 Linux 发行版上安装或校验大部分依赖：
 `apt`、`dnf`、`yum`、`pacman`、`apk`、`zypper`。它也有基础工具的 Homebrew 路径，
@@ -101,7 +102,7 @@ http://localhost:3000
 2. 如果缺少 `uv`，自动安装。
 3. 安装 Node 和 pnpm，其中 pnpm 版本读取自 `frontend/package.json`。
 4. 用 `uv tool` 安装或刷新 Agent Reach，并准备它在宿主机上的基础渠道。
-5. 在 `backend/` 运行 `uv sync`，安装 MarkItDown 全格式和视觉 OCR 依赖。
+5. 尽可能安装 MarkItDown 的 ffmpeg/ExifTool，再运行 `uv sync` 安装全格式和视觉 OCR 依赖。
 6. 在 `frontend/` 安装锁定依赖，在 apt 主机安装 Chromium 共享库，并下载锁定的 Chromium runtime。
 7. 仅在 `backend/.env` 不存在时，把 `backend/.env_example` 复制为 `backend/.env`。
 8. 尽可能安装、启动并准备 Docker。
@@ -355,6 +356,29 @@ SLOTFLOW_PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT_MS=60000
 
 localhost/私网 origin blocklist 只是纵深防护，并非完整安全边界；重定向和网页内容仍必须视为不可信。
 只有确实要访问本地服务时才设置 `SLOTFLOW_NETWORK_ALLOW_PRIVATE=true`。
+
+### MarkItDown 转换与视觉 OCR
+
+唯一的 `convert_file_to_markdown` 工具可转换 workspace 内的 PDF、Word、Excel、PowerPoint、
+HTML/数据、图片、音频、EPUB 和压缩包。LiteLLM 判定当前 run 模型支持视觉时会自动复用；否则可配置
+专用 OpenAI-compatible Vision 模型。扫描 PDF 和嵌入图片使用官方 `markitdown-ocr` 插件。文件大小、
+压缩包展开、OCR 页数/图片数、输出长度、路径和 artifact 写入都有上限。
+
+```bash
+SLOTFLOW_MARKITDOWN_ENABLED=true
+SLOTFLOW_MARKITDOWN_MAX_INPUT_BYTES=52428800
+SLOTFLOW_MARKITDOWN_MAX_OUTPUT_CHARS=750000
+SLOTFLOW_MARKITDOWN_VISION_ENABLED=true
+SLOTFLOW_MARKITDOWN_VISION_MAX_PAGES=20
+SLOTFLOW_MARKITDOWN_VISION_MAX_IMAGES=20
+
+# 可选的专用 OpenAI-compatible client：
+# SLOTFLOW_MARKITDOWN_VISION_MODEL=gpt-4o
+# SLOTFLOW_MARKITDOWN_VISION_BASE_URL=https://api.openai.com/v1
+# SLOTFLOW_MARKITDOWN_VISION_API_KEY=sk-...
+```
+
+没有兼容视觉模型时仍会运行普通提取，但图片/扫描 PDF 会返回明确 warning，不会假装 OCR 成功。
 
 ### 网络和 Docker 沙箱
 

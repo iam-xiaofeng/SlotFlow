@@ -17,8 +17,9 @@ For a fresh clone, prefer the root bootstrap script:
 ```
 
 It installs or validates the Makefile prerequisites, `uv`, Node/pnpm, backend/frontend
-dependencies, copies `backend/.env_example` to `backend/.env` if missing, and prepares the
-Docker sandbox on common Linux/WSL hosts. It never overwrites an existing `backend/.env`.
+dependencies, Agent Reach host channels, Playwright MCP/Chromium, MarkItDown ffmpeg/ExifTool
+helpers, copies `backend/.env_example` to `backend/.env` if missing, and prepares the Docker sandbox
+on common Linux/WSL hosts. It never overwrites an existing `backend/.env`.
 
 ## Backend
 

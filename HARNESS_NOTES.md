@@ -3026,3 +3026,70 @@ API record 增加 `stateful`，前端目录卡片显示“内置有状态”。s
   独立的 `browser_snapshot`，第二步仍返回同一 URL/标题和 `Example Domain` accessibility tree，证明
   session/page 没在工具间重建；provider 退出后进程正常关闭。
 - 浏览器 shared-library 安装通过 Playwright 官方 apt 路径真实执行；非 apt 分支只做代码/契约验证。
+
+## 51. 迭代 43（2026-07-16）：MarkItDown 单工具内置化 + 官方 Vision OCR
+
+### 51.1 为什么不是把 `markitdown` CLI 交给模型
+
+用户要求核心只保留 `convert_file_to_markdown`，并指出纯图片、扫描 PDF 必须注入大模型客户端。若把
+`markitdown <path>` 当宿主 shell 命令暴露，会重复前述宿主执行风险，也绕开 SlotFlow workspace/artifact
+边界；若只替换 `workspace_read`，又会把轻量源码读取和重型 Office/PDF/OCR 混成一层。本轮保持两条路：
+`workspace_read` 继续做快速、安全预览；格式复杂或明确要 Markdown 时调用唯一新工具。
+
+`harness/tools/markitdown.py::convert_file_to_markdown()` 只接受已经过边界解析的本地 `Path`，内部只调
+上游 `MarkItDown.convert_local()`，没有 `convert()` 的 URL/response 多态 I/O。model-facing closure 再用
+`SlotFlowWorkspace.resolve_path()` 限定输入，`normalize_artifact_path()` 限定可选输出到当前 thread artifact。
+无 output_path 时返回内联 Markdown；有 output_path 时返回元数据和 artifact 路径，避免大文档重复进上下文。
+
+### 51.2 Vision client 的两级选择
+
+MarkItDown 0.1.5 的图片 converter 和 `markitdown-ocr` 0.1.0 实际都调用
+`client.chat.completions.create(model=..., messages=[...image_url data URI...])`。按锁定源码实现两级客户端：
+
+1. 当前 run 的 `BaseChatModel` 若有 model id 且 LiteLLM 公共 `supports_vision()` 返回真，
+   `LangChainVisionClient` 将这一个模型包装成最小 OpenAI chat facade；messages 通过 LangChain
+   `convert_to_messages()`，响应通过既有 `message_content_text()` 归一化。工具发生在模型发出 tool call 后，
+   原始 chat model 尚未被工具绑定，不会形成“Vision 调用又发工具”的循环。
+2. 用户要固定另一视觉模型时，显式配置 `SLOTFLOW_MARKITDOWN_VISION_MODEL/BASE_URL/API_KEY`，构造
+   OpenAI SDK client。API key 在 dataclass 中 `repr=False/compare=False`，不进入 prompt/tool schema/result。
+
+两者都没有时不盲调文本模型：普通 converter 继续工作；图片或空文本 PDF 返回
+“无兼容 Vision client”的 warning。client 外再包一层只计数/记异常类型的 tracking facade，因为上游 OCR
+service 会吞掉单图异常并返回空文本；因此结果能明确报告 OCR failure，而不是仅把“走过 Vision 路径”当成功。
+`use_vision=false` 可按次禁止。prompt 默认要求忠实提取可见文字并保持
+Markdown 阅读顺序；无文字时才给简短事实描述。
+
+### 51.3 官方 OCR 路径与成本边界
+
+启用 client 时 `MarkItDown(enable_plugins=True, llm_client=..., llm_model=...)` 会发现官方仓库随包发布的
+`markitdown-ocr` entry point。锁定源码确认：插件以更高优先级替换 PDF/DOCX/PPTX/XLSX converter，先保留
+原生文本，再 OCR embedded images；PDF 无文本时把整页渲染为 PNG 走同一个 Vision service。因此本项目
+不再自己拆 PDF/图片，也不复制 OCR 协议。
+
+上游插件本身没有费用上限，所以 SlotFlow 在调用前增加：input bytes、archive entry 数、总未压缩 bytes、
+PDF pages、PDF/OpenXML embedded image 数；输出超限直接报错，不静默截断。ZIP/Office/EPUB 先用
+`zipfile` 只读 central directory 做 zip-bomb 预检。PDF 页数用 pypdf，嵌图数尽可能用 PyMuPDF；计数失败
+不替代上游解析错误，但明确超限必拒绝。所有同步 Magika/Office/PDF/LLM 工作经
+`threaded_structured_tool` 放进 worker thread，不阻塞 async graph loop。
+
+### 51.4 “全格式依赖”的实际含义
+
+`backend/pyproject.toml` 已锁 `markitdown[all]` 和 `markitdown-ocr[llm]`，涵盖 PDF、DOCX、PPTX、
+XLS/XLSX、Outlook、audio transcription、YouTube transcript、Azure extras 等 Python 依赖。真实源码审计又
+发现音频 MP3/MP4 转 WAV 依赖系统 ffmpeg，图片/音频 metadata 可选 ExifTool；只装 Python extras 会出现
+“包已装但格式能力不完整”。`bootstrap.sh::install_markitdown_system_dependencies` 因而在 apt/dnf/yum/
+pacman/apk/zypper/brew 尝试安装 ffmpeg + ExifTool，apt 路径已在当前 WSL 真实安装。多媒体仓库不默认
+可用的 dnf/yum/zypper 失败时给出明确 warning，不伪造成功；`SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` 同时跳过。
+
+### 51.5 图链路与验证
+
+runtime env → `SlotFlowMarkItDownConfig` → harness config → unified tool registry；主 agent 和 subagent 的
+environment tools 都含同一个 `convert_file_to_markdown`。system prompt 的
+`<slotflow-markitdown-status>` 说明复杂文档优先转换、large result 用 output_path、Vision warning 必须如实处理。
+
+新增 `tests/test_markitdown_tools.py`，真实创建并转换 HTML、CSV、DOCX、XLSX、PPTX、文本 PDF 和 ZIP；
+另用 Pillow PNG + fake OpenAI-compatible client 验证纯图 data URI，用 PyMuPDF 创建无文本扫描 PDF 并证明
+**上游 `markitdown-ocr` 真实调用 client**、OCR 文本进入 Markdown；还覆盖 selected-model facade、无 client
+warning、workspace escape、thread artifact、input/output/archive/page/image 上限、nested ZIP 拒绝、上游吞掉的
+Vision failure warning 和 env secret 配置。
+这些 OCR 测试故意用 deterministic fake client，不消耗真实视觉 API；格式解析和官方 plugin 路径本身是真实的。

@@ -166,6 +166,43 @@ install_system_packages() {
   warn "No supported system package manager found. Install make, curl, git, python3, and psmisc manually if missing."
 }
 
+install_markitdown_system_dependencies() {
+  if [ "$SKIP_SYSTEM_PACKAGES" = "1" ]; then
+    warn "Skipping MarkItDown system helpers because SLOTFLOW_SKIP_SYSTEM_PACKAGES=1."
+    return
+  fi
+  if has_cmd ffmpeg && has_cmd exiftool; then
+    log "MarkItDown system helpers are already available."
+    return
+  fi
+
+  log "Installing MarkItDown audio/metadata helpers (ffmpeg + ExifTool)..."
+  if has_cmd apt-get; then
+    run_as_root apt-get update
+    run_as_root apt-get install -y ffmpeg libimage-exiftool-perl
+  elif has_cmd dnf; then
+    if ! run_as_root dnf install -y ffmpeg perl-Image-ExifTool; then
+      warn "dnf could not install ffmpeg/ExifTool; enable the appropriate multimedia repository and retry."
+    fi
+  elif has_cmd yum; then
+    if ! run_as_root yum install -y ffmpeg perl-Image-ExifTool; then
+      warn "yum could not install ffmpeg/ExifTool; enable the appropriate multimedia repository and retry."
+    fi
+  elif has_cmd pacman; then
+    run_as_root pacman -Sy --needed --noconfirm ffmpeg perl-image-exiftool
+  elif has_cmd apk; then
+    run_as_root apk add --no-cache ffmpeg exiftool
+  elif has_cmd zypper; then
+    if ! run_as_root zypper --non-interactive install ffmpeg perl-Image-ExifTool; then
+      warn "zypper could not install ffmpeg/ExifTool; enable the appropriate multimedia repository and retry."
+    fi
+  elif has_cmd brew; then
+    brew install ffmpeg exiftool
+  else
+    warn "No supported package manager for MarkItDown's optional ffmpeg/ExifTool helpers."
+  fi
+}
+
 require_basic_tools() {
   has_cmd curl || die "curl is required to install uv/Node tooling. Install curl and rerun ./bootstrap.sh."
   has_cmd git || die "git is required by package managers and dependency installers. Install git and rerun ./bootstrap.sh."
@@ -635,7 +672,7 @@ You can now run:
 Host integrations:
   - Agent Reach: installed/refreshed with uv tool; core host channels are prepared by Agent Reach
   - Playwright MCP: package locked by pnpm; apt hosts get required shared libraries and Chromium is downloaded to the user cache
-  - MarkItDown: all format extras plus the LLM Vision OCR plugin are locked in backend/uv.lock
+  - MarkItDown: all format extras plus Vision OCR are locked in uv.lock; ffmpeg/ExifTool are installed when supported
 
 Docker sandbox (sandbox_exec):
   - image: $DOCKER_IMAGE (pre-pulled when possible); persistent container is created on first use
@@ -651,6 +688,7 @@ EOF
 main() {
   cd "$ROOT_DIR"
   install_system_packages
+  install_markitdown_system_dependencies
   require_basic_tools
   install_uv
   install_node_and_pnpm
