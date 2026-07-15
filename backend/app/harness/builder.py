@@ -52,6 +52,7 @@ def build_slotflow_harness_graph(
         skills_root=harness_config.skills_root,
         skills_config_store=harness_config.skills_config_store,
         sandbox_config=harness_config.sandbox_config,
+        agent_reach_config=harness_config.agent_reach_config,
         subagent_config=harness_config.subagent_config,
     )
     selected_tools = built_tools if tools_supported else []
@@ -167,10 +168,29 @@ def build_system_prompt(
         ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
     )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
+    sections.extend(build_agent_reach_status_prompt(harness_config))
     skills_prompt = build_skills_prompt(enabled_skills)
     if skills_prompt:
         sections.extend(["", skills_prompt])
     return "\n".join(sections)
+
+
+def build_agent_reach_status_prompt(harness_config: SlotFlowHarnessConfig) -> list[str]:
+    """Describe the read-only Agent Reach host bridge without exposing host execution."""
+
+    enabled = (
+        harness_config.agent_reach_config.enabled
+        and harness_config.sandbox_config.network_enabled
+    )
+    return [
+        "",
+        "<slotflow-agent-reach-status>",
+        f"enabled={enabled}",
+        "Agent Reach is a fixed read-only host bridge, not a shell and not part of Docker.",
+        "When enabled, call agent_reach_status before multi-platform research, then use the narrow agent_reach_* tool matching the source. Never request credentials or claim an unavailable channel worked.",
+        "Installation and refresh are user-owned bootstrap actions; model tools cannot install, update, configure, post, comment, or mutate remote state.",
+        "</slotflow-agent-reach-status>",
+    ]
 
 
 def build_mcp_status_prompt(mcp_config) -> list[str]:

@@ -238,6 +238,21 @@ frontend/src/
   the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
   assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
   normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
+- **Agent Reach host bridge**: Agent Reach is installed/refreshed by `bootstrap.sh` with `uv tool`
+  and initialized from `~/.agent-reach`; it is deliberately **not** installed or mounted into the
+  Docker sandbox. `harness/tools/agent_reach.py` is the only model-facing boundary. It exposes five
+  read-only StructuredTools (`agent_reach_status`, `agent_reach_web_search`,
+  `agent_reach_read_url`, `agent_reach_github_search`, `agent_reach_youtube_metadata`) and never
+  accepts an executable, argv, shell fragment, install/update/configure action, or remote write.
+  `FixedHostCommandRunner` resolves only `agent-reach`, `mcporter`, `curl`, `gh`, and `yt-dlp` from
+  fixed user/system bin directories, invokes argv arrays with `shell=False` semantics and stdin
+  closed, fixes cwd to `SLOTFLOW_AGENT_REACH_HOME`, bounds time/output, and redacts secret-valued
+  environment strings from errors/results. The Jina/YouTube tools reuse the public-URL/private-IP
+  guard from `harness/tools/network.py`; the whole bridge also obeys `SLOTFLOW_NETWORK_ENABLED`.
+  Main and child agents receive the same fixed tools. The system prompt directs the model to call
+  `agent_reach_status` before multi-platform research and never pretend unavailable channels work.
+  Rerunning `bootstrap.sh` is the only repository-provided refresh path; there is intentionally no
+  maintenance command/tool, and optional cookie/login channels remain user-controlled.
 - **Network tools**: `web_fetch` and `web_search` live in `harness/tools/network.py` and remain
   read-only, public-URL-only tools under `SlotFlowSandboxConfig` limits. `web_search` uses plain
   HTML search endpoints with fallback: Bing HTML first, then DuckDuckGo Lite. The parser filters

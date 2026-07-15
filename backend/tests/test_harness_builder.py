@@ -17,6 +17,7 @@ from app.harness.features import SlotFlowHarnessFeatures, features_from_run_cont
 from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.subagents import SlotFlowSubagentConfig
+from app.harness.tools.agent_reach import SlotFlowAgentReachConfig
 
 
 class ToolAwareFakeListChatModel(FakeListChatModel):
@@ -92,6 +93,8 @@ def test_harness_builder_passes_graph_boundary_arguments(monkeypatch) -> None:
         "<slotflow-runtime>",
         "<slotflow-freshness-policy>",
         "<slotflow-long-term-memory-status>",
+        "<slotflow-agent-reach-status>",
+        "agent_reach_status",
         "<slotflow-extension-tools>",
         "<slotflow-operating-procedure>",
         "memory_list",
@@ -289,3 +292,19 @@ def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None
         system_prompt=DEFAULT_DEEPSEEK_SYSTEM_PROMPT,
         subagent_config=SlotFlowSubagentConfig(recursion_limit=73),
     )
+
+
+def test_agent_reach_prompt_reports_effective_network_switch() -> None:
+    enabled = builder_module.build_agent_reach_status_prompt(
+        SlotFlowHarnessConfig(system_prompt="base prompt")
+    )
+    disabled = builder_module.build_agent_reach_status_prompt(
+        SlotFlowHarnessConfig(
+            system_prompt="base prompt",
+            agent_reach_config=SlotFlowAgentReachConfig(enabled=False),
+        )
+    )
+
+    assert "enabled=True" in enabled
+    assert "enabled=False" in disabled
+    assert any("not a shell" in line for line in enabled)

@@ -332,6 +332,23 @@ SLOTFLOW_CODE_EXECUTION_ENABLED=true
 Disable a feature only when debugging a subsystem or running in a constrained
 environment.
 
+### Agent Reach Host Bridge
+
+`bootstrap.sh` installs Agent Reach and its core upstream CLIs on the host. SlotFlow exposes only
+fixed read-only operations for status, Exa web search, Jina page reading, GitHub search, and YouTube
+metadata; it never gives the model a host shell or install/configure/write command. The bridge is not
+mounted into Docker and is refreshed by rerunning `bootstrap.sh`.
+
+```bash
+SLOTFLOW_AGENT_REACH_ENABLED=true
+SLOTFLOW_AGENT_REACH_HOME=~/.agent-reach
+SLOTFLOW_AGENT_REACH_TIMEOUT_SECONDS=60
+SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES=524288
+```
+
+The bridge also turns off when `SLOTFLOW_NETWORK_ENABLED=false`. Cookie/login channels remain an
+explicit user choice and are not enabled by bootstrap.
+
 ### Network and Docker Sandbox
 
 Network tools:

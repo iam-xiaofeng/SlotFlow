@@ -36,6 +36,7 @@ from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore, load_enabled_skills
 from app.harness.subagents import SlotFlowSubagentConfig
+from app.harness.tools.agent_reach import SlotFlowAgentReachConfig
 
 
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
@@ -89,6 +90,7 @@ class SlotFlowRuntimeConfig:
     mcp_config_store: SlotFlowMcpConfigStore | None = field(default=None, compare=False)
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
+    agent_reach_config: SlotFlowAgentReachConfig = field(default_factory=SlotFlowAgentReachConfig)
     subagent_config: SlotFlowSubagentConfig = field(default_factory=SlotFlowSubagentConfig)
 
 
@@ -139,6 +141,7 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         mcp_config_store=mcp_config_store,
         middleware_config=middleware_config,
         sandbox_config=load_sandbox_config_from_env(),
+        agent_reach_config=load_agent_reach_config_from_env(),
         subagent_config=SlotFlowSubagentConfig(
             recursion_limit=load_positive_int_from_env(
                 "SLOTFLOW_SUBAGENT_RECURSION_LIMIT",
@@ -334,6 +337,24 @@ def load_sandbox_config_from_env() -> SlotFlowSandboxConfig:
         allow_host_docker_install=load_bool_from_env(
             "SLOTFLOW_ALLOW_HOST_DOCKER_INSTALL",
             default=SlotFlowSandboxConfig().allow_host_docker_install,
+        ),
+    )
+
+
+def load_agent_reach_config_from_env() -> SlotFlowAgentReachConfig:
+    """Read the fixed Agent Reach host-bridge switch and resource limits."""
+
+    defaults = SlotFlowAgentReachConfig()
+    return SlotFlowAgentReachConfig(
+        enabled=load_bool_from_env("SLOTFLOW_AGENT_REACH_ENABLED", default=True),
+        home=load_path_from_env("SLOTFLOW_AGENT_REACH_HOME", default=defaults.home),
+        timeout_seconds=load_positive_int_from_env(
+            "SLOTFLOW_AGENT_REACH_TIMEOUT_SECONDS",
+            default=defaults.timeout_seconds,
+        ),
+        max_output_bytes=load_positive_int_from_env(
+            "SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES",
+            default=defaults.max_output_bytes,
         ),
     )
 

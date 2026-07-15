@@ -14,6 +14,7 @@ from app.harness.mcp import McpToolProvider, SlotFlowMcpConfig, load_mcp_tools
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore
 from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
+from app.harness.tools.agent_reach import SlotFlowAgentReachConfig, build_agent_reach_tools
 from app.harness.tools.builtins import ask_clarification_tool
 from app.harness.tools.todo import write_todos_tool
 from app.harness.tools.customization import build_customization_tools
@@ -39,6 +40,7 @@ def build_harness_tools(
     skills_root: Path | None = None,
     skills_config_store: SlotFlowSkillsConfigStore | None = None,
     sandbox_config: SlotFlowSandboxConfig | None = None,
+    agent_reach_config: SlotFlowAgentReachConfig | None = None,
     subagent_config: SlotFlowSubagentConfig | None = None,
 ) -> list[BaseTool]:
     """组装本次 graph 要绑定的工具列表。
@@ -62,6 +64,10 @@ def build_harness_tools(
         skills_root=skills_root,
     )
     network_tools = build_network_tools(sandbox_config)
+    agent_reach_tools = build_agent_reach_tools(
+        agent_reach_config or SlotFlowAgentReachConfig(),
+        sandbox_config=sandbox_config or SlotFlowSandboxConfig(),
+    )
     customization_tools = build_customization_tools(
         skills_root=skills_root,
         skills_config_store=skills_config_store,
@@ -77,6 +83,7 @@ def build_harness_tools(
             *workspace_tools,
             *sandbox_tools,
             *network_tools,
+            *agent_reach_tools,
             *customization_tools,
             *mcp_tools,
         ],
@@ -94,6 +101,7 @@ def build_harness_tools(
                 *workspace_tools,
                 *sandbox_tools,
                 *network_tools,
+                *agent_reach_tools,
                 *customization_tools,
                 *subagent_tools,
                 *mcp_tools,

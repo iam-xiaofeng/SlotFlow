@@ -323,6 +323,23 @@ SLOTFLOW_CODE_EXECUTION_ENABLED=true
 
 只有在调试具体子系统或受限本地环境中，才建议关闭某个功能。
 
+### Agent Reach 宿主桥接
+
+`bootstrap.sh` 会在宿主机安装 Agent Reach 及其基础上游 CLI。SlotFlow 只向模型提供固定的
+只读操作：渠道体检、Exa 全网搜索、Jina 网页阅读、GitHub 搜索和 YouTube 元数据；不会向
+模型开放宿主 shell，也不提供安装、配置或远程写操作。桥接不会挂载进 Docker，重新运行
+`bootstrap.sh` 即会刷新它。
+
+```bash
+SLOTFLOW_AGENT_REACH_ENABLED=true
+SLOTFLOW_AGENT_REACH_HOME=~/.agent-reach
+SLOTFLOW_AGENT_REACH_TIMEOUT_SECONDS=60
+SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES=524288
+```
+
+`SLOTFLOW_NETWORK_ENABLED=false` 时桥接也会关闭。需要 Cookie/登录态的可选渠道仍由用户
+明确决定，bootstrap 不会自动启用。
+
 ### 网络和 Docker 沙箱
 
 网络工具：

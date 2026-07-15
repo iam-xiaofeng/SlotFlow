@@ -101,6 +101,14 @@ uploads_update 把工作区路径注入最新用户消息 → 模型用 workspac
 - MCP:GET/POST/PATCH/reorder/DELETE 管理 streamable HTTP server 记录;
   run 前 ensure_mcp_tools_loaded 连接并把 MCP 工具并入 build_harness_tools。
 
+## 5.1 Agent Reach ??????
+
+run config ? `SlotFlowAgentReachConfig` ? harness builder ? tools registry ?
+`build_agent_reach_tools`??/? agent ??????? StructuredTool???????????
+`agent-reach`/`mcporter`/`curl`/`gh`/`yt-dlp` argv?`FixedHostCommandRunner` ?
+`~/.agent-reach` ????? allowlist?timeout?????? secret redaction????????????
+`SLOTFLOW_NETWORK_ENABLED=false` ?????????
+
 ## 6. Terminal(WS /api/terminal/ws)
 
 WebSocket → app/terminal/routes.py:宿主用户终端(PTY),协议

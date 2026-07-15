@@ -2895,3 +2895,65 @@ DeepSeek 真机探针轮 1 正文里流出了 `<slotflow-todo-enforcer>…</slot
   塞进 `messages` 或 `llm_input_messages`——v3 messages 投影会把新 message 对象当可见增量流出,
   `messages` 还会被 checkpointer 持久化回放。
 - todo enforcement 的防循环用 `todo_enforcement.attempted` 标志,不靠扫描历史里的命名消息。
+
+## 49. 迭代 41（2026-07-16）：Agent Reach 固定宿主桥接——互联网能力不等于宿主 shell
+
+### 49.1 需求与边界判断
+
+用户拍板 Agent Reach 放在宿主机，不进入 Docker；依赖和上游刷新统一由根目录
+`bootstrap.sh` 完成，不再提供额外维护命令。对照 Agent Reach 1.5.0 的实际 Skill/安装器后确认：
+Agent Reach 自身是渠道选择器、安装器、体检器和路由说明，真正取数依赖 `mcporter`、`gh`、
+`yt-dlp`、Jina Reader 等上游工具。因此“只复制 Skill”不能让 SlotFlow graph 获得能力；反过来把
+任意宿主命令交给模型又会破坏现有的“代码只进 Docker”不变量。
+
+本轮选择中间边界：宿主保留 Agent Reach 和登录态，模型只得到 SlotFlow 固定 argv 的只读工具。
+
+### 49.2 bootstrap 实测抓到的工作目录根因
+
+首次在仓库根运行 `agent-reach install --env=auto` 时，上游 `mcporter` 按 cwd 生成了
+`config/mcporter.json`，污染工作树。不是 gitignore 问题，而是调用方工作目录错了。修复后
+`bootstrap.sh::install_agent_reach` 先创建并进入 `~/.agent-reach`，配置稳定落到
+`~/.agent-reach/config/mcporter.json`。`uv tool install` 同时用
+`--with-executables-from yt-dlp` 暴露依赖包的 `yt-dlp` executable；否则 uv 隔离环境只链接根包的
+`agent-reach` 命令，doctor 会把已经作为 Python dependency 安装的 yt-dlp 误判为“不可用”。
+
+真实 bootstrap smoke（跳过系统包/Docker/Playwright 下载）结果：Agent Reach v1.5.0，GitHub、
+YouTube、V2EX、RSS、Exa、Jina 和 B站基础搜索共 7/15 渠道可用；仓库保持干净。需要 Cookie、
+浏览器登录或额外账号的 8 个渠道没有自动启用。
+
+### 49.3 代码链路（逐代码核实）
+
+1. `chat.runtime.config.load_agent_reach_config_from_env()` 读取 enabled/home/timeout/output limit，
+   进入 `SlotFlowRuntimeConfig.agent_reach_config`。
+2. `chat.runtime.adapter.create_langgraph_agent_graph()` 显式传入
+   `SlotFlowHarnessConfig.agent_reach_config`；builder 再交给统一 tool registry。
+3. `build_harness_tools()` 构建 Agent Reach 工具，并同时放进主 agent 和 subagent 的
+   `environment_tools`。若桥接自身关闭或 `SLOTFLOW_NETWORK_ENABLED=false`，返回空列表。
+4. `harness/tools/agent_reach.py` 暴露五个固定只读工具：status、Exa search、Jina read、GitHub
+   search、YouTube metadata。用户参数只能进入各操作预定义的位置；没有 command/argv/script 字段。
+5. `FixedHostCommandRunner` 只解析 allowlist 中的五个 executable，搜索路径不含 cwd，调用
+   `subprocess.run([binary, *args], stdin=DEVNULL, stdout/stderr=PIPE, timeout=...)`，没有 shell；cwd
+   固定为 Agent Reach home，输出截断，并以环境变量名标记对 token/key/secret/password/cookie 值脱敏。
+6. Jina 和 YouTube 的原始目标 URL 继续走 `network.validate_public_url()`，继承 HTTP(S)、DNS 和私网
+   拒绝规则；YouTube 再限制 hostname。yt-dlp 的巨大 format URL 列表不会返给模型，只投影紧凑元数据、
+   chapters 和字幕语言。
+7. system prompt 的 `<slotflow-agent-reach-status>` 明示这是只读桥接而非 shell；多平台调研先 doctor，
+   渠道不可用要如实报告，模型不能安装、更新、配置、发帖或修改远程状态。
+
+### 49.4 安全与行为不变量
+
+- Agent Reach/登录态只留宿主，不复制到 Docker，不把 `~/.agent-reach` 挂载给沙箱。
+- 原有 `sandbox_exec` 仍是模型运行任意代码/安装依赖的唯一入口；固定桥接不是通用 subprocess tool。
+- bridge 不接受 remote write，也不向模型提供 Agent Reach install/update/configure/uninstall。
+- 重新运行 `bootstrap.sh` 是仓库唯一刷新入口；自动刷新基础组件不等于自动启用登录态渠道。
+- Agent Reach 失败不删除原 `web_search`/`web_fetch`，两条只读网络路径可独立退化。
+
+### 49.5 验证
+
+新增 `tests/test_agent_reach_tools.py` 覆盖工具集合、双开关、固定 argv、结果上限、Jina route、GitHub
+shape、YouTube 紧凑投影、async path、allowlist、无 shell、cwd、timeout、截断、secret redaction 和 env
+映射；`test_harness_builder.py` 覆盖 prompt 结构锚点与有效开关。真实 StructuredTool smoke 已从
+SlotFlow 边界验证 doctor JSON、Exa 搜索、Jina 读取 `example.com`、`gh search repos` 和 yt-dlp
+YouTube 紧凑元数据全部成功；过程中还抓到并修正了当前 `gh` 字段名应为 `fullName`，以及原始
+`--dump-single-json` 会因 formats 超过输出上限而截断，最终改成 yt-dlp `--print` 的固定字段投影。
+本轮不把网络 smoke 放入离线 pytest，避免把单测稳定性绑定到 Exa/GitHub/YouTube 外部状态。

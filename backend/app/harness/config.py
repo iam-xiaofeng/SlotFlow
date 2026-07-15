@@ -14,6 +14,7 @@ from app.harness.mcp import SlotFlowMcpConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.subagents import SlotFlowSubagentConfig
+from app.harness.tools.agent_reach import SlotFlowAgentReachConfig
 
 if TYPE_CHECKING:
     from app.harness.memory import SlotFlowMemoryStore
@@ -35,4 +36,5 @@ class SlotFlowHarnessConfig:
     mcp_config_store: SlotFlowMcpConfigStore | None = None
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
+    agent_reach_config: SlotFlowAgentReachConfig = field(default_factory=SlotFlowAgentReachConfig)
     subagent_config: SlotFlowSubagentConfig = field(default_factory=SlotFlowSubagentConfig)

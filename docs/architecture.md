@@ -60,3 +60,4 @@ provider status and selectable model ids.
 - Add a sub-agent profile in `app.harness.subagents.config`.
 - Add middleware in `app.harness.middleware.registry`.
 - Add workspace-safe tools under `app.harness.tools`.
+- Agent Reach uses a fixed read-only host bridge in `app.harness.tools.agent_reach`; it is not a generic host-execution extension point.
