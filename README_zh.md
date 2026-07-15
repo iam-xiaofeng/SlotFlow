@@ -100,11 +100,12 @@ http://localhost:3000
 1. 安装或校验仓库和 `Makefile` 需要的系统依赖。
 2. 如果缺少 `uv`，自动安装。
 3. 安装 Node 和 pnpm，其中 pnpm 版本读取自 `frontend/package.json`。
-4. 在 `backend/` 运行 `uv sync`。
-5. 在 `frontend/` 运行 `pnpm install --frozen-lockfile`，如果没有 lockfile 则运行普通安装。
-6. 仅在 `backend/.env` 不存在时，把 `backend/.env_example` 复制为 `backend/.env`。
-7. 尽可能安装、启动并准备 Docker。
-8. 尽可能预拉取 Docker 沙箱镜像。
+4. 用 `uv tool` 安装或刷新 Agent Reach，并准备它在宿主机上的基础渠道。
+5. 在 `backend/` 运行 `uv sync`，安装 MarkItDown 全格式和视觉 OCR 依赖。
+6. 在 `frontend/` 运行锁定依赖安装，并为锁定的 Playwright MCP 下载 Chromium。
+7. 仅在 `backend/.env` 不存在时，把 `backend/.env_example` 复制为 `backend/.env`。
+8. 尽可能安装、启动并准备 Docker。
+9. 尽可能预拉取 Docker 沙箱镜像。
 
 脚本不会覆盖已有的 `backend/.env`。
 
@@ -116,6 +117,13 @@ SLOTFLOW_SKIP_SYSTEM_PACKAGES=1 ./bootstrap.sh
 
 # 跳过所有 Docker 配置。应用仍可运行，但 sandbox_exec 需要 Docker 可用后才能工作。
 SLOTFLOW_SKIP_DOCKER=1 ./bootstrap.sh
+
+# 分别跳过 Agent Reach 宿主配置或 Playwright Chromium 下载。
+SLOTFLOW_SKIP_AGENT_REACH=1 ./bootstrap.sh
+SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1 ./bootstrap.sh
+
+# 覆盖 uv tool 使用的 Agent Reach Git 源；重新运行 bootstrap 即为更新入口。
+SLOTFLOW_AGENT_REACH_SOURCE=git+https://github.com/Panniantong/Agent-Reach.git ./bootstrap.sh
 
 # 覆盖 bootstrap 使用的运行时工具版本。
 SLOTFLOW_NODE_VERSION=22 ./bootstrap.sh

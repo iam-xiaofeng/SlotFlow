@@ -118,7 +118,7 @@ provider/version quirks are normalized before the projection layer maps LangGrap
 ## Layout
 
 ```
-bootstrap.sh            first-run setup for Makefile prerequisites, uv, Node/pnpm, and deps
+bootstrap.sh            first-run setup for system/runtime deps, host integrations, and Docker
 Makefile                root developer commands (`verify`, `dev`, `kill`)
 backend/app/
   chat/                 chat API, Pydantic models, SQLite repository, run config, SSE
@@ -150,9 +150,14 @@ frontend/src/
   `make`, `uv`, or frontend dependency commands. It installs/validates system Makefile
   prerequisites (`make`, `curl`, `git`, Python/build tools, `fuser` via `psmisc` where available),
   installs `uv`, installs Node plus the `packageManager` pnpm version from `frontend/package.json`
-  (Volta fallback for user-local Node), runs `uv sync` in `backend/` and `pnpm install
-  --frozen-lockfile` in `frontend/`, copies `backend/.env_example` to `backend/.env` only when
-  no local `.env` exists, then prepares the **Docker sandbox** end to end. Docker setup is
+  (Volta fallback for user-local Node), installs/refreshes Agent Reach from its configurable Git
+  source with `uv tool` and prepares its zero-configuration channels on the **host**, runs `uv sync`
+  in `backend/` (including `markitdown[all]` plus `markitdown-ocr[llm]`), runs `pnpm install
+  --frozen-lockfile` in `frontend/` (including the locked `@playwright/mcp`) and downloads Playwright
+  Chromium, copies `backend/.env_example` to `backend/.env` only when no local `.env` exists, then
+  prepares the **Docker sandbox** end to end. Agent Reach is deliberately not installed into that
+  sandbox; rerunning `bootstrap.sh` is its refresh path, and optional cookie/login channels remain
+  user-managed. Docker setup is
   best-effort for common Linux families (apt/dnf/yum/pacman/apk/zypper, plus WSL); it installs
   Docker Engine if missing, adds the user to the `docker` group, enables systemd in
   `/etc/wsl.conf` on WSL hosts without it, starts the daemon (systemctl → service → rc-service →
@@ -161,9 +166,11 @@ frontend/src/
   mirrors are configured, and pre-pulls the sandbox image (`SLOTFLOW_DOCKER_SANDBOX_IMAGE`, with
   `SLOTFLOW_DOCKER_IMAGE` as a bootstrap-only alias; default `python:3.12`). Adding a non-root
   user to the docker group still requires a fresh login before non-sudo Docker access is available.
-  Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package installation and
-  `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup. Bootstrap-only knobs:
-  `SLOTFLOW_NODE_VERSION`, `SLOTFLOW_PNPM_VERSION`, `SLOTFLOW_DOCKER_REGISTRY_MIRRORS`,
+  Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package installation,
+  `SLOTFLOW_SKIP_AGENT_REACH=1` to skip Agent Reach, `SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1`
+  to skip the Chromium download, and `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup.
+  Bootstrap-only knobs: `SLOTFLOW_NODE_VERSION`, `SLOTFLOW_PNPM_VERSION`,
+  `SLOTFLOW_AGENT_REACH_SOURCE`, `SLOTFLOW_DOCKER_REGISTRY_MIRRORS`,
   `SLOTFLOW_DOCKER_DAEMON_WAIT_SECONDS`.
 - **README onboarding**: `README.md` and `README_zh.md` are the first-run/onboarding
   documents. Their `bootstrap.sh` and `Makefile` sections must stay mechanically consistent

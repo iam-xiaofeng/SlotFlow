@@ -104,11 +104,12 @@ It does the following:
 1. Installs or validates system prerequisites used by the repo and `Makefile`.
 2. Installs `uv` if it is missing.
 3. Installs Node and pnpm, using the pnpm version declared in `frontend/package.json`.
-4. Runs `uv sync` in `backend/`.
-5. Runs `pnpm install --frozen-lockfile` in `frontend/` when `pnpm-lock.yaml` exists.
-6. Copies `backend/.env_example` to `backend/.env` only if `backend/.env` does not exist.
-7. Installs, starts, and prepares Docker when possible.
-8. Pre-pulls the sandbox image when possible.
+4. Installs or refreshes Agent Reach with `uv tool`, then prepares its core host-side channels.
+5. Runs `uv sync` in `backend/`, including MarkItDown all-format and Vision OCR dependencies.
+6. Runs `pnpm install --frozen-lockfile` in `frontend/` and downloads Playwright Chromium for the locked Playwright MCP package.
+7. Copies `backend/.env_example` to `backend/.env` only if `backend/.env` does not exist.
+8. Installs, starts, and prepares Docker when possible.
+9. Pre-pulls the sandbox image when possible.
 
 The script never overwrites an existing `backend/.env`.
 
@@ -122,6 +123,13 @@ SLOTFLOW_SKIP_SYSTEM_PACKAGES=1 ./bootstrap.sh
 # Skip all Docker setup. The app can still run, but sandbox_exec will not work
 # until Docker is installed and reachable.
 SLOTFLOW_SKIP_DOCKER=1 ./bootstrap.sh
+
+# Skip Agent Reach host setup or the Playwright Chromium download independently.
+SLOTFLOW_SKIP_AGENT_REACH=1 ./bootstrap.sh
+SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1 ./bootstrap.sh
+
+# Override the Agent Reach Git source used by uv tool. Rerunning bootstrap is the update path.
+SLOTFLOW_AGENT_REACH_SOURCE=git+https://github.com/Panniantong/Agent-Reach.git ./bootstrap.sh
 
 # Override runtime tool versions used by bootstrap.
 SLOTFLOW_NODE_VERSION=22 ./bootstrap.sh

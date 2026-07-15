@@ -7,6 +7,9 @@ BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 NODE_VERSION="${SLOTFLOW_NODE_VERSION:-22}"
 PNPM_VERSION="${SLOTFLOW_PNPM_VERSION:-}"
+AGENT_REACH_SOURCE="${SLOTFLOW_AGENT_REACH_SOURCE:-git+https://github.com/Panniantong/Agent-Reach.git}"
+SKIP_AGENT_REACH="${SLOTFLOW_SKIP_AGENT_REACH:-0}"
+SKIP_PLAYWRIGHT_BROWSER="${SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER:-0}"
 SKIP_SYSTEM_PACKAGES="${SLOTFLOW_SKIP_SYSTEM_PACKAGES:-0}"
 SKIP_DOCKER="${SLOTFLOW_SKIP_DOCKER:-0}"
 DOCKER_IMAGE="${SLOTFLOW_DOCKER_IMAGE:-${SLOTFLOW_DOCKER_SANDBOX_IMAGE:-python:3.12}}"
@@ -275,6 +278,28 @@ install_node_and_pnpm_with_volta() {
   log "Installed Node $(node --version) and pnpm $(pnpm --version)."
 }
 
+install_agent_reach() {
+  if [ "$SKIP_AGENT_REACH" = "1" ]; then
+    warn "Skipping Agent Reach setup because SLOTFLOW_SKIP_AGENT_REACH=1."
+    return
+  fi
+
+  log "Installing or refreshing Agent Reach and its zero-configuration host channels..."
+  uv tool install --force --with-executables-from yt-dlp "$AGENT_REACH_SOURCE"
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r || true
+  has_cmd agent-reach || die "Agent Reach installation finished but agent-reach is not on PATH. Add ~/.local/bin to PATH and rerun."
+
+  # Agent Reach is intentionally installed on the host, not in SlotFlow's Docker
+  # sandbox. Its installer owns the upstream CLI selection and can be refreshed by
+  # rerunning bootstrap.sh; optional cookie/login channels remain user-managed. Run it
+  # from Agent Reach's own home because mcporter resolves config from the current directory.
+  mkdir -p "$HOME/.agent-reach"
+  cd "$HOME/.agent-reach"
+  agent-reach install --env=auto
+  log "Installed $(agent-reach version 2>/dev/null || printf 'Agent Reach')."
+}
+
 install_backend_dependencies() {
   log "Installing backend dependencies with uv..."
   cd "$BACKEND_DIR"
@@ -289,6 +314,17 @@ install_frontend_dependencies() {
   else
     pnpm install
   fi
+}
+
+install_playwright_browser() {
+  if [ "$SKIP_PLAYWRIGHT_BROWSER" = "1" ]; then
+    warn "Skipping Playwright browser download because SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1."
+    return
+  fi
+
+  log "Downloading the Chromium runtime used by the built-in Playwright MCP server..."
+  cd "$FRONTEND_DIR"
+  pnpm exec playwright install chromium
 }
 
 prepare_backend_env() {
@@ -578,6 +614,11 @@ You can now run:
   make dev
   make kill
 
+Host integrations:
+  - Agent Reach: installed/refreshed with uv tool; core host channels are prepared by Agent Reach
+  - Playwright MCP: package locked by pnpm; Chromium runtime downloaded into Playwright's user cache
+  - MarkItDown: all format extras plus the LLM Vision OCR plugin are locked in backend/uv.lock
+
 Docker sandbox (sandbox_exec):
   - image: $DOCKER_IMAGE (pre-pulled when possible); persistent container is created on first use
   - if this is WSL and systemd was just enabled, run 'wsl --shutdown' once from Windows so the
@@ -595,8 +636,10 @@ main() {
   require_basic_tools
   install_uv
   install_node_and_pnpm
+  install_agent_reach
   install_backend_dependencies
   install_frontend_dependencies
+  install_playwright_browser
   prepare_backend_env
   setup_docker_sandbox
   print_next_steps
