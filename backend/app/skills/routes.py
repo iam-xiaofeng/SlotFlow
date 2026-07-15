@@ -44,7 +44,39 @@ async def list_skills(request: Request) -> list[SkillRecord]:
         skills_root=root,
         enabled_names=None,
     )
-    return sort_skill_records([skill_to_record(root, skill, store=store) for skill in skills])
+    parents_by_dir = infer_parents_from_disk(root, skills)
+    return sort_skill_records(
+        [
+            skill_to_record(root, skill, store=store, disk_parents=parents_by_dir)
+            for skill in skills
+        ]
+    )
+
+
+def infer_parents_from_disk(root: Path, skills) -> dict[str, str | None]:
+    """Derive each skill's parent from where it physically sits on disk.
+
+    子 skill 的目录嵌在主 skill 目录内(典型是 ``<主>/dependencies/<子>/SKILL.md``)即视为
+    该主 skill 的子。这是权威来源:config(``skills.json``)可能被重写丢失,但磁盘结构不会,所以
+    分组不再依赖易失的 config。返回按 skill 名映射到最近的祖先 skill 名(顶层为 None)。
+    """
+
+    by_dir = {skill.skill_dir.resolve(): skill for skill in skills}
+    parents: dict[str, str | None] = {}
+    for skill in skills:
+        skill_dir = skill.skill_dir.resolve()
+        nearest: str | None = None
+        nearest_dir: Path | None = None
+        for other_dir, other in by_dir.items():
+            if other_dir == skill_dir:
+                continue
+            if other_dir in skill_dir.parents:
+                # 取最近(路径最长)的祖先,支持多级嵌套。
+                if nearest_dir is None or len(other_dir.parts) > len(nearest_dir.parts):
+                    nearest = other.name
+                    nearest_dir = other_dir
+        parents[skill.name] = nearest
+    return parents
 
 
 @router.post("/upload", response_model=list[SkillRecord])
@@ -102,7 +134,13 @@ async def upload_skill(
             )
         enable_skill_for_runtime(request, skill.name)
     refresh_runtime_skills_config(get_runtime_config(request))
-    return sort_skill_records([skill_to_record(root, skill, store=store) for skill in skills])
+    disk_parents = infer_parents_from_disk(root, skills)
+    return sort_skill_records(
+        [
+            skill_to_record(root, skill, store=store, disk_parents=disk_parents)
+            for skill in skills
+        ]
+    )
 
 
 @router.post("/install", response_model=SkillRecord)
@@ -130,6 +168,9 @@ async def install_skill(
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    # 嵌套安装(落进 <主>/dependencies/)不会改变 skills_root 本身的 mtime,
+    # 显式失效扫描缓存,否则新装的子 skill 最多 60s 内不可见。
+    invalidate_skill_scan_cache()
     refresh_runtime_skills_config(get_runtime_config(request))
     skill = await run_in_threadpool(find_skill_by_name, root, body.skill_name)
     if skill is None:
@@ -184,9 +225,10 @@ async def reorder_skills(
     await run_in_threadpool(store.reorder_skills, body.names)
     refresh_runtime_skills_config(get_runtime_config(request))
     loaded_skills = await run_in_threadpool(load_enabled_skills, skills_root=root, enabled_names=None)
+    disk_parents = infer_parents_from_disk(root, loaded_skills)
     return sort_skill_records(
         [
-            skill_to_record(root, skill, store=store)
+            skill_to_record(root, skill, store=store, disk_parents=disk_parents)
             for skill in loaded_skills
         ]
     )
@@ -353,8 +395,15 @@ def skill_to_record(
     skill,
     *,
     store: SlotFlowSkillsConfigStore | None = None,
+    disk_parents: dict[str, str | None] | None = None,
 ) -> SkillRecord:
     config = store.get_config(skill.name) if store is not None else None
+    # 磁盘结构优先(权威、不易失);config 的 parent 仅作为无磁盘信息时的补充。
+    parent = None
+    if disk_parents is not None and disk_parents.get(skill.name) is not None:
+        parent = disk_parents[skill.name]
+    elif config is not None:
+        parent = config.parent
     return SkillRecord(
         name=skill.name,
         description=skill.description,
@@ -364,7 +413,7 @@ def skill_to_record(
         source=config.source if config is not None else "user",
         order=config.order if config is not None else 0,
         pinned=config.pinned if config is not None else False,
-        parent=config.parent if config is not None else None,
+        parent=parent,
     )
 
 

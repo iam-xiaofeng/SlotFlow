@@ -355,6 +355,83 @@ def test_delete_parent_skill_removes_legacy_same_package_children(tmp_path: Path
     assert "company-valuation" not in listed_names
 
 
+def test_sequential_same_package_installs_nest_on_disk(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """主 skill 运行中逐个追加同 package 的子 skill 时,子 skill 落进主 skill 的
+    dependencies/ 而不是散落根目录(根因 B)。"""
+
+    client, runtime_config = _client(tmp_path)
+
+    def fake_run_for(skill_name: str):
+        def fake_run(args, *, cwd, check, capture_output, text, timeout):
+            _ = args, check, capture_output, text, timeout
+            skill_dir = Path(cwd) / ".agents" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {skill_name}\ndescription: {skill_name}\n---\n\n# {skill_name}\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+        return fake_run
+
+    package = "https://github.com/example/nature-skills"
+    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-writing"))
+    client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-writing"})
+    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-citation"))
+    client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-citation"})
+
+    assert (
+        runtime_config.skills_root
+        / "nature-writing"
+        / "dependencies"
+        / "nature-citation"
+        / "SKILL.md"
+    ).is_file()
+    listed = client.get("/api/skills").json()
+    child = next(skill for skill in listed if skill["name"] == "nature-citation")
+    assert child["parent"] == "nature-writing"
+
+
+def test_grouping_survives_config_wipe(monkeypatch, tmp_path: Path) -> None:
+    """skills.json 丢失后,分组仍由磁盘结构还原(根因 A):子 skill 目录嵌在主 skill
+    目录内即视为其子,不再塌成一堆顶层卡片。"""
+
+    client, runtime_config = _client(tmp_path)
+
+    def fake_run_for(skill_name: str):
+        def fake_run(args, *, cwd, check, capture_output, text, timeout):
+            _ = args, check, capture_output, text, timeout
+            skill_dir = Path(cwd) / ".agents" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {skill_name}\ndescription: {skill_name}\n---\n\n# {skill_name}\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+        return fake_run
+
+    package = "https://github.com/example/nature-skills"
+    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-writing"))
+    client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-writing"})
+    monkeypatch.setattr("app.harness.skills.store.subprocess.run", fake_run_for("nature-citation"))
+    client.post("/api/skills/install", json={"package_url": package, "skill_name": "nature-citation"})
+
+    # 抹掉 config,只留下受保护的 find-skills——模拟 ensure_default_find_skills 重写后丢失分组。
+    runtime_config.skills_config_store.path.write_text(
+        '{"skills": {"find-skills": {"enabled": true, "protected": true,'
+        ' "source": "skills.sh", "order": 0, "pinned": true}}}',
+        encoding="utf-8",
+    )
+
+    listed = client.get("/api/skills").json()
+    child = next(skill for skill in listed if skill["name"] == "nature-citation")
+    assert child["parent"] == "nature-writing"
+
+
 def test_skill_pin_and_reorder_routes(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     client.post(

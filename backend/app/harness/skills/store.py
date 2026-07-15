@@ -228,11 +228,20 @@ class SlotFlowSkillsConfigStore:
         skill_name: str,
         timeout_seconds: int = 120,
     ) -> Path:
-        """Install one skill through the public skills CLI into skills_root."""
+        """Install one skill through the public skills CLI into skills_root.
+
+        同一个 package 的后续安装(主 skill 运行中逐个追加下载它的子 skills)会物理落进
+        主 skill 的 ``dependencies/`` 目录并标记 parent——分组由磁盘结构承载,config 丢失
+        也不会散落成一堆顶层卡片。
+        """
 
         if self.is_protected(skill_name):
             raise ProtectedSkillError(skill_name)
         validate_install_request(package_url=package_url, skill_name=skill_name)
+
+        parent_name = self.find_same_package_root(
+            package_url=package_url, skill_name=skill_name
+        )
 
         with tempfile.TemporaryDirectory(prefix="slotflow-skills-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -265,7 +274,12 @@ class SlotFlowSkillsConfigStore:
             if parse_skill_file(skill_file) is None:
                 raise RuntimeError("installed skill is missing a valid SKILL.md")
 
-            target_dir = self.skills_root / skill_name
+            if parent_name is not None:
+                target_dir = (
+                    self.skills_root / parent_name / "dependencies" / skill_name
+                )
+            else:
+                target_dir = self.skills_root / skill_name
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -289,9 +303,9 @@ class SlotFlowSkillsConfigStore:
             skill_name,
             enabled=True,
             protected=False,
-            source="skills.sh",
+            source="skills.sh" if parent_name is None else "skills.sh dependency",
             package_url=package_url,
-            parent=None,
+            parent=parent_name,
         )
         for child_name, _ in dependency_records:
             self.mark_skill(
@@ -302,7 +316,29 @@ class SlotFlowSkillsConfigStore:
                 package_url=package_url,
                 parent=skill_name,
             )
+        if parent_name is not None:
+            return self.skills_root / parent_name / "dependencies" / skill_name
         return self.skills_root / skill_name
+
+    def find_same_package_root(
+        self, *, package_url: str, skill_name: str
+    ) -> str | None:
+        """Return the root skill an install of ``skill_name`` should nest under.
+
+        规则:同 package_url、非 protected(排除 find-skills 这类注册表入口)、自身是根
+        (parent 为空)的既有 skill 即为主 skill。找不到则本次安装自己就是根。
+        """
+
+        for name, config in sorted(self.configs().items(), key=skill_config_sort_key):
+            if (
+                name != skill_name
+                and not config.protected
+                and config.parent is None
+                and config.package_url == package_url
+                and config.source.startswith("skills.sh")
+            ):
+                return name
+        return None
 
     def _read_data(self) -> dict[str, Any]:
         if not self.path.is_file():
