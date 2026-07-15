@@ -6,7 +6,7 @@ import {
   type UploadedFileRecord,
 } from "@/lib/chat-stream";
 
-export const defaultModelName = "deepseek-v4-pro";
+export const defaultModelName = "deepseek/deepseek-v4-pro";
 
 export type ThreadArtifactIndex = Record<string, string[]>;
 

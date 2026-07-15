@@ -21,6 +21,7 @@ import {
   MessageNavigator,
   assistantMessageHasOutput,
 } from "./message-list-parts";
+import { SlotFlowLogo } from "./slotflow-logo";
 
 type MessageListProps = {
   messages: ChatUiMessage[];
@@ -156,10 +157,22 @@ export function MessageList({
         return 0;
       }
       const element = userMessageRefs.current.get(messageId);
-      const elementHeight = element?.getBoundingClientRect().height ?? 0;
-      return Math.ceil(Math.max(0, viewport.clientHeight - elementHeight + 24));
+      const endElement = messagesEndRef.current;
+      if (!element) {
+        return 0;
+      }
+      // 只补足"把本轮用户消息锚到视口顶部"所缺的高度:随着回答长高,spacer 同步收缩,
+      // 输出填满一屏后归零。否则流式期间往下滚会滚进一整屏空白。
+      const elementTop = element.getBoundingClientRect().top;
+      const contentBottom = endElement
+        ? endElement.getBoundingClientRect().bottom
+        : element.getBoundingClientRect().bottom;
+      const turnContentHeight = Math.max(0, contentBottom - elementTop);
+      return Math.ceil(
+        Math.max(0, viewport.clientHeight - turnContentHeight - 16),
+      );
     },
-    [getViewport],
+    [getViewport, messagesEndRef],
   );
 
   const scrollUserMessageToTurnTop = useCallback(
@@ -278,6 +291,7 @@ export function MessageList({
     return () => window.removeEventListener("resize", updateSpacerHeight);
   }, [
     latestUserTurnAnchorKey,
+    latestUserTurnAnchorRefreshKey,
     measureTurnAnchorSpacerHeight,
     userMessageSignature,
   ]);
@@ -536,12 +550,58 @@ export function MessageList({
   );
 }
 
-export function EmptyState() {
+const emptyStateSuggestions = [
+  {
+    title: "整理一份资料",
+    prompt: "帮我搜集并整理一个主题的网页资料，输出成结构化的摘要文档。",
+  },
+  {
+    title: "写代码并验证",
+    prompt: "帮我写一段代码解决一个问题，并在沙箱里运行验证结果。",
+  },
+  {
+    title: "分析上传的文件",
+    prompt: "我想上传一个文件，请帮我阅读并总结其中的要点。",
+  },
+  {
+    title: "规划一件复杂的事",
+    prompt: "帮我把一个复杂目标拆解成可执行的分步计划，并逐步推进。",
+  },
+];
+
+export function EmptyState({
+  onSuggestion,
+}: {
+  onSuggestion?: (prompt: string) => void;
+}) {
   return (
-    <div className="grid flex-1 place-items-center px-4 py-16 text-center">
-      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+    <div className="flex flex-col items-center px-4 pb-8 pt-10 text-center">
+      <SlotFlowLogo className="mb-5 size-12 rounded-xl shadow-sm" />
+      <h1 className="text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
         有什么可以帮忙的？
       </h1>
+      <p className="mt-3 max-w-md text-[0.95rem] leading-6 text-muted-foreground">
+        SlotFlow 可以搜索资料、读写文件、在沙箱里运行代码，一步步帮你把事情做完。
+      </p>
+      {onSuggestion ? (
+        <div className="mt-8 grid w-full max-w-2xl grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {emptyStateSuggestions.map((suggestion) => (
+            <button
+              key={suggestion.title}
+              type="button"
+              className="slotflow-hover-lift rounded-xl border border-border/80 bg-card/80 px-4 py-3 text-left backdrop-blur transition-colors hover:border-ring/40 hover:bg-card"
+              onClick={() => onSuggestion(suggestion.prompt)}
+            >
+              <span className="block text-sm font-medium text-foreground">
+                {suggestion.title}
+              </span>
+              <span className="mt-1 line-clamp-2 block text-xs leading-5 text-muted-foreground">
+                {suggestion.prompt}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

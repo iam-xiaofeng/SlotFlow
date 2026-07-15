@@ -130,6 +130,7 @@ def create_langgraph_agent_graph(
             mcp_config_store=runtime_config.mcp_config_store,
             middleware_config=runtime_config.middleware_config,
             sandbox_config=runtime_config.sandbox_config,
+            subagent_config=runtime_config.subagent_config,
         ),
         checkpointer=checkpointer,
     )

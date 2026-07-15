@@ -16,6 +16,8 @@ export type ChatUiMessage = {
   thinkingStarted?: boolean;
   compressionStarted?: boolean;
   toolStatus?: ChatToolStatus;
+  /** 本次 run 的工具调用时间线,按发生顺序累积;不持久化,仅活跃会话内可见。 */
+  toolActivities?: ChatToolActivity[];
   status: ChatUiMessageStatus;
   runId?: string;
   createdAt?: string;
@@ -30,6 +32,44 @@ export type ChatToolStatus = {
   message: string;
   command?: string;
 };
+
+export type ChatToolActivity = ChatToolStatus & { id: number };
+
+/** 把一条 tool.status 合并进时间线:同名工具还在 starting/running 就地更新,否则新增一行。 */
+export function upsertToolActivity(
+  activities: ChatToolActivity[],
+  status: ChatToolStatus,
+): ChatToolActivity[] {
+  const last = activities.at(-1);
+  if (
+    last &&
+    last.toolName === status.toolName &&
+    (last.phase === "starting" || last.phase === "running")
+  ) {
+    return [
+      ...activities.slice(0, -1),
+      { ...last, ...status },
+    ];
+  }
+  return [
+    ...activities,
+    { ...status, id: (last?.id ?? 0) + 1 },
+  ];
+}
+
+/** 正文恢复输出说明前面的工具都已跑完;把仍在转的行收敛为完成,避免永远转圈。 */
+export function settleRunningToolActivities(
+  activities: ChatToolActivity[],
+): ChatToolActivity[] {
+  if (!activities.some((item) => item.phase === "starting" || item.phase === "running")) {
+    return activities;
+  }
+  return activities.map((item) =>
+    item.phase === "starting" || item.phase === "running"
+      ? { ...item, phase: "completed" as const }
+      : item,
+  );
+}
 
 export type ChatTodoStatus = "pending" | "in_progress" | "completed";
 

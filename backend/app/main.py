@@ -42,7 +42,7 @@ def create_app(
     - `upload_store`：用户上传文件的 workspace 存储边界。
 
     测试可以传入自己的仓库和 adapter。真实运行如果没有传 adapter，就走 SlotFlow
-    自己的本地 runtime 装配层，创建 LangGraph/DeepSeek-compatible graph。
+    自己的本地 runtime 装配层，创建 LangGraph/ChatLiteLLM-backed graph。
     """
 
     resolved_runtime_config = runtime_config

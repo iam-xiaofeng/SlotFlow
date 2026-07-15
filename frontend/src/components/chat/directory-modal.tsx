@@ -64,6 +64,12 @@ type DirectoryModalProps = {
   onPinSkill: (skill: SkillRecord, pinned: boolean) => void;
   onReorderSkills: (names: string[]) => void;
   onDeleteSkill: (skill: SkillRecord) => void;
+  onGroupSkills: (input: {
+    name: string;
+    description: string;
+    content: string;
+    members: string[];
+  }) => Promise<void> | void;
   onAddHttpMcpServer: () => void;
   onToggleMcpServer: (server: McpServerRecord, enabled: boolean) => void;
   onPinMcpServer: (server: McpServerRecord, pinned: boolean) => void;
@@ -251,12 +257,18 @@ function SkillsGrid({
   onToggleSkill,
   onPinSkill,
   onDeleteSkill,
+  onGroupSkills,
 }: { query: string } & DirectoryModalProps) {
   const q = query.trim().toLowerCase();
   const matches = (skill: SkillRecord) =>
     !q ||
     skill.name.toLowerCase().includes(q) ||
     (skill.description ?? "").toLowerCase().includes(q);
+
+  // 组合模式:勾选若干顶层 skill,合成一个索引 skill,避免一堆平行 skill 占满模型注意力。
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [groupDialogOpen, setGroupDialogOpen] = useState(false);
 
   // Group by parent: skills with parent===null (or whose parent isn't in the list) are
   // roots; the rest nest under their parent. A multi-skill package like nature-skills
@@ -304,8 +316,68 @@ function SkillsGrid({
       .filter((group): group is SkillGroup => group !== null);
   }, [groups, q]);
 
+  // 只有"顶层、非受保护"的 skill 能被选进新组合。
+  const selectableRoots = useMemo(
+    () => visible.map((group) => group.root).filter((root) => !root.protected),
+    [visible],
+  );
+
+  function toggleSelected(name: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
+  }
+
+  function exitSelecting() {
+    setSelecting(false);
+    setSelected(new Set());
+  }
+
   return (
     <div className="flex flex-col gap-5">
+      {selectableRoots.length >= 2 ? (
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-muted-foreground">
+            {selecting
+              ? `已选 ${selected.size} 个 · 合成一个索引 Skill 收拢它们`
+              : "多个相关 Skill 可合成一个索引 Skill，减少对模型的干扰"}
+          </p>
+          <div className="flex items-center gap-2">
+            {selecting ? (
+              <>
+                <Button type="button" size="sm" variant="ghost" onClick={exitSelecting}>
+                  取消
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={selected.size < 2}
+                  onClick={() => setGroupDialogOpen(true)}
+                >
+                  组合（{selected.size}）
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setSelecting(true)}
+              >
+                <Blocks className="size-4" />
+                组合 Skills
+              </Button>
+            )}
+          </div>
+        </div>
+      ) : null}
+
       {visible.length > 0 ? (
         <section className="flex flex-col gap-3">
           <SectionHeading title="已安装 Skills" description="当前可用的本地 Skills。" />
@@ -315,6 +387,10 @@ function SkillsGrid({
                 key={group.root.name}
                 group={group}
                 query={q}
+                selecting={selecting}
+                selected={selected.has(group.root.name)}
+                selectable={!group.root.protected}
+                onToggleSelected={() => toggleSelected(group.root.name)}
                 onToggleSkill={onToggleSkill}
                 onPinSkill={onPinSkill}
                 onDeleteSkill={onDeleteSkill}
@@ -325,7 +401,109 @@ function SkillsGrid({
       ) : (
         <EmptyState text={q ? "没有匹配的已安装 Skill" : "暂无已安装 Skill，可用右上角安装或上传"} />
       )}
+
+      {groupDialogOpen ? (
+        <GroupSkillsDialog
+          memberNames={[...selected]}
+          onClose={() => setGroupDialogOpen(false)}
+          onSubmit={async (input) => {
+            await onGroupSkills({ ...input, members: [...selected] });
+            setGroupDialogOpen(false);
+            exitSelecting();
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function GroupSkillsDialog({
+  memberNames,
+  onClose,
+  onSubmit,
+}: {
+  memberNames: string[];
+  onClose: () => void;
+  onSubmit: (input: {
+    name: string;
+    description: string;
+    content: string;
+  }) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [content, setContent] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const nameValid = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(name);
+  const canSubmit = nameValid && description.trim().length > 0 && !submitting;
+
+  async function submit() {
+    if (!canSubmit) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onSubmit({ name: name.trim(), description: description.trim(), content });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog.Root open onOpenChange={(next) => (!next ? onClose() : undefined)}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-[60] bg-black/45" />
+        <Dialog.Popup className="fixed left-1/2 top-1/2 z-[60] flex w-[min(92vw,34rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 text-foreground shadow-2xl">
+          <Dialog.Title className="text-lg font-semibold">合成索引 Skill</Dialog.Title>
+          <p className="text-sm text-muted-foreground">
+            把选中的 {memberNames.length} 个 Skill 收进一个索引 Skill；系统提示词只会展示这一个，
+            模型按需读取成员内容。
+          </p>
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium">名称</label>
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="例如 nature-suite（字母数字/._-）"
+              className="h-10 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            />
+            {name && !nameValid ? (
+              <span className="text-xs text-destructive">
+                名称只能包含字母、数字、点、下划线或连字符
+              </span>
+            ) : null}
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium">描述（模型据此判断何时打开）</label>
+            <textarea
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              rows={2}
+              placeholder="例如 Nature 论文写作全流程套件：检索、写作、引用、润色、图表"
+              className="resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium">正文（可选，索引 Skill 的指引内容）</label>
+            <textarea
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+              rows={3}
+              placeholder="留空则自动生成一个最简索引。成员清单会自动附在末尾。"
+              className="resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={onClose} disabled={submitting}>
+              取消
+            </Button>
+            <Button type="button" onClick={() => void submit()} disabled={!canSubmit}>
+              {submitting ? "合成中…" : "合成"}
+            </Button>
+          </div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -351,12 +529,20 @@ function sortSkillsPinnedFirst(a: SkillRecord, b: SkillRecord) {
 function SkillGroupCard({
   group,
   query,
+  selecting,
+  selected,
+  selectable,
+  onToggleSelected,
   onToggleSkill,
   onPinSkill,
   onDeleteSkill,
 }: {
   group: SkillGroup;
   query: string;
+  selecting: boolean;
+  selected: boolean;
+  selectable: boolean;
+  onToggleSelected: () => void;
   onToggleSkill: DirectoryModalProps["onToggleSkill"];
   onPinSkill: DirectoryModalProps["onPinSkill"];
   onDeleteSkill: DirectoryModalProps["onDeleteSkill"];
@@ -370,18 +556,40 @@ function SkillGroupCard({
     }
   }, [query, hasChildren]);
 
+  const selectMode = selecting && selectable;
+
   return (
-    <div className="slotflow-hover-lift group flex min-h-32 flex-col gap-2 rounded-lg border bg-card/95 p-4 transition-colors hover:border-foreground/20">
+    <div
+      className={cn(
+        "slotflow-hover-lift group flex min-h-32 flex-col gap-2 rounded-lg border bg-card/95 p-4 transition-colors hover:border-foreground/20",
+        selectMode && "cursor-pointer",
+        selected && "border-primary ring-1 ring-primary",
+      )}
+      onClick={selectMode ? onToggleSelected : undefined}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <Blocks className="size-4 shrink-0 text-primary" />
+          {selectMode ? (
+            <span
+              className={cn(
+                "grid size-4 shrink-0 place-items-center rounded border",
+                selected ? "border-primary bg-primary text-primary-foreground" : "border-input",
+              )}
+            >
+              {selected ? <Check className="size-3" /> : null}
+            </span>
+          ) : (
+            <Blocks className="size-4 shrink-0 text-primary" />
+          )}
           <span className="truncate font-medium">{group.root.name}</span>
           {group.root.pinned ? <Pin className="size-3.5 shrink-0 text-amber-500" /> : null}
         </div>
-        <ToggleSwitch
-          enabled={group.root.enabled}
-          onChange={(next) => onToggleSkill(group.root, next)}
-        />
+        {selecting ? null : (
+          <ToggleSwitch
+            enabled={group.root.enabled}
+            onChange={(next) => onToggleSkill(group.root, next)}
+          />
+        )}
       </div>
       <p className="line-clamp-2 min-h-[2.5rem] text-sm text-muted-foreground">
         {group.root.description || "（无描述）"}

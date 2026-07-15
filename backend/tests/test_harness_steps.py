@@ -39,7 +39,7 @@ from app.harness.steps.skills_preflight import (
 )
 from app.harness.steps.subagent_limit import cap_subagent_calls
 from app.harness.steps.todo import (
-    latest_message_is_todo_enforcer,
+    consume_todo_enforcement,
     todo_enforcement_update,
     todo_parallel_call_guard,
     todo_reminder_update,
@@ -75,7 +75,7 @@ def test_runtime_summary_writes_compact_context_snapshot() -> None:
             "runtime": {
                 "thread_id": "thread_steps",
                 "run_id": "run_steps",
-                "model_name": "deepseek-v4-pro",
+                "model_name": "deepseek/deepseek-v4-pro",
                 "mode": "ultra",
                 "agent_name": "default",
                 "thinking_enabled": True,
@@ -204,7 +204,7 @@ def test_should_run_preflight_skips_simple_chat() -> None:
 
 
 def test_todo_reminder_reminds_when_todos_leave_context() -> None:
-    update = todo_reminder_update(
+    reminder_text = todo_reminder_update(
         state={
             "messages": [HumanMessage(content="继续执行")],
             "todos": [
@@ -213,11 +213,11 @@ def test_todo_reminder_reminds_when_todos_leave_context() -> None:
             ],
         }
     )
-    assert update is not None
-    reminder = update["messages"][0]
-    assert isinstance(reminder, HumanMessage)
-    assert reminder.name == "slotflow_todo_reminder"
-    assert "[in_progress] 生成报告" in str(reminder.content)
+    # Control text only — it is folded into the step system prompt by pre_model and
+    # must never become a message object (streamed by the messages projection).
+    assert isinstance(reminder_text, str)
+    assert reminder_text.startswith("<slotflow-todo-reminder>")
+    assert "[in_progress] 生成报告" in reminder_text
 
 
 def test_write_todos_tool_is_registered_with_command_return() -> None:
@@ -264,13 +264,31 @@ def test_todo_enforcement_requests_initial_list_for_planned_work() -> None:
         plan_enabled=True,
     )
 
+    # Enforcement rides the `todo_enforcement` state channel, not a message object.
     assert update is not None
-    enforcer = update["messages"][0]
-    assert isinstance(enforcer, HumanMessage)
-    assert enforcer.name == "slotflow_todo_enforcer"
-    assert "Call `write_todos` now" in str(enforcer.content)
-    assert latest_message_is_todo_enforcer({"messages": [enforcer]})
-    assert route_after_model({"messages": [HumanMessage("修复 todo 链路"), AIMessage(content="我来处理。"), enforcer]}) == "pre_model"
+    enforcement = update["todo_enforcement"]
+    assert enforcement["attempted"] is True
+    assert "Call `write_todos` now" in enforcement["pending"]
+    # A queued enforcement routes back to pre_model for the retry step.
+    assert route_after_model(update) == "pre_model"
+
+
+def test_todo_enforcement_pending_is_consumed_once_and_clears() -> None:
+    update = todo_enforcement_update(
+        state={"messages": [HumanMessage("修复 todo 链路并补测试"), AIMessage(content="我来处理。")]},
+        plan_enabled=True,
+    )
+    # pre_model consumes the pending text and clears it while keeping the guard.
+    pending, clear = consume_todo_enforcement(update)
+    assert pending is not None and "write_todos" in pending
+    assert clear["todo_enforcement"]["pending"] is None
+    assert clear["todo_enforcement"]["attempted"] is True
+    # After clearing, the enforcement no longer routes back to pre_model.
+    cleared_state = {
+        "messages": [HumanMessage("修复 todo 链路"), AIMessage(content="我来处理。")],
+        **clear,
+    }
+    assert route_after_model(cleared_state) != "pre_model"
 
 
 def test_todo_enforcement_skips_simple_unplanned_answer() -> None:
@@ -306,7 +324,7 @@ def test_todo_enforcement_honors_explicit_todo_request_without_plan_mode() -> No
     )
 
     assert update is not None
-    assert update["messages"][0].name == "slotflow_todo_enforcer"
+    assert update["todo_enforcement"]["pending"]
 
 
 def test_todo_enforcement_requests_status_update_for_incomplete_todos() -> None:
@@ -319,18 +337,38 @@ def test_todo_enforcement_requests_status_update_for_incomplete_todos() -> None:
     )
 
     assert update is not None
-    assert "The active todo list is not complete" in str(update["messages"][0].content)
+    assert "The active todo list is not complete" in update["todo_enforcement"]["pending"]
 
 
-def test_todo_enforcement_does_not_loop_after_existing_enforcer() -> None:
-    first = HumanMessage("修复 todo 链路")
-    enforcer = HumanMessage(name="slotflow_todo_enforcer", content="call write_todos")
+def test_todo_enforcement_does_not_loop_after_attempted_guard() -> None:
+    # Once an enforcement was attempted (guard set) and ignored, no re-injection.
     update = todo_enforcement_update(
-        state={"messages": [first, AIMessage(content="我来处理。"), enforcer, AIMessage(content="继续解释。")]},
+        state={
+            "messages": [HumanMessage("修复 todo 链路"), AIMessage(content="继续解释。")],
+            "todo_enforcement": {"pending": None, "attempted": True},
+        },
         plan_enabled=True,
     )
 
     assert update is None
+
+
+def test_todo_enforcement_guard_rearms_when_model_writes_todos() -> None:
+    # When the model actually calls write_todos, the guard resets so later incomplete
+    # states can enforce again.
+    write_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "w", "type": "tool_call"}],
+    )
+    update = todo_enforcement_update(
+        state={
+            "messages": [HumanMessage("修复 todo 链路"), write_call],
+            "todo_enforcement": {"pending": None, "attempted": True},
+        },
+        plan_enabled=True,
+    )
+
+    assert update == {"todo_enforcement": {"pending": None, "attempted": False}}
 
 
 # --- subagent limit --------------------------------------------------------

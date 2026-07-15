@@ -203,6 +203,10 @@ async def stream_thread_run(
     async def frames() -> AsyncIterator[str]:
         assistant_text_parts: list[str] = []
         assistant_reasoning_parts: list[str] = []
+        # ReAct 一段正文→工具→再一段正文;各段独立成文,无分隔拼接会让 "## 标题" 落到
+        # 行中间导致 markdown 失效。以工具事件为段界,正文/思考重启时补一个空行。
+        text_break_pending = False
+        reasoning_break_pending = False
         snapshot_message_content: str | None = None
         snapshot_reasoning_content: str | None = None
         clarification_saved = False
@@ -215,9 +219,19 @@ async def stream_thread_run(
                     delta = event.data.get("delta")
                     if isinstance(delta, str):
                         if event.data.get("channel") == "reasoning":
+                            if reasoning_break_pending and assistant_reasoning_parts:
+                                assistant_reasoning_parts.append("\n\n")
+                            reasoning_break_pending = False
                             assistant_reasoning_parts.append(delta)
                         else:
+                            if text_break_pending and assistant_text_parts:
+                                assistant_text_parts.append("\n\n")
+                            text_break_pending = False
                             assistant_text_parts.append(delta)
+
+                if event.event in {"tool.delta", "tool.status"}:
+                    text_break_pending = True
+                    reasoning_break_pending = True
 
                 if event.event == "state.snapshot":
                     snapshot_message_content = latest_assistant_content(event)

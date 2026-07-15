@@ -48,7 +48,7 @@ export type ClarificationRequestRecord = {
 
 export type ChatMode = "flash" | "pro" | "ultra";
 
-export type ModelProvider = "deepseek" | "openai" | "anthropic" | "custom";
+export type ModelProvider = string;
 
 export type ModelOptionRecord = {
   id: string;
@@ -425,6 +425,33 @@ export async function installSkill(
 
   if (!response.ok) {
     throw new Error(`install skill failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<SkillRecord>;
+}
+
+export type SkillGroupRequest = {
+  name: string;
+  description: string;
+  content?: string;
+  members: string[];
+};
+
+export async function groupSkills(
+  body: SkillGroupRequest,
+  options: ChatRequestOptions = {},
+): Promise<SkillRecord> {
+  const response = await fetch("/api/skills/group", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`group skills failed: ${response.status}`);
   }
 
   return response.json() as Promise<SkillRecord>;

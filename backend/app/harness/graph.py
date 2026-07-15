@@ -62,7 +62,8 @@ from app.harness.steps.skills_preflight import (
 from app.harness.steps.subagent_limit import cap_subagent_calls
 from app.harness.steps.summarization import build_summarization_middleware
 from app.harness.steps.todo import (
-    latest_message_is_todo_enforcer,
+    consume_todo_enforcement,
+    route_after_model_has_enforcement,
     todo_enforcement_update,
     todo_parallel_call_guard,
     todo_reminder_update,
@@ -241,15 +242,23 @@ def make_pre_model_node(inputs: _GraphInputs):
         messages = list(state.get("messages") or [])
         updates: dict[str, Any] = {}
 
-        # todo reminder: dynamic state recap only, not a static system-prompt constraint.
+        # Per-step control context (todo reminder / enforcement retry). These are
+        # SlotFlow-internal instructions to the model and must ride the `system_prompt`
+        # string channel, never a message object: the v3 messages projection streams
+        # every fresh message object it sees (so a control HumanMessage surfaces as
+        # user-visible content), and the `messages` channel is additionally persisted
+        # and replayed by the checkpointer. Same boundary rule as skills preflight (§29);
+        # this is the root fix for the 2026-07-15 live enforcer-text leak.
+        step_control_blocks: list[str] = []
         if flags.todo_enabled and inputs.features.plan_enabled and inputs.tools:
-            reminder = todo_reminder_update(state=state)
-            if reminder is not None:
-                updates["messages"] = reminder["messages"]
-                # The reminder must reach the model THIS step, so it belongs in the
-                # projection below too (the reducer append alone is invisible to `agent`
-                # whenever `llm_input_messages` is set).
-                messages = messages + list(reminder["messages"])
+            reminder_text = todo_reminder_update(state=state)
+            if reminder_text:
+                step_control_blocks.append(reminder_text)
+        if flags.todo_enabled and inputs.tools:
+            pending_enforcement, enforcement_clear = consume_todo_enforcement(state)
+            if pending_enforcement:
+                step_control_blocks.append(pending_enforcement)
+                updates.update(enforcement_clear)
 
         # Model-input projection (official pre_model_hook convention): recompute from the
         # canonical `messages` on EVERY step. `llm_input_messages` is a plain last-write
@@ -277,9 +286,14 @@ def make_pre_model_node(inputs: _GraphInputs):
                     tools_enabled=bool(inputs.tools),
                 )
                 system_sections = [enriched.content]
+        # Per-step todo control blocks go LAST so they are the most recent instruction
+        # the model reads, without ever entering the streamed/persisted message channel.
+        system_sections.extend(step_control_blocks)
         composed = "\n\n".join(part for part in system_sections if part)
-        if composed and composed != inputs.system_prompt:
-            updates["system_prompt"] = composed
+        # Recompute-per-step, same lesson as `llm_input_messages` above: writing only
+        # when it differs from the BASE prompt leaves the previous step's snapshot
+        # (e.g. a consumed enforcement block) stale in state for every later step.
+        updates["system_prompt"] = composed or inputs.system_prompt
         return updates
 
     return pre_model
@@ -413,7 +427,7 @@ def make_post_model_node(inputs: _GraphInputs):
 
 
 def route_after_model(state: SlotFlowAgentState) -> str:
-    if latest_message_is_todo_enforcer(state):
+    if route_after_model_has_enforcement(state):
         return "pre_model"
     decision = tools_condition(state)
     return "tools" if decision == "tools" else "finalize"

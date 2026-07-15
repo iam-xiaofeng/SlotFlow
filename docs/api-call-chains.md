@@ -12,7 +12,7 @@ POST /api/chat/threads/{thread_id}/runs/stream        app/chat/routes.py::stream
 ├─ 上传校验+落位  validate_uploaded_files_exist / stage_uploaded_files → app/uploads/storage.py
 ├─ build_run_config → RunConfigBundle{config(thread_id), context(RunContext)}   app/chat/run_config.py
 ├─ get_agent_adapter → RuntimeBackedAgentAdapter.stream_events    app/chat/runtime/adapter.py
-│  ├─ create_model_for_context(模型工厂,按 provider/base_url)   app/chat/runtime/models.py
+│  ├─ create_model_for_context → ChatLiteLLM(LiteLLM provider/model metadata；统一 Chat Completions)   app/chat/runtime/models.py
 │  ├─ create_async_checkpointer(sqlite/postgres/memory/none)      app/chat/runtime/checkpointer.py
 │  ├─ refresh_runtime_skills_config / ensure_mcp_tools_loaded
 │  └─ build_slotflow_harness_graph                                app/harness/builder.py
@@ -46,7 +46,7 @@ POST /api/chat/threads/{thread_id}/runs/stream        app/chat/routes.py::stream
 
 | 端点 | 链路 |
 |---|---|
-| GET /models | routes.list_models → model_catalog.discover_model_catalog(并发探测各 provider /models,env 驱动 base_url,无硬编码兜底) |
+| GET /models | routes.list_models → model_catalog.discover_model_catalog(LiteLLM 检测已配置 provider；内置 metadata 筛选 chat+function-calling；custom 走 endpoint discovery/CUSTOM_MODELS) |
 | POST /threads | routes.create_thread → ChatRepository.create_thread(SQLite) |
 | GET /threads | routes.list_threads → repo.list_threads(按活跃排序) |
 | GET /search | routes.search_threads → repo.search_threads(标题+正文 LIKE) |

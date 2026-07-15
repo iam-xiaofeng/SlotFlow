@@ -176,7 +176,7 @@ export function ChatComposer({
           todoListKey={todoListKey}
         />
 
-        <div className="slotflow-hover-lift relative z-10 overflow-hidden rounded-xl bg-background/96 shadow-[0_18px_58px_-38px_rgba(15,23,42,0.58),0_1px_3px_rgba(15,23,42,0.08)] backdrop-blur transition-shadow focus-within:shadow-[0_24px_76px_-42px_rgba(15,23,42,0.66),0_1px_4px_rgba(15,23,42,0.1)]">
+        <div className="relative z-10 overflow-hidden rounded-2xl border border-border bg-card shadow-[0_2px_12px_-6px_rgba(15,23,42,0.12)] transition-[border-color,box-shadow] duration-150 focus-within:border-ring/50 focus-within:shadow-[0_8px_30px_-14px_rgba(37,99,235,0.28)]">
           <div className="px-5 pb-2 pt-4 sm:px-6">
             <ComposerTextarea
               input={input}

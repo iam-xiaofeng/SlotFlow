@@ -20,7 +20,7 @@ from app.clock import utc_now
 ChatMode = Literal["flash", "pro", "ultra"]
 MessageRole = Literal["user", "assistant", "system", "tool"]
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
-ModelProvider = Literal["deepseek", "openai", "anthropic", "custom"]
+ModelProvider = str
 
 
 class ThreadCreateRequest(BaseModel):
@@ -86,7 +86,7 @@ class ChatStreamRequest(BaseModel):
     """
 
     message: str = Field(min_length=1)
-    model_name: str = "deepseek-v4-pro"
+    model_name: str = "deepseek/deepseek-v4-pro"
     provider: ModelProvider | None = Field(
         default=None,
         description="可选：前端所选模型在 catalog 中的来源 provider。为空时后端按 model id 前缀推断。",

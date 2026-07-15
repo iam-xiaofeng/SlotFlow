@@ -3,27 +3,22 @@
 import { useMemo, useState } from "react";
 import {
   Blocks,
-  Boxes,
   Brain,
-  FileText,
   Folder,
-  LibraryBig,
+  Loader2,
   MessageSquarePlus,
   MoreHorizontal,
   Plug,
   Trash2,
 } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -49,40 +44,42 @@ import {
   type SkillInstallRequest,
   type SkillRecord,
   type ThreadRecord,
-  type WorkspaceEntryRecord,
 } from "@/lib/chat-stream";
+import { type ThreadRunStatus } from "@/hooks/use-chat-stream";
 
-import { filterThreadArtifacts } from "./chat-format";
 import { DirectoryModal, type DirectoryTab } from "./directory-modal";
 import { SearchMenu } from "./chat-sidebar-search";
 import { SlotFlowLogo } from "./slotflow-logo";
 
 type ThreadSidebarProps = {
   activeThreadId: string | null;
-  artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
+  runStates: Record<string, ThreadRunStatus>;
   filteredThreads: ThreadRecord[];
   isLoading: boolean;
   memories: MemoryRecord[];
   mcpServers: McpServerRecord[];
   query: string;
   skills: SkillRecord[];
-  threadArtifactPaths: Record<string, string[]>;
   threadListError: string | null;
   onAddHttpMcpServer: () => void;
   onAddMemory: (content: string, kind: MemoryKind) => void;
   onDeleteMcpServer: (server: McpServerRecord) => void;
   onDeleteMemory: (memory: MemoryRecord) => void;
   onDeleteSkill: (skill: SkillRecord) => void;
-  onDeleteArtifact: (artifact: WorkspaceEntryRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
   onEditMemory: (memory: MemoryRecord, content: string, kind: MemoryKind) => void;
+  onGroupSkills: (input: {
+    name: string;
+    description: string;
+    content: string;
+    members: string[];
+  }) => Promise<void> | void;
   onInstallSkill: (request?: SkillInstallRequest) => Promise<void> | void;
   onNewThread: () => void;
   onOpenWorkspaceDirectory: () => void;
   onPinMcpServer: (server: McpServerRecord, pinned: boolean) => void;
   onPinSkill: (skill: SkillRecord, pinned: boolean) => void;
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onQueryChange: (query: string) => void;
   onReorderMcpServers: (names: string[]) => void;
   onReorderSkills: (names: string[]) => void;
@@ -94,30 +91,28 @@ type ThreadSidebarProps = {
 
 export function ThreadSidebar({
   activeThreadId,
-  artifacts,
   disabled,
+  runStates,
   filteredThreads,
   isLoading,
   memories,
   mcpServers,
   query,
   skills,
-  threadArtifactPaths,
   threadListError,
   onAddHttpMcpServer,
   onAddMemory,
   onDeleteMcpServer,
   onDeleteMemory,
   onDeleteSkill,
-  onDeleteArtifact,
   onDeleteThread,
   onEditMemory,
+  onGroupSkills,
   onInstallSkill,
   onNewThread,
   onOpenWorkspaceDirectory,
   onPinMcpServer,
   onPinSkill,
-  onPreviewArtifact,
   onQueryChange,
   onReorderMcpServers,
   onReorderSkills,
@@ -158,6 +153,7 @@ export function ThreadSidebar({
         mcpServers={mcpServers}
         memories={memories}
         onInstallSkill={onInstallSkill}
+        onGroupSkills={onGroupSkills}
         onUploadSkill={onUploadSkill}
         onToggleSkill={onToggleSkill}
         onPinSkill={onPinSkill}
@@ -186,100 +182,65 @@ export function ThreadSidebar({
               onQueryChange={onQueryChange}
               onSelectThread={onSelectThread}
             />
-            <SidebarTrigger className="size-8 rounded-lg text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground" />
+            <SidebarTrigger className="size-8 rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" />
           </div>
         </div>
       </SidebarHeader>
 
       <SidebarContent className="px-2">
-        <SidebarGroup className="pb-3 pt-1">
+        <SidebarGroup className="pb-1 pt-2">
           <SidebarGroupContent>
-            <SidebarMenu className="gap-0.5">
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  tooltip="新聊天"
-                  onClick={onNewThread}
-                  disabled={disabled}
-                  isActive={!activeThreadId}
-                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground data-active:bg-muted data-active:text-foreground"
-                >
-                  <MessageSquarePlus className="size-4" />
-                  <span>新聊天</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  tooltip="Skills"
-                  onClick={() => openDirectory("skills")}
-                  disabled={disabled}
-                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
-                >
-                  <Blocks className="size-4" />
-                  <span>Skills</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  tooltip="MCP"
-                  onClick={() => openDirectory("mcp")}
-                  disabled={disabled}
-                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
-                >
-                  <Plug className="size-4" />
-                  <span>MCP</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  tooltip="记忆"
-                  onClick={() => openDirectory("memory")}
-                  disabled={disabled}
-                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
-                >
-                  <Brain className="size-4" />
-                  <span>记忆</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  tooltip="工作区"
-                  onClick={onOpenWorkspaceDirectory}
-                  disabled={disabled}
-                  className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
-                >
-                  <Folder className="size-4" />
-                  <span>工作区</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <MoreToolsMenu />
-              </SidebarMenuItem>
-            </SidebarMenu>
+            <Button
+              type="button"
+              disabled={disabled}
+              onClick={onNewThread}
+              className="h-10 w-full justify-start gap-2.5 rounded-xl bg-accent px-3 text-[0.95rem] font-medium text-accent-foreground shadow-none transition-colors hover:bg-accent/75"
+            >
+              <MessageSquarePlus className="size-4" />
+              新聊天
+            </Button>
           </SidebarGroupContent>
         </SidebarGroup>
 
         <ThreadHistory
           activeThreadId={activeThreadId}
           disabled={disabled}
+          runStates={runStates}
           filteredThreads={filteredThreads}
-          artifacts={artifacts}
           isLoading={isLoading}
           query={query}
-          threadArtifactPaths={threadArtifactPaths}
           threadListError={threadListError}
-          onPreviewArtifact={onPreviewArtifact}
           onSelectThread={onSelectThread}
           onDeleteThread={onDeleteThread}
         />
       </SidebarContent>
 
-      <SidebarFooter className="mt-auto px-2 pb-3 pt-2">
-        <UserMenu />
+      <SidebarFooter className="mt-auto gap-2 px-2 pb-3 pt-2">
+        <div className="flex items-center justify-between gap-1 border-t border-sidebar-border pt-2">
+          {(
+            [
+              { label: "Skills", icon: Blocks, onClick: () => openDirectory("skills") },
+              { label: "MCP", icon: Plug, onClick: () => openDirectory("mcp") },
+              { label: "记忆", icon: Brain, onClick: () => openDirectory("memory") },
+              { label: "工作区", icon: Folder, onClick: onOpenWorkspaceDirectory },
+            ] as const
+          ).map(({ label, icon: Icon, onClick }) => (
+            <Button
+              key={label}
+              type="button"
+              variant="ghost"
+              size="icon"
+              title={label}
+              disabled={disabled}
+              onClick={onClick}
+              className="size-9 flex-1 rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Icon className="size-4" />
+              <span className="sr-only">{label}</span>
+            </Button>
+          ))}
+          <UserMenu />
+        </div>
       </SidebarFooter>
     </>
   );
@@ -301,8 +262,8 @@ function CollapsedSidebarControls({
   return (
     <SidebarHeader className="px-4 py-3">
       <div className="flex h-12 items-center gap-4">
-        <div className="grid size-9 shrink-0 place-items-center rounded-full text-sm font-semibold text-blue-600">
-          S
+        <div className="grid size-9 shrink-0 place-items-center">
+          <SlotFlowLogo className="size-7 rounded-md" />
         </div>
         <div className="flex h-12 items-center gap-1 rounded-full border border-border/80 bg-background px-2 shadow-sm">
           <SidebarTrigger className="size-9 rounded-full text-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted" />
@@ -339,7 +300,7 @@ export function UserMenu() {
             type="button"
             variant="ghost"
             size="icon"
-            className="size-9 rounded-full text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground"
+            className="size-9 rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           />
         }
       >
@@ -357,194 +318,178 @@ export function UserMenu() {
   );
 }
 
-function MoreToolsMenu() {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        render={
-          <SidebarMenuButton
-            type="button"
-            className="h-9 rounded-lg px-2.5 text-[0.95rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground data-open:bg-muted data-open:text-foreground"
-          />
-        }
-      >
-        <MoreHorizontal className="size-4" />
-        <span>更多</span>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent side="right" align="start" sideOffset={8} className="w-52 rounded-2xl p-2 shadow-xl">
-        <DropdownMenuItem disabled className="min-h-11 gap-3 rounded-xl">
-          <LibraryBig className="size-5" />
-          库
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled className="min-h-11 gap-3 rounded-xl">
-          <Folder className="size-5" />
-          项目
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled className="min-h-11 gap-3 rounded-xl">
-          <Boxes className="size-5" />
-          应用
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 type ThreadHistoryProps = {
   activeThreadId: string | null;
-  artifacts: WorkspaceEntryRecord[];
   disabled: boolean;
+  runStates: Record<string, ThreadRunStatus>;
   filteredThreads: ThreadRecord[];
   isLoading: boolean;
   query: string;
-  threadArtifactPaths: Record<string, string[]>;
   threadListError: string | null;
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
   onSelectThread: (thread: ThreadRecord) => void;
   onDeleteThread: (thread: ThreadRecord) => void;
 };
 
-function ThreadHistory({
-  activeThreadId,
-  artifacts,
-  disabled,
-  filteredThreads,
-  isLoading,
-  query,
-  threadArtifactPaths,
-  threadListError,
-  onPreviewArtifact,
-  onSelectThread,
-  onDeleteThread,
-}: ThreadHistoryProps) {
-  const artifactFiles = useMemo(
-    () => artifacts.filter((artifact) => artifact.kind === "file"),
-    [artifacts],
-  );
-
+/** 线程行右侧的运行状态指示:转圈=生成中,蓝点=有新结果,闪烁蓝点=等待输入,红点=出错。 */
+function ThreadRunBadge({ status }: { status: ThreadRunStatus | undefined }) {
+  if (!status) {
+    return null;
+  }
+  if (status === "streaming") {
+    return (
+      <Loader2
+        className="size-3.5 shrink-0 animate-spin text-primary"
+        aria-label="正在生成"
+      />
+    );
+  }
   return (
-    <SidebarGroup className="px-0 pb-3 pt-5 group-data-[collapsible=icon]:hidden">
-      <SidebarGroupLabel className="h-7 px-2 text-[0.95rem] font-semibold text-foreground">
-        最近
-      </SidebarGroupLabel>
-      <SidebarGroupContent>
-        <ScrollArea className="max-h-[calc(100dvh-18rem)] min-h-24">
-          <SidebarMenu className="gap-0.5 pr-1">
-            {isLoading ? (
-              <ThreadSkeletons />
-            ) : threadListError ? (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[0.9rem] text-destructive">
-                {threadListError}
-              </div>
-            ) : filteredThreads.length === 0 ? (
-              <div className="px-2 py-4 text-[0.92rem] text-muted-foreground">
-                {query.trim() ? "没有匹配的聊天" : "暂无最近聊天"}
-              </div>
-            ) : (
-              filteredThreads.map((item) => {
-                const threadArtifacts = filterThreadArtifacts(
-                  item.id,
-                  artifactFiles,
-                  threadArtifactPaths,
-                );
-                return (
-                  <SidebarMenuItem key={item.id} className="group/thread-row">
-                    <SidebarMenuButton
-                      type="button"
-                      isActive={item.id === activeThreadId}
-                      disabled={disabled}
-                      onClick={() => onSelectThread(item)}
-                      className="h-8 rounded-md px-2 text-[0.94rem] font-normal text-muted-foreground transition-all duration-150 hover:-translate-y-0.5 hover:bg-muted hover:text-foreground data-active:bg-muted data-active:text-foreground"
-                    >
-                      <span className="block min-w-0 truncate" title={item.title}>
-                        {item.title}
-                      </span>
-                    </SidebarMenuButton>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        render={
-                          <SidebarMenuAction
-                            showOnHover
-                            className="right-1 top-1 size-6 rounded-md bg-sidebar/80 text-muted-foreground hover:bg-background hover:text-foreground"
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                            }}
-                          />
-                        }
-                      >
-                        <MoreHorizontal className="size-4" />
-                        <span className="sr-only">更多操作</span>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" side="right" sideOffset={8} className="w-44 rounded-lg p-1.5">
-                        <ThreadArtifactSubmenu
-                          artifacts={threadArtifacts}
-                          onPreviewArtifact={onPreviewArtifact}
-                        />
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          disabled={disabled}
-                          variant="destructive"
-                          className="gap-2 rounded-md"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            if (!disabled) {
-                              onDeleteThread(item);
-                            }
-                          }}
-                        >
-                          <Trash2 className="size-4" />
-                          删除
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </SidebarMenuItem>
-                );
-              })
-            )}
-          </SidebarMenu>
-        </ScrollArea>
-      </SidebarGroupContent>
-    </SidebarGroup>
+    <span
+      aria-label={
+        status === "needs_input"
+          ? "等待你的输入"
+          : status === "error"
+            ? "运行出错"
+            : "有新结果"
+      }
+      className={cn(
+        "size-2 shrink-0 rounded-full",
+        status === "error" ? "bg-destructive" : "bg-primary",
+        status === "needs_input" && "animate-pulse",
+      )}
+    />
   );
 }
 
-function ThreadArtifactSubmenu({
-  artifacts,
-  onPreviewArtifact,
-}: {
-  artifacts: WorkspaceEntryRecord[];
-  onPreviewArtifact: (artifact: WorkspaceEntryRecord) => void;
-}) {
+function groupThreadsByTime(threads: ThreadRecord[]): Array<{
+  label: string;
+  threads: ThreadRecord[];
+}> {
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const buckets: Array<{ label: string; max: number; threads: ThreadRecord[] }> = [
+    { label: "今天", max: dayMs, threads: [] },
+    { label: "近 7 天", max: 7 * dayMs, threads: [] },
+    { label: "近 30 天", max: 30 * dayMs, threads: [] },
+    { label: "更早", max: Infinity, threads: [] },
+  ];
+
+  for (const thread of threads) {
+    const updatedAt = Date.parse(thread.updated_at || thread.created_at);
+    const age = Number.isNaN(updatedAt) ? Infinity : now - updatedAt;
+    const bucket = buckets.find((item) => age < item.max) ?? buckets[buckets.length - 1];
+    bucket.threads.push(thread);
+  }
+
+  return buckets
+    .filter((bucket) => bucket.threads.length > 0)
+    .map(({ label, threads: bucketThreads }) => ({ label, threads: bucketThreads }));
+}
+
+function ThreadHistory({
+  activeThreadId,
+  disabled,
+  runStates,
+  filteredThreads,
+  isLoading,
+  query,
+  threadListError,
+  onSelectThread,
+  onDeleteThread,
+}: ThreadHistoryProps) {
+  const groups = useMemo(
+    () => groupThreadsByTime(filteredThreads),
+    [filteredThreads],
+  );
+
   return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger disabled={artifacts.length === 0}>
-        <FileText className="size-4" />
-        产物
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent className="w-72">
-        {artifacts.length === 0 ? (
-          <DropdownMenuItem disabled>这个聊天暂无产物</DropdownMenuItem>
-        ) : (
-          artifacts.map((artifact) => (
-            <DropdownMenuItem
-              key={artifact.path}
-              className="min-w-0 gap-2"
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onPreviewArtifact(artifact);
-              }}
-            >
-              <FileText className="size-4" />
-              <span className="min-w-0 truncate">
-                {artifact.path.replace(/^artifacts\//, "")}
-              </span>
-            </DropdownMenuItem>
-          ))
-        )}
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
+    <SidebarGroup className="px-0 pb-3 pt-3 group-data-[collapsible=icon]:hidden">
+      <SidebarGroupContent>
+        <ScrollArea className="max-h-[calc(100dvh-14rem)] min-h-24">
+          {isLoading ? (
+            <SidebarMenu className="gap-0.5 pr-1">
+              <ThreadSkeletons />
+            </SidebarMenu>
+          ) : threadListError ? (
+            <div className="mx-1 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[0.9rem] text-destructive">
+              {threadListError}
+            </div>
+          ) : filteredThreads.length === 0 ? (
+            <div className="px-2 py-4 text-[0.92rem] text-muted-foreground">
+              {query.trim() ? "没有匹配的聊天" : "暂无最近聊天"}
+            </div>
+          ) : (
+            groups.map((group) => (
+              <div key={group.label} className="mb-2">
+                <SidebarGroupLabel className="h-7 px-2 text-[0.78rem] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  {group.label}
+                </SidebarGroupLabel>
+                <SidebarMenu className="gap-0.5 pr-1">
+                  {group.threads.map((item) => {
+                    const runStatus = runStates[item.id];
+                    return (
+                      <SidebarMenuItem key={item.id} className="group/thread-row">
+                        <SidebarMenuButton
+                          type="button"
+                          isActive={item.id === activeThreadId}
+                          disabled={disabled}
+                          onClick={() => onSelectThread(item)}
+                          className="h-8 rounded-md px-2 text-[0.94rem] font-normal text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-active:bg-accent data-active:font-medium data-active:text-accent-foreground"
+                        >
+                          <span className="block min-w-0 flex-1 truncate" title={item.title}>
+                            {item.title}
+                          </span>
+                          {/* 悬停时菜单按钮会盖住行尾;徽标留在行尾但悬停时让位隐藏 */}
+                          {runStatus ? (
+                            <span className="ml-auto flex shrink-0 items-center pr-0.5 group-hover/thread-row:opacity-0">
+                              <ThreadRunBadge status={runStatus} />
+                            </span>
+                          ) : null}
+                        </SidebarMenuButton>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger
+                            render={
+                              <SidebarMenuAction
+                                showOnHover
+                                className="right-1 top-1 size-6 rounded-md bg-sidebar/80 text-muted-foreground hover:bg-background hover:text-foreground"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                }}
+                              />
+                            }
+                          >
+                            <MoreHorizontal className="size-4" />
+                            <span className="sr-only">更多操作</span>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" side="right" sideOffset={8} className="w-44 rounded-lg p-1.5">
+                            <DropdownMenuItem
+                              disabled={disabled || runStatus === "streaming"}
+                              variant="destructive"
+                              className="gap-2 rounded-md"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                if (!disabled && runStatus !== "streaming") {
+                                  onDeleteThread(item);
+                                }
+                              }}
+                            >
+                              <Trash2 className="size-4" />
+                              {runStatus === "streaming" ? "生成中，不能删除" : "删除"}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </div>
+            ))
+          )}
+        </ScrollArea>
+      </SidebarGroupContent>
+    </SidebarGroup>
   );
 }
 

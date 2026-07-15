@@ -112,11 +112,10 @@ def test_extract_message_delta_accepts_common_projection_shapes(item, expected) 
         ({"type": "reasoning", "reasoning": "deepseek/openai 风格"}, "deepseek/openai 风格"),
         ({"type": "thinking", "thinking": "anthropic 扩展思考"}, "anthropic 扩展思考"),
         ({"additional_kwargs": {"reasoning_content": "kw 风格"}}, "kw 风格"),
-        ({"additional_kwargs": {"reasoning": "openrouter 风格"}}, "openrouter 风格"),
     ],
 )
-def test_extract_message_delta_parts_reads_multi_provider_reasoning(item, expected) -> None:
-    """reasoning 通道要兼容 deepseek/openai 的 reasoning 与 anthropic 的 thinking。"""
+def test_extract_message_delta_parts_reads_litellm_reasoning(item, expected) -> None:
+    """The projection consumes LangChain blocks and LiteLLM reasoning metadata."""
 
     assert extract_message_delta_parts(item) == {"reasoning_content": expected}
 
@@ -205,7 +204,7 @@ def test_extract_message_delta_parts_reads_standard_reasoning_delta() -> None:
     ) == {"reasoning_content": "先理解需求"}
 
 
-def test_extract_message_delta_parts_reads_deepseek_additional_kwargs() -> None:
+def test_extract_message_delta_parts_reads_litellm_additional_kwargs() -> None:
     chunk = SimpleNamespace(
         additional_kwargs={"reasoning_content": "拆解任务"},
         content="",
@@ -888,6 +887,72 @@ async def test_message_projection_flattening_preserves_parent_metadata() -> None
             {"metadata": {"lc_source": "summarization"}},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_todo_enforcer_control_text_never_reaches_stream_or_history() -> None:
+    """2026-07-15 live probe: the post_model todo-enforcer control block surfaced in the
+    user-visible content stream. Internal per-step control text must not enter the
+    durable `messages` conversation channel: the checkpointer replays it every later
+    turn (echo bait + §29-class pollution) and it must never surface as message.delta."""
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from app.harness.builder import build_slotflow_harness_graph
+    from app.harness.config import SlotFlowHarnessConfig
+    from app.harness.middleware import SlotFlowMiddlewareConfig
+    from app.chat.run_config import build_run_config
+
+    class _ToolAware(FakeMessagesListChatModel):
+        def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+            return self
+
+    chat_model = _ToolAware(
+        responses=[
+            AIMessage(content="第一次直接给出答案而不写待办"),
+            AIMessage(content="第二次仍然直接回答"),
+        ]
+    )
+    request = ChatStreamRequest(message="测试 todo 功能:分析这个仓库", mode="pro")
+    bundle = build_run_config(thread_id="tenforce", run_id="r1", request=request)
+    graph = build_slotflow_harness_graph(
+        model=chat_model,
+        run_context=bundle.context,
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="你是测试助手。",
+            middleware_config=SlotFlowMiddlewareConfig(
+                clarify_gate_enabled=False,
+                summarization_enabled=False,
+                proactive_memory_extraction_enabled=False,
+            ),
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    adapter = LangGraphEventAgentAdapter(graph)
+    events = await collect_agent_events(
+        adapter.stream_events(request=request, bundle=bundle)
+    )
+
+    deltas = "".join(
+        str(event.data.get("delta", ""))
+        for event in events
+        if event.event == "message.delta"
+    )
+    # The enforcement loop itself must still fire: both model calls streamed.
+    assert "第一次直接给出答案而不写待办" in deltas
+    assert "第二次仍然直接回答" in deltas
+    # The control block must never surface in the user-visible stream...
+    assert "slotflow-todo-enforcer" not in deltas
+    # ...and must never persist into the conversation history.
+    state = await graph.aget_state(bundle.config)
+    history = state.values.get("messages") or []
+    assert not any(
+        isinstance(message, HumanMessage)
+        and getattr(message, "name", None) == "slotflow_todo_enforcer"
+        for message in history
+    )
 
 
 def test_normalize_message_content_reasoning_only_returns_empty() -> None:

@@ -94,6 +94,7 @@ class SlotFlowSubagentConfig:
     profiles: tuple[SlotFlowSubagentProfile, ...] = field(
         default_factory=lambda: DEFAULT_SUBAGENT_PROFILES
     )
+    recursion_limit: int = 100
 
     def enabled_profiles(self) -> tuple[SlotFlowSubagentProfile, ...]:
         """Return enabled profiles in configured order."""

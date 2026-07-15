@@ -77,9 +77,11 @@ class SubagentTaskRunner:
         self._run_context = run_context
         self._environment_tools = list(environment_tools)
         self._role_catalog = role_catalog or default_role_catalog()
+        resolved_config = config or SlotFlowSubagentConfig()
+        self._recursion_limit = resolved_config.recursion_limit
         self._profiles = {
             profile.name: profile
-            for profile in (config or SlotFlowSubagentConfig()).enabled_profiles()
+            for profile in resolved_config.enabled_profiles()
         }
 
     def has_profiles(self) -> bool:
@@ -232,7 +234,8 @@ class SubagentTaskRunner:
                             ),
                         }
                     ]
-                }
+                },
+                config={"recursion_limit": self._recursion_limit},
             )
         except Exception as exc:  # noqa: BLE001 - return model-readable tool result
             return SubagentTaskResult(

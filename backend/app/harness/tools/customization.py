@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from langchain_core.tools import BaseTool, tool
@@ -164,6 +165,81 @@ def build_customization_tools(
             ensure_ascii=False,
         )
 
+    @tool("skill_group")
+    def skill_group(
+        name: str,
+        description: str,
+        members: list[str],
+        content: str = "",
+    ) -> str:
+        """Group several existing top-level Skills under a new index Skill.
+
+        A package like a paper-writing pipeline installs as a dozen PARALLEL skills — there is
+        no natural parent. Listing them all floods the prompt. After installing such a package,
+        create one index skill (you choose its name/description/content) whose members are those
+        skills; they move under it and the prompt then lists only this index skill. When it
+        matches a task, read the relevant member's SKILL.md (paths are in the index skill's
+        "Member skills" section) and follow it. Pick a clear description of what the whole group
+        does so future runs know when to open it.
+        """
+
+        if skills_config_store is None or skills_root is None:
+            return json.dumps(
+                {"error": "skills_config_store_not_configured", "source": "slotflow_customization"},
+                ensure_ascii=False,
+            )
+        member_dirs: dict[str, Path] = {}
+        for member_name in dict.fromkeys(members):
+            match = next(
+                (
+                    skill
+                    for skill in load_enabled_skills(skills_root=skills_root, enabled_names=None)
+                    if skill.name == member_name
+                ),
+                None,
+            )
+            if match is None:
+                return json.dumps(
+                    {
+                        "error": "member_not_found",
+                        "member": member_name,
+                        "source": "slotflow_customization",
+                    },
+                    ensure_ascii=False,
+                )
+            member_dirs[member_name] = match.skill_dir
+        try:
+            group_dir = skills_config_store.create_skill_group(
+                name=name,
+                description=description,
+                content=content,
+                member_dirs=member_dirs,
+            )
+        except ProtectedSkillError:
+            return json.dumps(
+                {"error": "protected_skill", "source": "slotflow_customization"},
+                ensure_ascii=False,
+            )
+        except ValueError as exc:
+            return json.dumps(
+                {"error": str(exc), "source": "slotflow_customization"},
+                ensure_ascii=False,
+            )
+
+        invalidate_skill_match_cache()
+        invalidate_skill_scan_cache()
+        return json.dumps(
+            {
+                "grouped": True,
+                "name": name,
+                "members": list(member_dirs),
+                "path": str(group_dir),
+                "available_from_next_run": True,
+                "source": "slotflow_customization",
+            },
+            ensure_ascii=False,
+        )
+
     @tool("mcp_add_http")
     def mcp_add_http(name: str, url: str) -> str:
         """Register a streamable HTTP MCP server for future tool loading."""
@@ -213,6 +289,7 @@ def build_customization_tools(
         find_skills,
         skill_list,
         skill_install,
+        skill_group,
         mcp_add_http,
         search_skill_repos,
     ]

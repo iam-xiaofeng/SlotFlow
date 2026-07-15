@@ -69,16 +69,35 @@ def iter_skill_files(skills_root: Path) -> Iterable[Skill | None]:
 
 
 def build_skills_prompt(skills: list[Skill]) -> str:
-    """把 enabled skills 转成 system prompt 片段。"""
+    """把 enabled skills 转成 system prompt 片段。
 
-    if not skills:
+    只列顶层 skill:分组(索引)skill 的成员物理上位于 ``<索引>/dependencies/`` 下,不单独
+    进 prompt——否则一个十几技能的包会挤占模型注意力。成员内容由模型经索引 skill 的
+    ``## Member skills`` 指引按需读取。
+    """
+
+    top_level = top_level_skills(skills)
+    if not top_level:
         return ""
 
     lines = [
         "<slotflow-skills>",
         "Enabled skills for this run:",
     ]
-    for skill in skills:
+    for skill in top_level:
         lines.append(f"- {skill.name}: {skill.description}")
     lines.append("</slotflow-skills>")
     return "\n".join(lines)
+
+
+def top_level_skills(skills: list[Skill]) -> list[Skill]:
+    """Drop skills that sit inside another skill's directory (grouped members)."""
+
+    dirs = {skill.skill_dir.resolve() for skill in skills}
+    result = []
+    for skill in skills:
+        skill_dir = skill.skill_dir.resolve()
+        if any(other != skill_dir and other in skill_dir.parents for other in dirs):
+            continue
+        result.append(skill)
+    return result

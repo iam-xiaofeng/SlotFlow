@@ -4,7 +4,7 @@ This document covers the local development workflow for SlotFlow.
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.12 or 3.13
 - Node.js 22+
 - `uv`
 - `pnpm`
@@ -71,6 +71,7 @@ http://localhost:3000
 The backend reads provider credentials and runtime infrastructure settings from
 environment variables. The selected chat model and mode are sent by the
 frontend with each request.
+Every provider runs through the pinned `langchain-litellm` integration; Python 3.14 is not supported by the current LiteLLM release.
 
 Use `backend/.env_example` as the full template for provider keys, feature flags,
 storage paths, MCP, workspace, Docker sandbox, terminal, and title-generation settings.
@@ -86,6 +87,12 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 
 ANTHROPIC_API_KEY=...
 ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
+
+GEMINI_API_KEY=...
+MISTRAL_API_KEY=...
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION_NAME=us-east-1
 ```
 
 Common runtime variables:

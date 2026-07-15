@@ -16,6 +16,7 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
+from app.harness.subagents import SlotFlowSubagentConfig
 
 
 class ToolAwareFakeListChatModel(FakeListChatModel):
@@ -272,7 +273,10 @@ def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None
     checkpointer = object()
     graph = runtime_module.create_langgraph_agent_graph(
         model=model,
-        runtime_config=SlotFlowRuntimeConfig(system_prompt=DEFAULT_DEEPSEEK_SYSTEM_PROMPT),
+        runtime_config=SlotFlowRuntimeConfig(
+            system_prompt=DEFAULT_DEEPSEEK_SYSTEM_PROMPT,
+            subagent_config=SlotFlowSubagentConfig(recursion_limit=73),
+        ),
         run_context=run_context,
         checkpointer=checkpointer,
     )
@@ -283,4 +287,5 @@ def test_runtime_graph_factory_delegates_to_harness_builder(monkeypatch) -> None
     assert captured["checkpointer"] is checkpointer
     assert captured["harness_config"] == SlotFlowHarnessConfig(
         system_prompt=DEFAULT_DEEPSEEK_SYSTEM_PROMPT,
+        subagent_config=SlotFlowSubagentConfig(recursion_limit=73),
     )
