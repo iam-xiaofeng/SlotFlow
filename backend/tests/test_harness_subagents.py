@@ -39,6 +39,10 @@ def _bundle(mode: str = "ultra"):
     )
 
 
+def test_subagent_default_recursion_limit_allows_multi_tool_loops() -> None:
+    assert SlotFlowSubagentConfig().recursion_limit == 100
+
+
 def test_subagent_tools_are_registered_only_when_feature_is_enabled() -> None:
     flash_bundle = _bundle(mode="flash")
     ultra_bundle = _bundle(mode="ultra")
@@ -233,8 +237,9 @@ async def test_task_tool_injects_selected_agency_role(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class _Graph:
-        async def ainvoke(self, payload):
+        async def ainvoke(self, payload, config=None):
             captured["payload"] = payload
+            captured["invoke_config"] = config
             return {"messages": [AIMessage(content="角色化子任务结果")]}
 
     def fake_build_slotflow_graph(**kwargs):
@@ -250,6 +255,7 @@ async def test_task_tool_injects_selected_agency_role(monkeypatch) -> None:
             features=features_from_run_context(bundle.context),
             model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
             run_context=bundle.context,
+            config=SlotFlowSubagentConfig(recursion_limit=73),
         )
         if item.name == "task_tool"
     )
@@ -280,6 +286,7 @@ async def test_task_tool_injects_selected_agency_role(monkeypatch) -> None:
     assert "Frontend Developer Agent Personality" in system_prompt
     assert "Financial Analyst Agent" not in system_prompt
     assert isinstance(payload, dict)
+    assert captured["invoke_config"] == {"recursion_limit": 73}
     assert "Selected role: Frontend Developer" in payload["messages"][0]["content"]
 
 

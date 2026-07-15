@@ -2,7 +2,7 @@
 
 这一层不直接依赖外部应用包，而是把 SlotFlow 自己需要的最小运行时装配收拢出来：
 
-- 创建真实 LangGraph/DeepSeek-compatible agent graph
+- 创建真实 LangGraph/ChatLiteLLM-backed agent graph
 - 显式挂接 checkpointer
 - 保持 AgentAdapter / AgentEvent 外部契约不变
 """
@@ -14,17 +14,18 @@ from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.chat.agent_adapter import collect_agent_events
 from app.chat.models import ChatStreamRequest
+import app.chat.litellm_provider as litellm_provider
 import app.chat.runtime as runtime_module
 from app.chat.run_config import build_run_config
+from app.chat.runtime.models import ChatLiteLLM
 from app.chat.runtime import (
     DEFAULT_CHECKPOINTER_SQLITE_PATH,
-    DeepSeekChatModel,
     RuntimeBackedAgentAdapter,
     SlotFlowRuntimeConfig,
     aclose_checkpointer,
@@ -32,7 +33,7 @@ from app.chat.runtime import (
     create_chat_model,
     create_checkpointer,
     load_runtime_config_from_env,
-    build_openai_compatible_model_kwargs,
+    build_litellm_model_kwargs,
 )
 from app.harness.mcp import MultiServerMcpToolProvider, SlotFlowMcpConfig, SlotFlowMcpServerConfig
 from app.harness.middleware import SlotFlowMiddlewareConfig
@@ -103,6 +104,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     monkeypatch.delenv("SLOTFLOW_TODO_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_SUBAGENT_LIMIT", raising=False)
     monkeypatch.delenv("SLOTFLOW_SUBAGENT_MAX_CONCURRENT", raising=False)
+    monkeypatch.delenv("SLOTFLOW_SUBAGENT_RECURSION_LIMIT", raising=False)
     monkeypatch.delenv("SLOTFLOW_MEMORY_SQLITE_PATH", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("SLOTFLOW_WORKSPACE_WRITES_ENABLED", raising=False)
@@ -112,7 +114,7 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     config = load_runtime_config_from_env()
 
     assert config == SlotFlowRuntimeConfig(
-        model_name="deepseek-v4-pro",
+        model_name="deepseek/deepseek-v4-pro",
         checkpointer_backend="memory",
         checkpointer_sqlite_path=DEFAULT_CHECKPOINTER_SQLITE_PATH,
         skills_root=tmp_path / "skills",
@@ -183,6 +185,7 @@ def test_load_runtime_config_from_env_reads_harness_feature_flags(
     monkeypatch.setenv("SLOTFLOW_TODO_MIDDLEWARE", "false")
     monkeypatch.setenv("SLOTFLOW_SUBAGENT_LIMIT", "false")
     monkeypatch.setenv("SLOTFLOW_SUBAGENT_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("SLOTFLOW_SUBAGENT_RECURSION_LIMIT", "73")
 
     config = load_runtime_config_from_env()
 
@@ -200,156 +203,115 @@ def test_load_runtime_config_from_env_reads_harness_feature_flags(
     assert config.middleware_config.todo_enabled is False
     assert config.middleware_config.subagent_limit_enabled is False
     assert config.middleware_config.subagent_max_concurrent == 1
+    assert config.subagent_config.recursion_limit == 73
     assert config.memory_store is None
 
 
-def test_deepseek_thinking_kwargs_follow_run_context() -> None:
-    pro_context = _bundle(
-        request=ChatStreamRequest(message="复杂分析", mode="pro")
-    ).context
-    no_thinking_context = _bundle(
+def test_litellm_dotenv_loading_is_disabled() -> None:
+    """Importing LiteLLM must not hydrate credentials from backend/.env."""
+
+    assert litellm_provider.os.environ["LITELLM_MODE"] == "PRODUCTION"
+    assert litellm_provider.os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
+
+
+@pytest.mark.parametrize(
+    ("thinking_enabled", "expected_effort"),
+    [(True, "high"), (False, "none")],
+)
+def test_reasoning_effort_uses_litellm_capability_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_enabled: bool,
+    expected_effort: str,
+) -> None:
+    context = _bundle(
         request=ChatStreamRequest(
-            message="复杂分析但关闭原生思考",
+            message="analyze",
+            model_name="gemini/gemini-2.5-pro",
             mode="pro",
-            thinking_enabled=False,
+            thinking_enabled=thinking_enabled,
         )
     ).context
-    flash_context = _bundle(
-        request=ChatStreamRequest(message="快速回答", mode="flash")
-    ).context
-
-    pro_kwargs = build_openai_compatible_model_kwargs(
-        model_name="deepseek-v4-pro",
-        api_key="key",
-        base_url="https://api.deepseek.com",
-        provider="deepseek",
-        run_context=pro_context,
-    )
-    no_thinking_kwargs = build_openai_compatible_model_kwargs(
-        model_name="deepseek-v4-pro",
-        api_key="key",
-        base_url="https://api.deepseek.com",
-        provider="deepseek",
-        run_context=no_thinking_context,
-    )
-    flash_kwargs = build_openai_compatible_model_kwargs(
-        model_name="deepseek-v4-flash",
-        api_key="key",
-        base_url="https://api.deepseek.com",
-        provider="deepseek",
-        run_context=flash_context,
+    monkeypatch.setattr(
+        litellm_provider,
+        "supports_reasoning_effort",
+        lambda model_id: model_id == "gemini/gemini-2.5-pro",
     )
 
-    assert pro_kwargs["reasoning_effort"] == "high"
-    assert pro_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert "reasoning_effort" not in no_thinking_kwargs
-    assert no_thinking_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert "reasoning_effort" not in flash_kwargs
-    assert flash_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    kwargs = build_litellm_model_kwargs(
+        model_name="gemini/gemini-2.5-pro",
+        provider="gemini",
+        run_context=context,
+    )
+
+    assert kwargs["model"] == "gemini/gemini-2.5-pro"
+    assert kwargs["model_kwargs"] == {
+        "_skip_responses_api_bridge": True,
+        "reasoning_effort": expected_effort,
+    }
 
 
-def test_openai_reasoning_effort_only_for_reasoning_models() -> None:
-    """OpenAI 推理档：仅 o 系列 / gpt-5 才注入 reasoning_effort，gpt-4* 不注入。"""
+def test_model_without_reasoning_effort_uses_only_chat_completions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        litellm_provider,
+        "supports_reasoning_effort",
+        lambda model_id: False,
+    )
 
-    from app.chat.runtime.models import is_openai_reasoning_model
+    kwargs = build_litellm_model_kwargs(
+        model_name="mistral/mistral-large-latest",
+        provider="mistral",
+    )
 
-    pro_context = _bundle(
-        request=ChatStreamRequest(message="复杂分析", model_name="o3", mode="pro")
-    ).context
-    reasoning_kwargs = build_openai_compatible_model_kwargs(
-        model_name="o3",
-        api_key="key",
-        base_url=None,
+    assert kwargs["model"] == "mistral/mistral-large-latest"
+    assert kwargs["model_kwargs"] == {"_skip_responses_api_bridge": True}
+
+
+def test_official_openai_models_use_chat_completions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        litellm_provider,
+        "supports_reasoning_effort",
+        lambda model_id: False,
+    )
+
+    kwargs = build_litellm_model_kwargs(
+        model_name="openai/gpt-4.1",
         provider="openai",
-        run_context=pro_context,
-    )
-    plain_kwargs = build_openai_compatible_model_kwargs(
-        model_name="gpt-4.1",
-        api_key="key",
-        base_url=None,
-        provider="openai",
-        run_context=pro_context,
     )
 
-    assert reasoning_kwargs["reasoning_effort"] == "high"
-    assert "extra_body" not in reasoning_kwargs
-    assert "reasoning_effort" not in plain_kwargs
-    assert is_openai_reasoning_model("o3")
-    assert not is_openai_reasoning_model("gpt-4.1")
+    assert kwargs["model"] == "openai/gpt-4.1"
+    assert kwargs["model_kwargs"] == {"_skip_responses_api_bridge": True}
 
 
-def test_custom_provider_kwargs_send_no_deepseek_thinking_flags() -> None:
-    """custom 中转站协议未知：不发 deepseek 的 extra_body.thinking，避免被未知网关 400。"""
-
-    pro_context = _bundle(
+def test_custom_provider_uses_openai_transport_without_native_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUSTOM_API_KEY", "key")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+    context = _bundle(
         request=ChatStreamRequest(
             message="x", model_name="qwen-plus", mode="pro", provider="custom"
         )
     ).context
-    kwargs = build_openai_compatible_model_kwargs(
+
+    kwargs = build_litellm_model_kwargs(
         model_name="qwen-plus",
-        api_key="key",
-        base_url="http://relay.local/v1",
-        provider="custom",
-        run_context=pro_context,
-    )
-
-    assert "extra_body" not in kwargs
-    assert "reasoning_effort" not in kwargs
-    assert kwargs["base_url"] == "http://relay.local/v1"
-
-
-def test_custom_provider_kwargs_override_relay_user_agent() -> None:
-    """custom 中转站：注入中性 User-Agent，覆盖 OpenAI SDK 的 `AsyncOpenAI/Python` 指纹 UA。
-
-    根因（live-verified 2026-06-30 against https://metapi.lilililwan.xyz/v1）：很多第三方
-    中转站前置 Cloudflare WAF 按 OpenAI SDK 的 `User-Agent: AsyncOpenAI/Python <ver>` 指纹拦截
-    （HTTP 403 "Your request was blocked."），导致非 deepseek 系列模型"能显示但用不了"——
-    因为发现探针用裸 httpx（中性 UA）能过，而真正跑对话的 OpenAI SDK 客户端用被拦 UA。
-    ChatDeepSeek 与 ChatOpenAI 共用同一 `openai.AsyncOpenAI` 客户端，都会注入该 UA，故必须在此覆盖。
-    中转站是黑名单（任何非 OpenAI 指纹的 UA 都放行），不是白名单。
-    """
-
-    from app.chat.model_catalog import RELAY_USER_AGENT
-
-    context = _bundle(
-        request=ChatStreamRequest(
-            message="x", model_name="glm-5.2", mode="pro", provider="custom"
-        )
-    ).context
-    custom_kwargs = build_openai_compatible_model_kwargs(
-        model_name="glm-5.2",
-        api_key="key",
-        base_url="http://relay.local/v1",
         provider="custom",
         run_context=context,
     )
-    assert custom_kwargs["default_headers"] == {"User-Agent": RELAY_USER_AGENT}
-    # 中转站 UA 必须是中性、非 OpenAI SDK 指纹：
-    assert "AsyncOpenAI" not in RELAY_USER_AGENT
 
-    # DeepSeek / OpenAI 官方端点不得改 UA（默认 SDK UA 没有被 WAF 拦截）：
-    deepseek_kwargs = build_openai_compatible_model_kwargs(
-        model_name="deepseek-v4-pro",
-        api_key="key",
-        base_url="https://api.deepseek.com",
-        provider="deepseek",
-        run_context=context,
-    )
-    assert "default_headers" not in deepseek_kwargs
-    openai_kwargs = build_openai_compatible_model_kwargs(
-        model_name="o3",
-        api_key="key",
-        base_url=None,
-        provider="openai",
-        run_context=context,
-    )
-    assert "default_headers" not in openai_kwargs
+    assert kwargs["custom_llm_provider"] == "openai"
+    assert kwargs["api_base"] == "http://relay.local/v1"
+    assert kwargs["extra_headers"] == {
+        "User-Agent": litellm_provider.CUSTOM_RELAY_USER_AGENT
+    }
+    assert kwargs["model_kwargs"] == {"_skip_responses_api_bridge": True}
 
 
-def test_resolve_model_provider_prefers_carried_provenance() -> None:
-    """携带的来源 provider 覆盖 id 前缀推断；缺失时才回退到推断。"""
-
+def test_resolve_model_provider_prefers_catalog_provenance() -> None:
     from app.chat.runtime.models import infer_model_provider, resolve_model_provider
 
     carried = _bundle(
@@ -357,42 +319,66 @@ def test_resolve_model_provider_prefers_carried_provenance() -> None:
             message="x", model_name="claude-3-5-sonnet", provider="custom"
         )
     ).context
-    inferred = _bundle(
-        request=ChatStreamRequest(message="x", model_name="claude-3-5-sonnet")
-    ).context
 
     assert resolve_model_provider("claude-3-5-sonnet", carried) == "custom"
-    assert resolve_model_provider("claude-3-5-sonnet", inferred) == "anthropic"
-    assert infer_model_provider("claude-3-5-sonnet") == "anthropic"
+    assert infer_model_provider("gemini/gemini-2.5-pro") == "gemini"
+    with pytest.raises(Exception):
+        infer_model_provider("claude-3-5-sonnet")
 
 
-def test_create_chat_model_routes_custom_relay_over_openai_protocol(
+@pytest.mark.parametrize(
+    ("provider", "model_name", "runtime_model_name"),
+    [
+        ("deepseek", "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-pro"),
+        ("openai", "openai/gpt-5", "openai/gpt-5"),
+        ("anthropic", "anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"),
+        ("gemini", "gemini/gemini-2.5-pro", "gemini/gemini-2.5-pro"),
+        ("mistral", "mistral/mistral-large-latest", "mistral/mistral-large-latest"),
+    ],
+)
+def test_create_chat_model_uses_litellm_for_native_providers(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model_name: str,
+    runtime_model_name: str,
+) -> None:
+    monkeypatch.setattr(
+        litellm_provider,
+        "supports_reasoning_effort",
+        lambda model_id: False,
+    )
+
+    model = create_chat_model(model_name, provider=provider)
+
+    assert isinstance(model, ChatLiteLLM)
+    assert model.model == runtime_model_name
+    assert model.custom_llm_provider is None
+    assert model.model_kwargs["_skip_responses_api_bridge"] is True
+
+
+def test_create_chat_model_routes_custom_relay_through_litellm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """中转站用 OpenAI 协议提供 claude-*：必须走兼容 client 指向 CUSTOM_BASE_URL，
-    而不是原生 Anthropic SDK。这正是按 id 前缀路由会出错的场景。"""
-
     monkeypatch.setenv("CUSTOM_API_KEY", "ck")
     monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
-
     context = _bundle(
         request=ChatStreamRequest(
-            message="用中转站的 claude",
+            message="use relay Claude",
             model_name="claude-3-5-sonnet",
             provider="custom",
         )
     ).context
+
     model = create_chat_model("claude-3-5-sonnet", run_context=context)
 
-    assert model.__class__.__name__ != "ChatAnthropic"
-    assert model.openai_api_base == "http://relay.local/v1"
+    assert isinstance(model, ChatLiteLLM)
+    assert model.custom_llm_provider == "openai"
+    assert model.api_base == "http://relay.local/v1"
 
 
 def test_create_chat_model_custom_requires_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """custom 没有官方回落地址：缺 CUSTOM_BASE_URL 时显式报错而不是悄悄走错端点。"""
-
     monkeypatch.setenv("CUSTOM_API_KEY", "ck")
     monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
 
@@ -400,69 +386,15 @@ def test_create_chat_model_custom_requires_base_url(
         create_chat_model("qwen-plus", provider="custom")
 
 
-def test_anthropic_extended_thinking_enabled_in_thinking_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Anthropic 思考档应开启 extended thinking，并把 max_tokens 抬到预算之上。"""
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
-    from app.chat.runtime.models import create_anthropic_chat_model
-
-    thinking_context = _bundle(
-        request=ChatStreamRequest(message="想一想", model_name="claude-sonnet-4-5", mode="pro")
-    ).context
-    model = create_anthropic_chat_model(
-        model_name="claude-sonnet-4-5",
-        run_context=thinking_context,
-    )
-
-    assert model.thinking == {"type": "enabled", "budget_tokens": 4096}
-    assert model.max_tokens == 8192
-
-
-def test_deepseek_chat_model_preserves_reasoning_stream_delta() -> None:
-    model = DeepSeekChatModel(
-        model="deepseek-v4-pro",
+def test_litellm_passes_reasoning_back_after_tool_call() -> None:
+    model = ChatLiteLLM(
+        model="deepseek/deepseek-v4-pro",
         api_key="key",
-        base_url="https://api.deepseek.com",
         streaming=True,
     )
-
-    chunk = model._convert_chunk_to_generation_chunk(
-        {
-            "choices": [
-                {
-                    "delta": {
-                        "content": "",
-                        "reasoning_content": "先理解问题",
-                    },
-                    "finish_reason": None,
-                }
-            ]
-        },
-        AIMessageChunk,
-        None,
-    )
-
-    assert chunk is not None
-    assert chunk.message.content == [{"type": "reasoning", "reasoning": "先理解问题"}]
-    assert chunk.message.content_blocks == [{"type": "reasoning", "reasoning": "先理解问题"}]
-    assert chunk.message.additional_kwargs["reasoning_content"] == "先理解问题"
-
-
-def test_deepseek_payload_passes_back_reasoning_content_after_tool_call() -> None:
-    """DeepSeek thinking mode rejects ReAct follow-ups unless reasoning_content is echoed."""
-
-    model = DeepSeekChatModel(
-        model="deepseek-v4-pro",
-        api_key="key",
-        base_url="https://api.deepseek.com",
-        streaming=True,
-        extra_body={"thinking": {"type": "enabled"}},
-    )
-    payload = model._get_request_payload(
+    messages, _ = model._create_message_dicts(
         [
-            HumanMessage(content="生成报告"),
+            HumanMessage(content="generate report"),
             AIMessage(
                 content="",
                 tool_calls=[
@@ -472,17 +404,17 @@ def test_deepseek_payload_passes_back_reasoning_content_after_tool_call() -> Non
                         "id": "call_build",
                     }
                 ],
-                additional_kwargs={"reasoning_content": "我需要先生成文件。"},
+                additional_kwargs={"reasoning_content": "I need to build the file first."},
             ),
             ToolMessage(content="ok", tool_call_id="call_build"),
-        ]
+        ],
+        None,
     )
 
-    assistant_payload = payload["messages"][1]
+    assistant_payload = messages[1]
     assert assistant_payload["role"] == "assistant"
     assert assistant_payload["tool_calls"][0]["id"] == "call_build"
-    assert assistant_payload["reasoning_content"] == "我需要先生成文件。"
-
+    assert assistant_payload["reasoning_content"] == "I need to build the file first."
 
 def test_load_runtime_config_from_env_reads_real_mcp_json_config(
     monkeypatch: pytest.MonkeyPatch,

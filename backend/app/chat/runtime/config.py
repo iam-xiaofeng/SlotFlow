@@ -35,6 +35,7 @@ from app.harness.memory import SlotFlowMemoryStore
 from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.harness.skills import SlotFlowSkillsConfigStore, load_enabled_skills
+from app.harness.subagents import SlotFlowSubagentConfig
 
 
 CheckpointerBackend = Literal["none", "memory", "sqlite", "postgres"]
@@ -88,12 +89,13 @@ class SlotFlowRuntimeConfig:
     mcp_config_store: SlotFlowMcpConfigStore | None = field(default=None, compare=False)
     middleware_config: SlotFlowMiddlewareConfig = field(default_factory=SlotFlowMiddlewareConfig)
     sandbox_config: SlotFlowSandboxConfig = field(default_factory=SlotFlowSandboxConfig)
+    subagent_config: SlotFlowSubagentConfig = field(default_factory=SlotFlowSubagentConfig)
 
 
 def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
     """从环境变量读取一个很小的 runtime 配置。
 
-    默认使用 DeepSeek-compatible 真实 graph。日常测试通过 `model_factory` 注入 fake
+    默认使用 ChatLiteLLM-backed 真实 graph。日常测试通过 `model_factory` 注入 fake
     model，不再让生产配置携带测试模式。
     """
 
@@ -137,6 +139,12 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         mcp_config_store=mcp_config_store,
         middleware_config=middleware_config,
         sandbox_config=load_sandbox_config_from_env(),
+        subagent_config=SlotFlowSubagentConfig(
+            recursion_limit=load_positive_int_from_env(
+                "SLOTFLOW_SUBAGENT_RECURSION_LIMIT",
+                default=SlotFlowSubagentConfig().recursion_limit,
+            )
+        ),
     )
 
 

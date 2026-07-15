@@ -2354,3 +2354,326 @@ LangGraph async graph 的工具节点里不能把 Docker subprocess、同步 htt
   1000 个候选。
 - `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run ruff check app/harness/tools/workspace.py app/harness/tools/network.py app/harness/tools/sandbox.py tests/test_harness_tools.py tests/test_network_tools.py` -> passed。
 - `cd backend && UV_CACHE_DIR=../.slotflow/uv-cache uv run pytest -q tests/test_harness_tools.py::test_workspace_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_sandbox_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_workspace_search_caps_candidate_scan tests/test_network_tools.py::test_network_tool_async_path_uses_threadpool tests/test_harness_tools.py::test_workspace_read_extracts_docx_pdf_and_image_metadata tests/test_network_tools.py tests/test_tool_registry.py` -> 17 passed。
+
+## 41. 迭代 33（2026-07-13）：模型运行时统一为 ChatLiteLLM
+
+### 41.1 目标与边界
+
+本轮只替换模型厂商协议与 reasoning/thinking 兼容层，不改 Agent 编排层。以下边界保持原样：
+
+- `harness/graph.py` 的 LangGraph `StateGraph`、节点、边和 ReAct 循环。
+- `harness/state.py`、checkpointer、clarification interrupt/resume。
+- tools、todo、memory、skills、MCP、sandbox、subagent、summarization。
+- `RuntimeBackedAgentAdapter` 的每次 run 装配职责及现有 SSE 业务事件。
+
+原因：`ChatLiteLLM` 是 `BaseChatModel`，负责模型调用、消息转换和流式 chunk 标准化；它不会执行工具、维护图状态或替代 LangGraph。删除 graph/runtime adapter 会把复杂编排重新散落到路由层，属于重复造轮子。
+
+### 41.2 依赖审计
+
+采用 `langchain-litellm==0.7.0`，锁文件解析到 `litellm==1.92.0`。在写代码前检查了已发布 wheel 的实际实现，而不是猜测 API：
+
+- `ChatLiteLLM._convert_delta_to_message_chunk` 读取 `delta.reasoning_content`，保留到 `AIMessageChunk.additional_kwargs`，并生成 `thinking` content block。
+- LangChain 1.4.7 的 `AIMessageChunk.content_blocks` 会把该结果暴露为标准 `reasoning` block，供 LangGraph v3 `.reasoning` typed projection 使用。
+- `ChatLiteLLM._convert_message_to_dict` 会把已有 assistant message 的 `reasoning_content` 写回后续请求，覆盖 DeepSeek thinking + tool-result 继续生成所需的回传协议。
+- `bind_tools` 标准化 OpenAI schema tool definitions/tool choice；流式转换生成标准 `ToolCallChunk`。
+- usage 转换包含 cache token details 和 reasoning token details。
+
+因此删除直接依赖 `langchain-openai`、`langchain-anthropic`、`langchain-deepseek`，也删除 SlotFlow 的 `_SlotFlowChatDeepSeek` 子类、stream bridge、DeepSeek payload 注入函数和三套模型构造器。所有 provider 最终只构造 `ChatLiteLLM`。
+
+LiteLLM 1.92.0 的 Python metadata 是 `>=3.10,<3.14`。项目运行范围改为 Python 3.12/3.13（`requires-python = ">=3.12,<3.14"`）；本轮使用 uv 管理的 CPython 3.13.14 验证。没有绕过依赖的 Python 版本约束。
+
+### 41.3 运行链路
+
+新的模型调用链：
+
+```text
+RunContext.model_provider
+-> runtime/models.py::create_chat_model
+-> build_litellm_model_kwargs
+-> ChatLiteLLM(BaseChatModel)
+-> LiteLLM provider transport
+-> LangGraph agent node / bind_tools / ToolNode
+-> LangGraph v3 reasoning/text/tool_calls projections
+-> SlotFlow AgentEvent / SSE
+```
+
+catalog 继续向前端返回原始 model id 和 provider provenance；内部通过 `custom_llm_provider` 选择 LiteLLM transport，不要求 UI 改 model id：
+
+- `deepseek` -> LiteLLM `deepseek`
+- `openai` -> LiteLLM `openai`
+- `anthropic` -> LiteLLM `anthropic`
+- `custom` -> LiteLLM `openai` + `CUSTOM_BASE_URL` + neutral User-Agent
+
+### 41.4 Thinking 策略
+
+厂商响应解析全部交给 LiteLLM。SlotFlow 只保留不可避免的能力策略：
+
+- DeepSeek thinking on：`reasoning_effort=high` 且 `extra_body.thinking.type=enabled`。
+- DeepSeek thinking off：显式 `extra_body.thinking.type=disabled`，因为该模型默认会思考。
+- Anthropic thinking on：`thinking={type: enabled, budget_tokens: 4096}`，`max_tokens=8192`。
+- OpenAI o-series/gpt-5 thinking on：`reasoning_effort=high`。
+- custom relay：不发送未知厂商 thinking 参数，只使用 LiteLLM 对实际返回字段的标准化。
+
+`agent_adapter/projections.py` 不再解析 OpenRouter 私有 `additional_kwargs.reasoning` 或 OpenAI Responses `summary[]` 等厂商原始结构；只处理 LangGraph typed channel、标准 reasoning/thinking block，以及 LiteLLM 的 canonical `additional_kwargs.reasoning_content` fallback。
+
+### 41.5 dotenv 安全边界
+
+LiteLLM 在默认 `LITELLM_MODE=DEV` 时会在 import 阶段执行 `dotenv.load_dotenv()`。这与 SlotFlow 的配置边界冲突：SlotFlow 只应接收 OS/uvicorn 显式提供的环境，模型依赖不应自行读取 `backend/.env`。
+
+完整离线测试第一次执行时暴露了该问题：前序测试触发 LiteLLM dotenv 后，`SLOTFLOW_TITLE_MODEL_ENABLED` 和真实 provider credentials 进入进程，后续标题测试出现随机模型生成标题，证明本应离线的测试触发了真实 title request。该调用不作为有效 live 验证。
+
+根因修复是在导入 `langchain_litellm` 之前强制 `LITELLM_MODE=PRODUCTION`。新增回归测试锁住该设置，并用完整路由测试顺序确认 `.env` 不再被依赖隐式加载。不要删除或下移这条设置，否则会重新引入测试付费调用和配置来源不确定性。
+
+### 41.6 离线验证结果
+
+- `tests/test_provider_reasoning_contract.py` 使用 fake `litellm.acompletion` 驱动真实 `ChatLiteLLM.astream()`，验证 reasoning block、tool-call chunk 和 SlotFlow channel 映射，不调用 provider API。
+- `tests/test_runtime.py` 验证 DeepSeek/OpenAI/Anthropic/custom 都构造 `ChatLiteLLM`，thinking policy、custom relay headers、provider provenance 和 tool-result 后 reasoning 回传保持正确。
+- `cd backend && uv run pytest -q -k "not live"` -> `344 passed, 1 deselected`。
+- `cd backend && uv run ruff check app tests` -> passed。
+- `git diff --check` -> passed。
+
+尚未执行显式 live reasoning + tool-call smoke test。需要人工授权真实 provider 调用后，至少验证一次 thinking on、一次 thinking off，以及 thinking on 下调用工具后继续生成；在此之前不能把前述意外 title request 当成链路验证。
+完整仓库验证补充：`PATH="$HOME/.volta/bin:$PATH" make verify` 通过；后端 `344 passed, 1 skipped`，前端 `pnpm typecheck` 通过，Next.js production build 通过。首次直接执行 `make verify` 时非交互 WSL PATH 缺少 `~/.volta/bin`，不是代码或依赖失败。
+## 42. 迭代 34（2026-07-14）：LiteLLM 元数据目录 + OpenAI Responses bridge
+
+### 42.1 为什么继续删除第一阶段策略
+
+§41 完成了 `ChatLiteLLM` 统一，但 SlotFlow 当时仍维护四类原生 provider、model id
+前缀推断、官方 base URL、DeepSeek thinking body、Anthropic thinking budget 和 OpenAI
+reasoning model 判断。这些代码虽然比三个原生 LangChain client 小，仍属于厂商兼容层；
+LiteLLM 升级后 SlotFlow 仍要同步修改，违背本轮“不重复维护 provider/reasoning 兼容”的目标。
+
+本轮把边界收紧为：SlotFlow 只保留 Agent 可用模型筛选、每次 run 的 catalog provenance、
+custom relay URL/key，以及统一 thinking 开关。所有 native provider 名称、模型清单、凭据检测、
+function-calling/reasoning 能力和协议转换来自 LiteLLM 的公开 API/metadata。
+
+### 42.2 代码核实后的 LiteLLM / ChatLiteLLM 能力
+
+实现前直接读取了锁定依赖的源码（`langchain-litellm==0.7.0`、`litellm==1.92.0`）：
+
+- `ChatLiteLLM._generate/_agenerate/_stream/_astream` 调用 LiteLLM
+  `completion/acompletion`，自身没有单独的 Responses client。
+- LiteLLM `main.py::responses_api_bridge_check` 支持逐模型 `responses/` 前缀，也提供
+  `route_all_chat_openai_to_responses` 全局开关。
+- 全局开关会命中所有 `custom_llm_provider="openai"` 请求，包括 custom relay；因此不能使用，
+  否则会错误假设中转站实现 `/responses`。
+- `openai/responses/<model>` 先由 `get_llm_provider` 解析为 official OpenAI，再由
+  `responses_api_bridge_check` 标记 `mode=responses`。bridge 内部调用 `litellm.aresponses()`，
+  然后把 Responses 文本、reasoning summary、function calls 和 usage 转回标准
+  `ModelResponseStream`，正好供 `ChatLiteLLM` 和现有 LangGraph 消费。
+
+所以最终选择是：官方 `openai` provider 逐模型加 `openai/responses/` 路由；custom relay
+保持 Chat Completions。这样满足 Responses 优先，同时不新增 SlotFlow Responses 事件解析器，
+也不污染非 OpenAI provider。
+
+### 42.3 模型目录与 provider 路由
+
+`chat/litellm_provider.py` 现在是唯一 LiteLLM 边界：
+
+1. import 前设置 `LITELLM_MODE=PRODUCTION`，禁止依赖隐式读取 `backend/.env`。
+2. 设置 `LITELLM_LOCAL_MODEL_COST_MAP=True`，只使用随包发布的 model map；模型目录升级跟随
+   PyPI lock 更新，不在请求时从 GitHub 刷新。
+3. `configured_native_provider_names()` 调用公开
+   `get_valid_models(check_provider_endpoint=False)` 检测当前进程已配置的 provider，并与
+   `models_by_provider` 交集关联。
+4. `agent_models_for_provider()` 将 model id 规范为 `provider/model`，只保留
+   `get_model_info(...)["mode"] == "chat"` 且 `supports_function_calling(...)` 的模型。
+5. `model_catalog.discover_model_catalog()` 通过 `asyncio.to_thread` 生成 native catalog，避免
+   LiteLLM metadata/endpoint 工作阻塞 FastAPI event loop。
+
+`ModelProvider` 的 API/前端类型改成开放字符串，不再限制为 DeepSeek/OpenAI/Anthropic/custom。
+原生模型必须使用 catalog 返回的 provider-qualified id；旧的手写 id-prefix 推断被删除，
+缺少 provenance 时只调用 `litellm.get_llm_provider`。这不是保留兼容层：无法被 LiteLLM 解析的
+裸 model id 直接失败，调用方应使用 catalog id。
+
+custom 是唯一例外：`CUSTOM_API_KEY` + `CUSTOM_BASE_URL` 明确声明 OpenAI-compatible relay；
+模型发现调用 LiteLLM `get_valid_models(check_provider_endpoint=True, custom_llm_provider="openai")`，
+`CUSTOM_MODELS` 仍可在 relay 不支持 model listing 时显式列出 id。旧的 SlotFlow
+`/chat/completions` availability probe 和 `CUSTOM_VALIDATE_MODELS` 被删除，不再自维护额外探测协议。
+
+### 42.4 Thinking 与 Responses 运行链路
+
+native runtime 不再读取 `DEEPSEEK_*`/`OPENAI_*`/`ANTHROPIC_*` 映射表，也不传 SlotFlow
+硬编码 base URL/API key；`ChatLiteLLM(model="provider/model")` 交给 LiteLLM 读取各 provider
+标准环境配置。custom 仍显式传 relay key/base/neutral User-Agent。
+
+统一 thinking 开关只做一次 capability 查询：
+
+```text
+litellm.get_supported_openai_params(model=provider_qualified_id)
+└─ 包含 reasoning_effort
+   ├─ thinking_enabled=true  -> reasoning_effort=high
+   └─ thinking_enabled=false -> reasoning_effort=none
+```
+
+不支持该统一参数的模型不接收 SlotFlow thinking 参数；没有 DeepSeek、Anthropic、Gemini、
+Bedrock 或 Mistral 分支。provider 具体怎样把 `reasoning_effort` 转成 thinking budget/config，
+以及怎样解析返回值，全部由 LiteLLM 负责。
+
+官方 OpenAI 运行链是：
+
+```text
+catalog id openai/<model>
+-> runtime id openai/responses/<model>
+-> ChatLiteLLM.acompletion
+-> LiteLLM Responses bridge
+-> litellm.aresponses (/responses)
+-> LiteLLM ModelResponseStream
+-> ChatLiteLLM AIMessageChunk
+-> LangGraph v3 projection -> SlotFlow SSE
+```
+
+### 42.5 测试与未验证项
+
+新增/更新离线契约覆盖：
+
+- LiteLLM 环境检测只暴露已配置且有 Agent-capable 模型的 native provider。
+- catalog 可自动加入 Gemini/Mistral 等开放 provider，并过滤非 chat/无 function calling 模型。
+- custom endpoint discovery、`CUSTOM_MODELS`、错误脱敏和 missing 配置。
+- reasoning on/off 只产生统一 `high`/`none`；不支持模型没有 SlotFlow thinking 参数。
+- official OpenAI runtime id 为 `openai/responses/<model>`；custom relay 不加该前缀。
+- 原生 DeepSeek/OpenAI/Anthropic/Gemini/Mistral 都构造同一个 `ChatLiteLLM` 类型。
+- 既有 fake transport reasoning/tool-call/usage 投影契约继续覆盖，不访问真实 provider。
+
+验证结果：`cd backend && uv run ruff check app tests` 通过；`PATH="$HOME/.volta/bin:$PATH" make verify` 通过，
+后端为 `347 passed, 1 skipped`，前端 `pnpm typecheck` 和 Next.js production build 均通过；`git diff --check` 通过。
+
+没有执行真实付费 provider 请求，因此本轮只证明 LiteLLM 1.92.0 的 bridge 选择与转换契约，
+不声称完成 live Responses/reasoning/tool-call 验证。真实 smoke test 仍需用户明确允许 API 费用后执行。
+## 43. 迭代 35（2026-07-14）：DeepSeek 工具续轮拒绝 `reasoning` content block
+
+### 43.1 用户实测错误
+
+真实 DeepSeek thinking 请求在工具调用后的下一轮报错：
+
+```text
+litellm.BadRequestError: DeepseekException
+messages[2]: unknown variant `reasoning`, expected `text`
+```
+
+这证明 §41/§42 的离线契约仍缺一层：测试确认了顶层 `reasoning_content` 会回传，却没有构造
+LangChain canonical `{"type":"reasoning"}` content block 并检查最终 provider payload。
+
+### 43.2 根因（对照锁定依赖源码）
+
+`langchain-litellm==0.7.0` 的完整链路是：
+
+1. 流式 `delta.reasoning_content` 被保存到 `AIMessage.additional_kwargs["reasoning_content"]`。
+2. 同一 reasoning 还被注入 `content` 的 `{"type":"thinking"}` block；LangChain
+   `content_blocks` 将其标准化显示为 `{"type":"reasoning"}`。
+3. `ChatLiteLLM._convert_message_to_dict` 发送历史 assistant message 时会过滤
+   `thinking`、`redacted_thinking`、tool blocks，但没有过滤 canonical `reasoning`。
+4. LiteLLM `DeepSeekChatConfig._transform_messages` 调用
+   `handle_messages_with_content_list_to_str_conversion`；该函数只抽取 block 的 `text`。
+   如果 list 只有 reasoning block，抽取结果为空，代码不会把 content 改成空字符串，原 list
+   被原样发送。
+5. DeepSeek chat schema 的 content-part union 只接受 `text`，因此在模型生成前直接反序列化失败。
+
+PyPI 最新 `langchain-litellm==0.7.0`、`litellm==1.92.0` 以及检查时的
+`langchain-ai/langchain-litellm` main 都有相同缺口；当前没有可升级的已发布修复。
+
+### 43.3 修复边界
+
+唯一 LiteLLM 边界 `chat/litellm_provider.py` 现在导出一个最小
+`ChatLiteLLM` subclass，只覆盖 `_create_message_dicts`：
+
+- 先调用上游 serializer，保留其 tool/message/attachment 行为。
+- 只处理 assistant 的 list content。
+- 移除 `reasoning`、`thinking`、`redacted_thinking`，以及包裹这些类型的
+  `non_standard` block。
+- 保留标准 text/media block。
+- content 被全部过滤时写成空字符串。
+- **不删除**顶层 `reasoning_content`，所以 LiteLLM/DeepSeek thinking-mode 工具续轮仍能收到
+  完整上一轮推理链。
+
+这个修复不判断 DeepSeek/Anthropic/OpenAI，不解析厂商 response，也不改变 LangGraph state；
+它只保证“reasoning metadata 不作为 assistant 正文 content 发给 provider”。因此模型目录和
+reasoning 参数仍完全由 LiteLLM metadata 驱动。
+
+### 43.4 回归测试
+
+`tests/test_provider_reasoning_contract.py::test_litellm_tool_followup_strips_reasoning_metadata_from_content`
+构造真实失败形状：assistant 同时带 canonical reasoning block、`non_standard(thinking)`、
+顶层 `reasoning_content`、tool call，随后接 ToolMessage。测试直接检查
+`ChatLiteLLM._create_message_dicts` 的最终 payload：
+
+- assistant `content == ""`；
+- `reasoning_content` 原值保留；
+- tool call id 保留。
+
+验证：targeted reasoning/runtime tests 为 `38 passed`；完整 `make verify` 的后端为
+`347 passed, 1 skipped`，前端 typecheck/production build 通过；`git diff --check` 通过。
+
+用户报告的请求证明旧实现会在 live provider 失败；本节修复完成后尚未重新产生付费 live
+DeepSeek 请求，因此不能把离线通过写成 live 修复验证。
+## 44. 迭代 36（2026-07-14）：subagent 独立 recursion limit
+
+### 44.1 根因
+
+LangGraph 默认 `recursion_limit=25` 统计的是 graph superstep，不是“模型最多思考 25 次”。
+当前子图一次 ReAct 循环会经过 pre-model/summarization/agent/post-model/route/tools 等多个节点；
+因此连续调用工具、工具结果后反思、再调用工具会快速消耗额度。纯模型回答没有 tools 往返，
+所以同样复杂度下更容易在 25 步内完成。这是 child graph 执行预算不足，不是
+`subagent_max_concurrent`（并发数）问题。
+
+### 44.2 边界选择
+
+只放宽 `task_tool` 创建的 child graph，不修改主图：
+
+- `SlotFlowSubagentConfig.recursion_limit` 默认从 25 提高到 100。
+- `SubagentTaskRunner` 保存该值，并调用
+  `graph.ainvoke(payload, config={"recursion_limit": value})`。
+- `SlotFlowRuntimeConfig` 显式携带 `subagent_config`，runtime adapter 将其传给
+  `SlotFlowHarnessConfig`/tool registry。
+- `SLOTFLOW_SUBAGENT_RECURSION_LIMIT=<positive-int>` 可覆盖默认值；环境解析复用
+  `load_positive_int_from_env`，拒绝 0/负数。
+- 主 graph 的 request config 不增加 recursion limit，仍沿用 LangGraph 默认值；这避免一次主任务
+  因错误路由无限循环，只给隔离的 delegated child 足够的多工具预算。
+
+100 是上限而不是目标步数：正常子任务仍在模型给出无 tool-call 的 final answer 时立即结束，不会
+固定运行 100 步。现有 timeout/provider error/tool safety 仍会提前终止失败路径。
+
+### 44.3 回归测试
+
+- `test_subagent_default_recursion_limit_allows_multi_tool_loops` 锁定默认 100。
+- `test_task_tool_injects_selected_agency_role` 的 fake child graph 同时捕获
+  `ainvoke` config，断言自定义 73 原样进入 `{"recursion_limit": 73}`。
+- `test_load_runtime_config_from_env_reads_harness_feature_flags` 断言
+  `SLOTFLOW_SUBAGENT_RECURSION_LIMIT=73` 进入 runtime subagent config。
+- `test_runtime_graph_factory_delegates_to_harness_builder` 断言 runtime 的自定义
+  subagent config 进入 harness config。
+
+验证：targeted subagent/builder/runtime tests 为 `47 passed`；完整 `make verify` 后端为
+`348 passed, 1 skipped`，前端 typecheck/production build 通过；`git diff --check` 通过。
+## 45. 迭代 37（2026-07-15）：统一使用 LiteLLM Chat Completions，放弃 Responses bridge
+
+### 45.1 架构判断
+
+LiteLLM 的价值仍然存在：它负责 provider 凭据、model routing、OpenAI-like 标准请求到厂商
+请求的转换、反向 response/chunk/usage/tool-call 标准化、重试和 provider metadata。
+LangGraph 不会阻止 LiteLLM 在第二次工具请求时重新做厂商转换；真正的风险在
+`ChatLiteLLM` 的 `LangChain AIMessage ↔ LiteLLM normalized message` 这条额外适配边界。
+
+`ChatOpenAI` 只有在架构为 `LangGraph → ChatOpenAI → LiteLLM Proxy → provider` 时才是直接替代品。
+本项目不启动独立 LiteLLM Proxy，而是在 Python 进程内使用 LiteLLM SDK，因此继续使用
+`ChatLiteLLM`，但统一让它调用 `litellm.completion/acompletion`。
+
+### 45.2 运行策略
+
+- 原生模型仍使用 `provider/model` provider-qualified id。
+- 删除 `openai/responses/<model>` 路由；官方 OpenAI 与 DeepSeek、Qwen、Mistral、custom relay
+  共用 Chat Completions normalized shape。
+- LiteLLM 1.92.0 对 GPT-5.4+ 的 tools + reasoning_effort 可能自动触发 Responses bridge，
+  因此 `ChatLiteLLM` 的 `model_kwargs` 显式传 `_skip_responses_api_bridge=True`，强制保留
+  `completion/acompletion` 路径。这个参数是当前锁定 LiteLLM 的内部开关，必须和版本一起验证。
+- 这不代表所有厂商原生网络端点都叫 Chat Completions；Anthropic/Gemini/Bedrock 仍由 LiteLLM
+  内部转换到各自原生协议，但 SlotFlow 的统一入口和返回面固定为 Chat Completions-like。
+- Responses item、`previous_response_id`、OpenAI server-side response chain 不再作为 SlotFlow
+  的上下文协议；长期记忆继续由 SlotFlow 自己管理。
+
+### 45.3 离线验证
+
+`tests/test_runtime.py` 锁定 OpenAI 模型保持 `openai/<model>`，并断言
+`_skip_responses_api_bridge=True`；DeepSeek/Qwen/custom/native provider 都使用同一
+ChatLiteLLM construction path。完整 `make verify` 已于 2026-07-15 重新执行并通过：
+后端 `348 passed, 1 skipped`，前端 typecheck 与 Next.js production build 通过。

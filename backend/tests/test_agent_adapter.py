@@ -112,11 +112,10 @@ def test_extract_message_delta_accepts_common_projection_shapes(item, expected) 
         ({"type": "reasoning", "reasoning": "deepseek/openai 风格"}, "deepseek/openai 风格"),
         ({"type": "thinking", "thinking": "anthropic 扩展思考"}, "anthropic 扩展思考"),
         ({"additional_kwargs": {"reasoning_content": "kw 风格"}}, "kw 风格"),
-        ({"additional_kwargs": {"reasoning": "openrouter 风格"}}, "openrouter 风格"),
     ],
 )
-def test_extract_message_delta_parts_reads_multi_provider_reasoning(item, expected) -> None:
-    """reasoning 通道要兼容 deepseek/openai 的 reasoning 与 anthropic 的 thinking。"""
+def test_extract_message_delta_parts_reads_litellm_reasoning(item, expected) -> None:
+    """The projection consumes LangChain blocks and LiteLLM reasoning metadata."""
 
     assert extract_message_delta_parts(item) == {"reasoning_content": expected}
 
@@ -205,7 +204,7 @@ def test_extract_message_delta_parts_reads_standard_reasoning_delta() -> None:
     ) == {"reasoning_content": "先理解需求"}
 
 
-def test_extract_message_delta_parts_reads_deepseek_additional_kwargs() -> None:
+def test_extract_message_delta_parts_reads_litellm_additional_kwargs() -> None:
     chunk = SimpleNamespace(
         additional_kwargs={"reasoning_content": "拆解任务"},
         content="",

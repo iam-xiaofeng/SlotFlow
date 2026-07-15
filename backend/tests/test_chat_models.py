@@ -65,7 +65,7 @@ def test_chat_stream_request_defaults_match_first_learning_flow() -> None:
     request = ChatStreamRequest(message="解释一下 SlotFlow")
 
     assert request.message == "解释一下 SlotFlow"
-    assert request.model_name == "deepseek-v4-pro"
+    assert request.model_name == "deepseek/deepseek-v4-pro"
     assert request.mode == "pro"
     assert request.agent_name == "default"
     assert request.files == []

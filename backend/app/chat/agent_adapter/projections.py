@@ -1,10 +1,4 @@
-"""把 LangGraph v3 projection item 解析成 SlotFlow 业务事件与普通数据。
-
-这一组都是纯函数：输入是真实 LangGraph/LangChain 投影里的 dict 或消息对象，输出是
-SlotFlow 自己的 `AgentEvent` 或 JSON 友好的普通结构。DeepSeek 的 reasoning、官方
-content block、summarization 内部消息等差异都在这里被吸收，异步流式层只需面对干净的
-映射函数。
-"""
+"""Map LangGraph projections and LiteLLM-normalized messages to SlotFlow events."""
 
 from __future__ import annotations
 
@@ -165,12 +159,7 @@ def extract_message_delta(item: Any) -> str:
 
 
 def extract_message_delta_parts(item: Any) -> dict[str, str]:
-    """Extract message deltas split by output channel.
-
-    官方 LangChain content block 是 reasoning 的主入口。DeepSeek 通过
-    `langchain-openai` 接入时，provider hook 会把 `delta.reasoning_content`
-    放进 `AIMessageChunk.additional_kwargs`，这里只保留这个明确 fallback。
-    """
+    """Extract typed LangGraph or LiteLLM-normalized message deltas."""
 
     if is_summarization_item(item):
         return {}
@@ -268,12 +257,12 @@ def extract_content_block_delta(item: Any) -> dict[str, str]:
 
 
 def extract_reasoning_text(item: Any) -> str:
-    """Return reasoning from LangChain standard blocks, then provider fallbacks."""
+    """Return reasoning from standard blocks, then LiteLLM additional metadata."""
 
     reasoning = extract_standard_reasoning_text(item)
     if reasoning:
         return reasoning
-    return extract_provider_reasoning_content(item)
+    return extract_litellm_reasoning_content(item)
 
 
 def extract_standard_reasoning_text(item: Any) -> str:
@@ -289,9 +278,7 @@ def extract_standard_reasoning_text(item: Any) -> str:
 
 
 def extract_reasoning_from_content_block(item: Any) -> str:
-    # Reasoning content blocks differ by provider: DeepSeek/OpenAI-compatible use a
-    # {"type": "reasoning", "reasoning": "..."} block (our ChatDeepSeek bridge emits
-    # this shape); Anthropic extended thinking uses {"type": "thinking", "thinking": ...}.
+    # LangChain exposes reasoning blocks while ChatLiteLLM emits thinking blocks.
     if not isinstance(item, dict) or item.get("type") not in ("reasoning", "thinking"):
         return ""
 
@@ -300,19 +287,6 @@ def extract_reasoning_from_content_block(item: Any) -> str:
         if isinstance(value, str) and value:
             return value
 
-    # OpenAI Responses API emits reasoning as summary sub-blocks under the default
-    # responses/v1 output_version, not as a flat string. Flatten those texts so gpt-5 /
-    # o-series thinking reaches the reasoning channel instead of being silently dropped.
-    summary = item.get("summary")
-    if isinstance(summary, list):
-        parts: list[str] = []
-        for sub_block in summary:
-            if isinstance(sub_block, dict):
-                text = sub_block.get("text")
-                if isinstance(text, str) and text:
-                    parts.append(text)
-        if parts:
-            return "".join(parts)
     return ""
 
 
@@ -342,7 +316,7 @@ def list_content_blocks(value: Any) -> Iterable[Any]:
         yield from value
 
 
-def extract_provider_reasoning_content(item: Any) -> str:
+def extract_litellm_reasoning_content(item: Any) -> str:
     additional_kwargs = (
         item.get("additional_kwargs")
         if isinstance(item, dict)
@@ -351,12 +325,8 @@ def extract_provider_reasoning_content(item: Any) -> str:
     if not isinstance(additional_kwargs, dict):
         return ""
 
-    # DeepSeek/OpenAI-compatible providers expose reasoning here under either key.
-    for key in ("reasoning_content", "reasoning"):
-        value = additional_kwargs.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return ""
+    value = additional_kwargs.get("reasoning_content")
+    return value if isinstance(value, str) else ""
 
 
 def normalize_values_snapshot(*, item: Any, bundle: RunConfigBundle) -> dict[str, Any]:

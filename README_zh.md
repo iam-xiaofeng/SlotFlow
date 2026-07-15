@@ -2,7 +2,7 @@
 
 [English](./README.md) | 中文
 
-[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
+[![Python](https://img.shields.io/badge/Python-3.12--3.13-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./frontend/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](./backend)
 [![Next.js](https://img.shields.io/badge/Next.js-000000?logo=next.js&logoColor=white)](./frontend)
@@ -53,7 +53,7 @@ Next.js 聊天界面，支持运行时模型选择、可见 reasoning 流、Skil
 推荐环境：
 
 - Linux 或 WSL2
-- Python 3.12+
+- Python 3.12 或 3.13
 - Node.js 20+；`bootstrap.sh` 默认目标版本是 Node 22
 - pnpm 10.26.2，版本来自 `frontend/package.json`
 - `make`、`curl`、`git`
@@ -186,7 +186,7 @@ make kill
 
 自行安装：
 
-- Python 3.12+
+- Python 3.12 或 3.13
 - `uv`
 - Node.js 20+
 - pnpm 10.26.2
@@ -231,8 +231,8 @@ backend/.env
 
 ### 模型供应商
 
-SlotFlow 会在运行时从已配置供应商发现模型。只有拥有可用凭据且模型端点可访问的供应商，
-才会出现在模型选择器中。
+SlotFlow 通过 LiteLLM 检测已配置的原生 provider，并把这些 provider 在 LiteLLM 内置目录中
+所有支持 `chat + function calling` 的模型加入选择器；SlotFlow 不维护厂商模型清单。
 
 ```bash
 # DeepSeek
@@ -247,19 +247,26 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 # ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
 
+# 其他 LiteLLM 原生 provider 使用其标准环境变量，例如：
+GEMINI_API_KEY=...
+MISTRAL_API_KEY=...
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION_NAME=us-east-1
+
 # 自定义 OpenAI-compatible relay
 CUSTOM_BASE_URL=https://your-relay.example.com/v1
 CUSTOM_API_KEY=sk-...
 CUSTOM_MODELS=claude-sonnet-4,gpt-5,qwen-max
-CUSTOM_VALIDATE_MODELS=true
 ```
 
 重要行为：
 
 - `.env` 不决定某个对话使用哪个模型。
 - 每次运行时，前端会把选中的模型和 provider 一起发给后端。
+- 所有 provider 都通过 `ChatLiteLLM` 调用；厂商协议、reasoning、tool call 和 usage 归一化由 LiteLLM 负责。
 - relay 不支持 `/models` 时，可以用 `CUSTOM_MODELS` 手动列出模型。
-- `CUSTOM_VALIDATE_MODELS=true` 会探测 custom 模型，避免不可用的 relay id 出现在选择器中。
+- 所有 provider 都使用 LiteLLM 的 Chat Completions 归一化；OpenAI 不再路由到 Responses，使 DeepSeek/Qwen/custom relay 共用一套兼容的传输形状。
 
 ### 前端 URL
 
@@ -392,7 +399,9 @@ http://localhost:3000
 
 SlotFlow 支持通过功能型 Sub-Agent 做聚焦委派，例如 researcher、analyst、planner、
 coder、reviewer、writer。角色和领域提示词存储在后端 harness 中，仅在需要时加载，
-避免主 Agent 每个任务都读取完整角色库。
+避免主 Agent 每个任务都读取完整角色库。子图 recursion limit 默认为 100，使多轮工具调用和
+工具后反思有足够步数；可用 `SLOTFLOW_SUBAGENT_RECURSION_LIMIT=<positive-int>` 覆盖，
+不会改变主图的 recursion limit。
 
 ### 产物
 
@@ -416,7 +425,7 @@ Browser / Next.js UI
   -> POST chat stream request
   -> FastAPI chat routes
   -> RuntimeBackedAgentAdapter
-  -> provider chat model + LangGraph StateGraph
+  -> ChatLiteLLM + LangGraph StateGraph
   -> LangGraph v3 projections
   -> SlotFlow AgentEvent
   -> SSE stream

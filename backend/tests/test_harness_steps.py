@@ -75,7 +75,7 @@ def test_runtime_summary_writes_compact_context_snapshot() -> None:
             "runtime": {
                 "thread_id": "thread_steps",
                 "run_id": "run_steps",
-                "model_name": "deepseek-v4-pro",
+                "model_name": "deepseek/deepseek-v4-pro",
                 "mode": "ultra",
                 "agent_name": "default",
                 "thinking_enabled": True,

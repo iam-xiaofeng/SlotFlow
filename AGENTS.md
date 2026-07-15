@@ -58,8 +58,7 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 
 A local-first, extensible AI agent workspace: a FastAPI + LangGraph backend driving a
 Next.js chat UI, with skills, MCP tools, artifacts, long-term memory, sub-agents, and
-multi-provider (DeepSeek / OpenAI / Anthropic + any OpenAI-compatible relay) reasoning
-streaming.
+LiteLLM-backed multi-provider reasoning streaming plus an optional OpenAI-compatible relay.
 
 ## Architecture (one request, end to end)
 
@@ -71,7 +70,7 @@ streaming.
    - `config["configurable"]["thread_id"]` — LangGraph's key for multi-turn checkpoint state.
    - `RunContext` — SlotFlow business switches: `model_name`, **`model_provider`**, `mode`,
      `thinking_enabled`, plan/subagent flags, files.
-3. **`chat/runtime/adapter.py` (RuntimeBackedAgentAdapter)** builds the chat model via
+3. **`chat/runtime/adapter.py` (RuntimeBackedAgentAdapter)** builds one `ChatLiteLLM` model via
    `runtime/models.create_chat_model` (routed by `RunContext.model_provider`) and assembles
    the graph via `harness/builder.build_slotflow_harness_graph` → `harness/graph.build_slotflow_graph`,
    a **LangGraph native `StateGraph` (explicit node + edge)** plus the tool registry
@@ -112,8 +111,9 @@ START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddlew
    todos, clarification picker, and workspace files.
 
 Two boundaries carry most of the design: **RunContext vs config.configurable** (business
-switches vs LangGraph runtime keys), and the **projection layer** — the single place that
-absorbs every provider/version quirk into clean `AgentEvent`s.
+switches vs LangGraph runtime keys), and the **LiteLLM model boundary** —
+provider/version quirks are normalized before the projection layer maps LangGraph messages into clean
+`AgentEvent`s.
 
 ## Layout
 
@@ -182,43 +182,41 @@ frontend/src/
   workspace, network, and sandbox tools keep synchronous `.invoke()` compatibility for tests/scripts
   while exposing async `StructuredTool` coroutines that dispatch blocking local file parsing,
   `httpx.Client`, and Docker subprocess work through `asyncio.to_thread` during async graph runs.
-- **Providers / models**: models are discovered at runtime from each configured provider's
-  `/models` endpoint (`chat/model_catalog.py`); there are NO hard-coded fallback model
-  lists. Base URLs are env-driven (`*_BASE_URL`) so third-party gateways work. A generic
-  `custom` provider (`CUSTOM_BASE_URL` + `CUSTOM_API_KEY`, no official fallback URL) exposes
-  any OpenAI-compatible relay — including ones serving `claude-*` / `gpt-*` / `qwen-*` over
-  the OpenAI schema. The frontend picks the model per run AND sends the option's catalog
-  `provider`; the runtime routes by that **provenance** (`RunContext.model_provider` →
-  `create_chat_model`), only falling back to id-prefix inference (`infer_model_provider`)
-  when it is absent (old clients). `.env` never decides the conversation model. Discovery
-  runs all providers **concurrently** (a slow/dead relay can't stall the catalog); if a
-  relay's `/models` is broken/unsupported, set `CUSTOM_MODELS` (comma-separated) to list
-  its models explicitly and skip discovery. `custom` also validates discovered/manual models
-  with a tiny `/chat/completions` probe by default so generic but unusable relay ids (for
-  example GPT names that return 502/unsupported) do not appear in the selector; set
-  `CUSTOM_VALIDATE_MODELS=false` only when that probe is too expensive or incompatible.
-- **Reasoning streaming (fragile — guard it)**: providers disagree on how reasoning is
-  emitted, and the projection layer absorbs **all three** shapes: DeepSeek
-  `delta.reasoning_content` → bridged to a `{"type":"reasoning","reasoning": ...}` block;
-  OpenAI official reasoning models (gpt-5 / o-series) auto-use the **Responses API**
-  (`reasoning_effort` only — langchain-openai selects it), emitting reasoning as a
-  `{"type":"reasoning","summary":[{"type":"summary_text","text": ...}]}` block (NOT a flat
-  string) under the default `responses/v1` output_version; Anthropic `thinking`. DeepSeek
-  **and** the `custom` relay use the reasoning-bridging `ChatDeepSeek` subclass
-  (`runtime/models.py`) so `delta.reasoning_content` reaches the v3 channel, and the same
-  subclass injects `AIMessage.additional_kwargs["reasoning_content"]` back into later
-  assistant payload messages so DeepSeek thinking-mode ReAct/tool follow-ups satisfy the
-  provider requirement to echo reasoning_content; the **official
-  OpenAI** provider uses plain `ChatOpenAI` + `reasoning_effort` (no bridge, no manual
-  `use_responses_api`). `custom` sends NO provider-specific thinking flags (unknown relay
-  protocol — toggle control is best-effort). The single normalization entry is
-  `agent_adapter/projections.py::projection_item_to_agent_event` /
-  `extract_message_delta_parts`, with `extract_reasoning_from_content_block` flattening
-  the OpenAI Responses `summary[]` list (the 2026-07-02 fix — previously that shape was
-  silently dropped, so gpt-5 thinking was invisible). **Before changing this layer, keep
-  `tests/test_provider_reasoning_contract.py` green** — it pins that every provider's chunk
-  (including OpenAI Responses summary blocks) normalizes to the right single channel with no
-  crossing. See `HARNESS_NOTES.md` §17.
+- **Providers / models**: `chat/litellm_provider.py` is the only provider/catalog
+  boundary. `configured_native_provider_names()` calls LiteLLM's public
+  `get_valid_models(check_provider_endpoint=False)` against the process environment; for each
+  configured provider, `agent_models_for_provider()` filters LiteLLM's bundled
+  `models_by_provider` metadata to `mode=chat` plus `supports_function_calling`. Selectable native
+  ids are provider-qualified (`provider/model`), so runtime routing needs no SlotFlow provider map
+  or model-name inference table. The frontend carries the open-string provider provenance on every
+  run. `custom` remains the sole SlotFlow-specific transport configuration:
+  `CUSTOM_BASE_URL` + `CUSTOM_API_KEY`, LiteLLM endpoint discovery, optional comma-separated
+  `CUSTOM_MODELS`, and a neutral `SLOTFLOW_RELAY_USER_AGENT`. LiteLLM catalog work runs in
+  `asyncio.to_thread`, so `/api/chat/models` does not block FastAPI's event loop. Updating the
+  pinned LiteLLM packages updates native provider/model metadata; do not add hand-maintained
+  Gemini/Bedrock/Mistral/etc. lists or credential maps.
+- **Reasoning streaming**: every provider is constructed through the minimal
+  `chat/litellm_provider.py::ChatLiteLLM` subclass of `langchain_litellm.ChatLiteLLM`.
+  The subclass has one provider-agnostic serialization fix: before a follow-up request it removes
+  assistant `reasoning`/`thinking` metadata blocks (including `non_standard` wrappers) from
+  `content`, while preserving the top-level `reasoning_content` field required by thinking-mode
+  tool loops. This works around the `langchain-litellm==0.7.0` leak where canonical LangChain
+  `reasoning` blocks reach DeepSeek and fail with `unknown variant reasoning, expected text`; do not
+  remove the top-level field or move the workaround into provider branches. LiteLLM owns provider
+  request translation, streamed
+  reasoning/thinking normalization, tool-call chunks, usage, and assistant reasoning round-trips
+  after tool results. SlotFlow checks only LiteLLM's public
+  `get_supported_openai_params(model=...)`: when `reasoning_effort` is supported, thinking ON sends
+  `high` and OFF sends `none`; otherwise SlotFlow sends no thinking parameter. There are no
+  DeepSeek/Anthropic/OpenAI capability branches. All native providers use LiteLLM
+  `completion/acompletion` and provider-qualified `provider/model` ids. SlotFlow does not add the
+  `openai/responses/` prefix; `_skip_responses_api_bridge=True` is passed as an internal LiteLLM
+  model parameter so GPT-5 models with tools/reasoning cannot be auto-routed to Responses by LiteLLM.
+  `custom` relays also remain on Chat Completions. LangGraph v3 typed `.reasoning` / `.text`
+  channels are preferred; `agent_adapter/projections.py` retains only canonical reasoning/thinking
+  blocks and LiteLLM `reasoning_content`. Keep `tests/test_provider_reasoning_contract.py` (including
+  the final tool-follow-up payload), `tests/test_model_catalog.py`, and the runtime Chat
+  Completions-routing tests green.
 - **Streaming merge contract**: `message.delta` is the live user-visible stream; final
   `state.snapshot` is a reconciliation source, not permission to erase already-streamed text.
   Both `chat/routes.py::select_assistant_content` and
@@ -248,10 +246,10 @@ frontend/src/
   Bottom scrolling still targets the real message end, not the spacer. If the user scrolls manually
   during generation, automatic turn anchoring/auto-follow stops and the completed answer must not
   force scroll.
-- **Thinking toggle**: `RunContext.thinking_enabled` (flash mode = off). DeepSeek-V4 thinks
-  by default, so OFF must send `extra_body={"thinking":{"type":"disabled"}}` explicitly
-  (`runtime/models.py`). Anthropic thinking / OpenAI o-series reasoning are enabled only
-  when on.
+- **Thinking toggle**: `RunContext.thinking_enabled` maps only to LiteLLM's unified
+  `reasoning_effort` capability metadata (`high` when enabled, `none` when disabled). Models that
+  do not advertise this parameter receive no SlotFlow thinking controls; response parsing remains
+  entirely LiteLLM-owned.
 - **Artifacts & the workspace panel**: user-visible generated files must enter the artifact folder
   through `artifact_write` (direct text/content writes) or `sandbox_artifact_copy` (one file already
   generated inside Docker). Both namespace into `artifacts/<thread_id>/`. There is no
@@ -444,7 +442,12 @@ frontend/src/
   that preserves non-`task_tool` calls and the message's `reasoning_content`. Active when
   `subagent_limit_enabled` + `features.subagent_enabled`; env
   `SLOTFLOW_SUBAGENT_LIMIT=false` disables the guard and
-  `SLOTFLOW_SUBAGENT_MAX_CONCURRENT=<positive-int>` adjusts the cap.
+  `SLOTFLOW_SUBAGENT_MAX_CONCURRENT=<positive-int>` adjusts the cap. Each delegated child graph
+  has its own `SlotFlowSubagentConfig.recursion_limit` (default 100), passed as the top-level
+  LangGraph `config["recursion_limit"]` on `graph.ainvoke`;
+  `SLOTFLOW_SUBAGENT_RECURSION_LIMIT=<positive-int>` overrides it. This limit applies only to the
+  child `task_tool` graph, so multi-tool/reflection loops get room without changing the main graph's
+  default recursion limit.
 - **Sub-agent role routing**: SlotFlow delegation is three-layered. Layer 1 remains the six
   built-in functional profiles from `harness/subagents/config.py` (`researcher`, `analyst`,
   `planner`, `coder`, `reviewer`, `writer`). Layer 2 is the compact domain catalog in
@@ -479,7 +482,7 @@ frontend/src/
 - **Node + edge graph (2026-06-30 refactor)**: the harness now uses a LangGraph native
   `StateGraph` (`harness/graph.py`) instead of LangChain `create_agent` + `AgentMiddleware`.
   Each former middleware is a stateless function in `harness/steps/*` called by a named node;
-  order is fixed by edges. Provider quirks are still handled in the model subclass + projection
+  order is fixed by edges. Provider quirks are normalized by LiteLLM before the projection
   layer. `AgentMiddleware` classes and the middleware registry were deleted; only
   `SlotFlowMiddlewareConfig` (behavior switches consumed by nodes) remains.
 - **Interaction UI invariants**: `write_todos` updates surface in one place only: the collapsible
@@ -533,6 +536,10 @@ follow-ups, roughly ordered:
 6. **MCP context bloat** — consider DeerFlow's `tool_search` deferred-schema pattern (inject tool
    names, load full schemas on demand) when many MCP tools are configured.
 7. **Ship it** — the refactor branch is unpushed; open a PR (required check: `Verify`).
+
+- **Python runtime**: backend model integration uses `langchain-litellm==0.7.0` / LiteLLM and
+  therefore supports Python 3.12 and 3.13 (`requires-python = ">=3.12,<3.14"`). Do not bypass
+  LiteLLM's Python `<3.14` metadata; use uv-managed Python 3.13 when the host default is 3.14.
 
 ## Build / verify
 

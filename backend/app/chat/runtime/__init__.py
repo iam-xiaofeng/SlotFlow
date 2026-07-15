@@ -5,7 +5,7 @@
 
 - `env`：环境变量解析小工具；
 - `config`：`SlotFlowRuntimeConfig` 与从环境装配它的入口；
-- `models`：按 provider 创建 chat model（含 DeepSeek reasoning 流保留）；
+- `models`：通过 ChatLiteLLM 为所有 provider 创建统一 chat model；
 - `checkpointer`：LangGraph checkpointer 创建与关闭；
 - `adapter`：`RuntimeBackedAgentAdapter` 与 graph 组装入口。
 
@@ -60,15 +60,10 @@ from app.chat.runtime.env import (
     load_positive_int_from_env,
 )
 from app.chat.runtime.models import (
-    DeepSeekChatModel,
-    bridge_reasoning_content_block,
-    build_openai_compatible_model_kwargs,
-    create_anthropic_chat_model,
+    build_litellm_model_kwargs,
     create_chat_model,
     create_model_for_context,
-    create_openai_compatible_chat_model,
     infer_model_provider,
-    message_has_content,
 )
 
 __all__ = [
@@ -112,13 +107,8 @@ __all__ = [
     "load_optional_text_from_env",
     "load_path_from_env",
     "load_positive_int_from_env",
-    "DeepSeekChatModel",
-    "bridge_reasoning_content_block",
-    "build_openai_compatible_model_kwargs",
-    "create_anthropic_chat_model",
+    "build_litellm_model_kwargs",
     "create_chat_model",
     "create_model_for_context",
-    "create_openai_compatible_chat_model",
     "infer_model_provider",
-    "message_has_content",
 ]

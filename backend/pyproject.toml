@@ -2,15 +2,13 @@
 name = "slotflow-backend"
 version = "0.1.0"
 description = "SlotFlow FastAPI backend"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115.0",
     "httpx[socks]>=0.28.0",
     "langchain>=1.3.2",
-    "langchain-anthropic>=1.1.0",
-    "langchain-deepseek>=1.1.0",
+    "langchain-litellm==0.7.0",
     "langchain-mcp-adapters>=0.2.2",
-    "langchain-openai>=1.2.2",
     "langgraph>=1.2.2",
     "langgraph-checkpoint-postgres>=3.1.0",
     "langgraph-checkpoint-sqlite>=3.1.0",

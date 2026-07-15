@@ -60,7 +60,7 @@ export type SendChatMessageResult = {
 };
 
 const fallbackThreadTitle = "SlotFlow chat";
-const fallbackModelName = "deepseek-v4-pro";
+const fallbackModelName = "deepseek/deepseek-v4-pro";
 const fallbackMode: ChatMode = "pro";
 const fallbackAgentName = "default";
 const streamingDeltaFlushMs = 80;

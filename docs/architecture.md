@@ -6,6 +6,11 @@ SlotFlow is split into a backend runtime and a frontend chat workspace.
 
 The backend is a FastAPI application with these main boundaries:
 
+All chat providers are constructed as `ChatLiteLLM`; configured native providers and
+Agent-capable models come from LiteLLM metadata, and LiteLLM normalizes requests, reasoning
+blocks, tool calls, and usage before messages enter LangGraph. All provider calls use
+LiteLLM's Chat Completions normalization, including official OpenAI and custom relays.
+
 - `app.chat`: thread, message, run, streaming, model discovery, and runtime setup
 - `app.harness`: LangGraph/LangChain graph assembly, tools, middleware, skills, memory, and sub-agents
 - `app.uploads`: user file upload storage and staging
@@ -39,7 +44,7 @@ The frontend is a Next.js application. The chat workspace is centered around:
 
 Each run receives:
 
-- `model_name`: selected by the frontend from `/api/chat/models`
+- `model_name`: provider-qualified LiteLLM id selected by the frontend from `/api/chat/models`
 - `mode`: `flash`, `pro`, or `ultra`
 - `agent_name`: current top-level agent profile
 - `files`: uploaded file ids staged into the run workspace

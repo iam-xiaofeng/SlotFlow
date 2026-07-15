@@ -2,7 +2,7 @@
 
 English | [Chinese](./README_zh.md)
 
-[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
+[![Python](https://img.shields.io/badge/Python-3.12--3.13-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./frontend/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](./backend)
 [![Next.js](https://img.shields.io/badge/Next.js-000000?logo=next.js&logoColor=white)](./frontend)
@@ -56,7 +56,7 @@ workspace panel.
 Recommended platform:
 
 - Linux or WSL2
-- Python 3.12+
+- Python 3.12 or 3.13
 - Node.js 20+; Node 22 is the default target used by `bootstrap.sh`
 - pnpm 10.26.2, read from `frontend/package.json`
 - `make`, `curl`, `git`
@@ -194,7 +194,7 @@ Use this path if you do not want `bootstrap.sh` to install packages.
 
 Install prerequisites yourself:
 
-- Python 3.12+
+- Python 3.12 or 3.13
 - `uv`
 - Node.js 20+
 - pnpm 10.26.2
@@ -239,8 +239,8 @@ backend/.env
 
 ### Model Providers
 
-SlotFlow discovers models at runtime from configured providers. Only providers with
-usable credentials and reachable model endpoints appear in the model selector.
+SlotFlow asks LiteLLM which native providers are configured, then exposes every bundled
+`chat + function-calling` model for those providers. No provider/model list is maintained by SlotFlow.
 
 ```bash
 # DeepSeek
@@ -255,20 +255,26 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 # ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
 
+# Other LiteLLM-native providers use their standard variables, for example:
+GEMINI_API_KEY=...
+MISTRAL_API_KEY=...
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION_NAME=us-east-1
+
 # Custom OpenAI-compatible relay
 CUSTOM_BASE_URL=https://your-relay.example.com/v1
 CUSTOM_API_KEY=sk-...
 CUSTOM_MODELS=claude-sonnet-4,gpt-5,qwen-max
-CUSTOM_VALIDATE_MODELS=true
 ```
 
 Important model behavior:
 
 - `.env` does not choose the conversation model.
 - The frontend sends the selected model and provider with each run.
+- All providers execute through `ChatLiteLLM`; LiteLLM owns provider protocol, reasoning, tool-call, and usage normalization.
 - `CUSTOM_MODELS` can be used when a relay does not support `/models`.
-- `CUSTOM_VALIDATE_MODELS=true` probes custom models so unusable relay IDs do not show
-  up in the selector.
+- All providers use LiteLLM Chat Completions normalization; OpenAI models are not routed through Responses, so OpenAI-compatible DeepSeek/Qwen/custom relays share one transport shape.
 
 ### Frontend URLs
 
@@ -405,7 +411,9 @@ configured from environment JSON or managed from the UI.
 SlotFlow supports focused delegation through functional sub-agents such as researcher,
 analyst, planner, coder, reviewer, and writer. Role/domain prompts are stored under the
 backend harness and loaded only when needed, so the lead agent does not need to read the
-entire role library for every task.
+entire role library for every task. Delegated child graphs use a recursion limit of 100 so
+multiple tool/reflection rounds can finish; override it with
+`SLOTFLOW_SUBAGENT_RECURSION_LIMIT=<positive-int>` without changing the main graph limit.
 
 ### Artifacts
 
@@ -431,7 +439,7 @@ Browser / Next.js UI
   -> POST chat stream request
   -> FastAPI chat routes
   -> RuntimeBackedAgentAdapter
-  -> provider chat model + LangGraph StateGraph
+  -> ChatLiteLLM + LangGraph StateGraph
   -> LangGraph v3 projections
   -> SlotFlow AgentEvent
   -> SSE stream
