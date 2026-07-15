@@ -38,7 +38,12 @@ def test_bootstrap_prepares_host_integrations_in_dependency_order() -> None:
     assert 'uv tool install --force --with-executables-from yt-dlp "$AGENT_REACH_SOURCE"' in script
     assert 'mkdir -p "$HOME/.agent-reach"' in script
     assert 'cd "$HOME/.agent-reach"\n  agent-reach install --env=auto' in script
+    assert "pnpm exec playwright install-deps chromium" in script
     assert "pnpm exec playwright install chromium" in script
+    launcher = REPO_ROOT / "frontend" / "scripts" / "playwright-mcp.mjs"
+    assert launcher.stat().st_mode & 0o111
+    assert 'chromium.executablePath()' in launcher.read_text()
+    subprocess.run(["node", "--check", str(launcher)], check=True)
 
     main = script[script.index("main() {") :]
     calls = [
@@ -47,6 +52,7 @@ def test_bootstrap_prepares_host_integrations_in_dependency_order() -> None:
         "install_agent_reach",
         "install_backend_dependencies",
         "install_frontend_dependencies",
+        "install_playwright_system_dependencies",
         "install_playwright_browser",
         "prepare_backend_env",
         "setup_docker_sandbox",

@@ -153,7 +153,8 @@ frontend/src/
   (Volta fallback for user-local Node), installs/refreshes Agent Reach from its configurable Git
   source with `uv tool` and prepares its zero-configuration channels on the **host**, runs `uv sync`
   in `backend/` (including `markitdown[all]` plus `markitdown-ocr[llm]`), runs `pnpm install
-  --frozen-lockfile` in `frontend/` (including the locked `@playwright/mcp`) and downloads Playwright
+  --frozen-lockfile` in `frontend/` (including the locked `@playwright/mcp` and matching
+  `playwright`), installs Playwright's exact Chromium shared-library set on apt hosts, and downloads
   Chromium, copies `backend/.env_example` to `backend/.env` only when no local `.env` exists, then
   prepares the **Docker sandbox** end to end. Agent Reach is deliberately not installed into that
   sandbox; rerunning `bootstrap.sh` is its refresh path, and optional cookie/login channels remain
@@ -253,6 +254,21 @@ frontend/src/
   `agent_reach_status` before multi-platform research and never pretend unavailable channels work.
   Rerunning `bootstrap.sh` is the only repository-provided refresh path; there is intentionally no
   maintenance command/tool, and optional cookie/login channels remain user-controlled.
+- **Built-in Playwright MCP**: `chat.runtime.config.build_playwright_mcp_server()` appends a
+  protected/pinned `playwright` stdio preset by default. It launches the pnpm-locked upstream MCP
+  through `frontend/scripts/playwright-mcp.mjs`; that silent fixed launcher resolves the matching
+  locked Chromium via `chromium.executablePath()` instead of requiring system Chrome. The preset is
+  headless + isolated, blocks service workers, omits image responses, disables codegen and optional
+  vision/PDF/devtools caps, does not allow unrestricted file access, and fixes cwd/output under the
+  SlotFlow workspace. Its private/loopback origin list is defense-in-depth only (upstream explicitly
+  says origin filters do not cover redirects), not a substitute for treating browsed pages as
+  untrusted. `SlotFlowMcpServerConfig.stateful=True` makes `MultiServerMcpToolProvider` keep one MCP
+  `ClientSession` open across navigate/snapshot/click calls. `RuntimeBackedAgentAdapter` creates that
+  provider/session per run and closes it in `finally`; concurrent runs never share a page/profile.
+  Stateless MCP servers keep the original one-session-per-call adapter behavior. The preset can be
+  toggled but cannot be deleted or shadowed by a user HTTP server. `bootstrap.sh` installs the locked
+  package, runs official `playwright install-deps chromium` on apt hosts, and downloads Chromium;
+  non-apt hosts receive a precise shared-library warning. No separate maintenance command exists.
 - **Network tools**: `web_fetch` and `web_search` live in `harness/tools/network.py` and remain
   read-only, public-URL-only tools under `SlotFlowSandboxConfig` limits. `web_search` uses plain
   HTML search endpoints with fallback: Bing HTML first, then DuckDuckGo Lite. The parser filters

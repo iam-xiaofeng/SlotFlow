@@ -316,6 +316,24 @@ install_frontend_dependencies() {
   fi
 }
 
+install_playwright_system_dependencies() {
+  if [ "$SKIP_SYSTEM_PACKAGES" = "1" ]; then
+    warn "Skipping Playwright system libraries because SLOTFLOW_SKIP_SYSTEM_PACKAGES=1."
+    return
+  fi
+  if ! has_cmd apt-get; then
+    warn "Playwright can install Chromium shared libraries automatically only on apt-based hosts. Install your distribution's Chromium runtime libraries manually if browser launch fails."
+    return
+  fi
+
+  log "Installing Chromium shared libraries required by Playwright MCP..."
+  cd "$FRONTEND_DIR"
+  # Playwright owns the exact Debian/Ubuntu package list for its locked browser
+  # revision. The CLI uses sudo when the current user is not root, matching the
+  # explicitly user-invoked bootstrap privilege boundary.
+  pnpm exec playwright install-deps chromium
+}
+
 install_playwright_browser() {
   if [ "$SKIP_PLAYWRIGHT_BROWSER" = "1" ]; then
     warn "Skipping Playwright browser download because SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1."
@@ -616,7 +634,7 @@ You can now run:
 
 Host integrations:
   - Agent Reach: installed/refreshed with uv tool; core host channels are prepared by Agent Reach
-  - Playwright MCP: package locked by pnpm; Chromium runtime downloaded into Playwright's user cache
+  - Playwright MCP: package locked by pnpm; apt hosts get required shared libraries and Chromium is downloaded to the user cache
   - MarkItDown: all format extras plus the LLM Vision OCR plugin are locked in backend/uv.lock
 
 Docker sandbox (sandbox_exec):
@@ -639,6 +657,7 @@ main() {
   install_agent_reach
   install_backend_dependencies
   install_frontend_dependencies
+  install_playwright_system_dependencies
   install_playwright_browser
   prepare_backend_env
   setup_docker_sandbox

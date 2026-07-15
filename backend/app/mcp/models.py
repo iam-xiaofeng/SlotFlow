@@ -20,6 +20,7 @@ class McpServerRecord(BaseModel):
     protected: bool = False
     order: int = 0
     pinned: bool = False
+    stateful: bool = False
 
 
 class McpServerUpdateRequest(BaseModel):

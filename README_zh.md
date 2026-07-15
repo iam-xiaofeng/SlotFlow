@@ -102,12 +102,13 @@ http://localhost:3000
 3. 安装 Node 和 pnpm，其中 pnpm 版本读取自 `frontend/package.json`。
 4. 用 `uv tool` 安装或刷新 Agent Reach，并准备它在宿主机上的基础渠道。
 5. 在 `backend/` 运行 `uv sync`，安装 MarkItDown 全格式和视觉 OCR 依赖。
-6. 在 `frontend/` 运行锁定依赖安装，并为锁定的 Playwright MCP 下载 Chromium。
+6. 在 `frontend/` 安装锁定依赖，在 apt 主机安装 Chromium 共享库，并下载锁定的 Chromium runtime。
 7. 仅在 `backend/.env` 不存在时，把 `backend/.env_example` 复制为 `backend/.env`。
 8. 尽可能安装、启动并准备 Docker。
 9. 尽可能预拉取 Docker 沙箱镜像。
 
-脚本不会覆盖已有的 `backend/.env`。
+脚本不会覆盖已有的 `backend/.env`。Playwright 官方依赖安装器目前只会在 Debian/Ubuntu
+（`apt`）上自动安装共享库；其他发行版会得到明确 warning，可能仍需手动安装 Chromium runtime 库。
 
 常用 bootstrap 参数：
 
@@ -340,6 +341,21 @@ SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES=524288
 `SLOTFLOW_NETWORK_ENABLED=false` 时桥接也会关闭。需要 Cookie/登录态的可选渠道仍由用户
 明确决定，bootstrap 不会自动启用。
 
+### 内置 Playwright MCP
+
+受保护的 `playwright` MCP preset 默认启用。它使用 headless、isolated Chromium；同一次 run
+中的 navigate/snapshot/click 共用一个 session，run 结束即关闭，并发对话互不共享。preset 的 cwd
+限制在 workspace，不启用可选 vision/PDF/devtools 能力，也不能被用户 HTTP server 覆盖。
+
+```bash
+SLOTFLOW_PLAYWRIGHT_MCP_ENABLED=true
+SLOTFLOW_PLAYWRIGHT_MCP_ACTION_TIMEOUT_MS=10000
+SLOTFLOW_PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT_MS=60000
+```
+
+localhost/私网 origin blocklist 只是纵深防护，并非完整安全边界；重定向和网页内容仍必须视为不可信。
+只有确实要访问本地服务时才设置 `SLOTFLOW_NETWORK_ALLOW_PRIVATE=true`。
+
 ### 网络和 Docker 沙箱
 
 网络工具：
@@ -417,7 +433,8 @@ http://localhost:3000
 
 ### Skills 和 MCP
 
-界面支持已安装 Skills 和 MCP server 管理。Skills 可以启用、禁用、置顶、排序、安装、
+界面支持已安装 Skills 和 MCP server 管理，也会显示受保护的有状态 Playwright preset。
+Skills 可以启用、禁用、置顶、排序、安装、
 上传和删除。MCP servers 可以通过环境 JSON 配置，也可以从界面管理。
 
 ### Sub-Agents

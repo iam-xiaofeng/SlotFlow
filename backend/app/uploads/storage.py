@@ -29,6 +29,7 @@ class SlotFlowUploadStore:
 
     def __init__(self, config: SlotFlowSandboxConfig | None = None) -> None:
         self.workspace = build_slotflow_workspace(config)
+        self.workspace.root.mkdir(parents=True, exist_ok=True)
 
     @property
     def max_upload_bytes(self) -> int:

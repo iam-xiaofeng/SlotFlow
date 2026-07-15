@@ -66,6 +66,26 @@ DEFAULT_SKILLS_ROOT = Path(".slotflow/skills")
 DEFAULT_SKILLS_CONFIG_PATH = Path(".slotflow/skills.json")
 DEFAULT_MEMORY_SQLITE_PATH = Path(".slotflow/memory.sqlite3")
 DEFAULT_MCP_CONFIG_PATH = Path(".slotflow/mcp.json")
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_PLAYWRIGHT_MCP_NAME = "playwright"
+PLAYWRIGHT_PRIVATE_ORIGIN_GLOBS = (
+    "localhost",
+    "127.*",
+    "[::1]",
+    "[fe80::*]",
+    "[fc00::*]",
+    "[fd00::*]",
+    "0.*",
+    "10.*",
+    "100.64.*",
+    "169.254.*",
+    "192.168.*",
+    "*.local",
+    "*.localhost",
+    "*.internal",
+    "metadata.google.internal",
+    *(f"172.{second}.*" for second in range(16, 32)),
+)
 
 
 @dataclass(slots=True)
@@ -110,7 +130,8 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         )
 
     middleware_config = load_middleware_config_from_env()
-    env_mcp_config = load_mcp_config_from_env()
+    sandbox_config = load_sandbox_config_from_env()
+    env_mcp_config = load_mcp_config_from_env(sandbox_config=sandbox_config)
     mcp_config_store = build_mcp_config_store_from_env(env_mcp_config)
     mcp_config = mcp_config_store.load_config()
     skills_root = load_path_from_env("SLOTFLOW_SKILLS_ROOT", default=DEFAULT_SKILLS_ROOT)
@@ -140,7 +161,7 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
         mcp_tool_provider=build_mcp_tool_provider(mcp_config),
         mcp_config_store=mcp_config_store,
         middleware_config=middleware_config,
-        sandbox_config=load_sandbox_config_from_env(),
+        sandbox_config=sandbox_config,
         agent_reach_config=load_agent_reach_config_from_env(),
         subagent_config=SlotFlowSubagentConfig(
             recursion_limit=load_positive_int_from_env(
@@ -359,25 +380,95 @@ def load_agent_reach_config_from_env() -> SlotFlowAgentReachConfig:
     )
 
 
-def load_mcp_config_from_env() -> SlotFlowMcpConfig:
-    """Read the first SlotFlow MCP config shape from environment variables."""
+def load_mcp_config_from_env(
+    *,
+    sandbox_config: SlotFlowSandboxConfig | None = None,
+) -> SlotFlowMcpConfig:
+    """Read environment MCP servers and append SlotFlow's protected Playwright preset."""
 
+    resolved_sandbox = sandbox_config or load_sandbox_config_from_env()
     raw_config = load_optional_text_from_env("SLOTFLOW_MCP_CONFIG_JSON")
-    enabled = load_bool_from_env("SLOTFLOW_MCP_ENABLED", default=raw_config is not None)
     if raw_config is not None:
-        return SlotFlowMcpConfig(
-            enabled=enabled,
-            servers=tuple(load_mcp_servers_from_json(raw_config)),
-        )
+        servers = load_mcp_servers_from_json(raw_config)
+    else:
+        servers = [
+            SlotFlowMcpServerConfig(name=name)
+            for name in load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
+            if not is_removed_default_mcp_server(name)
+        ]
 
-    server_names = [
-        name
-        for name in load_optional_csv_list_from_env("SLOTFLOW_MCP_SERVERS") or []
-        if not is_removed_default_mcp_server(name)
+    servers = [server for server in servers if server.name != DEFAULT_PLAYWRIGHT_MCP_NAME]
+    playwright = None
+    if load_bool_from_env("SLOTFLOW_PLAYWRIGHT_MCP_ENABLED", default=True):
+        playwright = build_playwright_mcp_server(sandbox_config=resolved_sandbox)
+        servers.append(playwright)
+    enabled = load_bool_from_env(
+        "SLOTFLOW_MCP_ENABLED",
+        default=raw_config is not None or bool(playwright and playwright.enabled),
+    )
+    return SlotFlowMcpConfig(enabled=enabled, servers=tuple(servers))
+
+
+def build_playwright_mcp_server(
+    *,
+    sandbox_config: SlotFlowSandboxConfig,
+) -> SlotFlowMcpServerConfig:
+    """Build the fixed stdio preset for the pnpm-locked Playwright MCP package."""
+
+    executable = REPO_ROOT / "frontend" / "scripts" / "playwright-mcp.mjs"
+    enabled = sandbox_config.network_enabled
+    args = [
+        "--headless",
+        "--isolated",
+        "--block-service-workers",
+        "--image-responses",
+        "omit",
+        "--codegen",
+        "none",
+        "--output-mode",
+        "stdout",
+        "--timeout-action",
+        str(
+            load_positive_int_from_env(
+                "SLOTFLOW_PLAYWRIGHT_MCP_ACTION_TIMEOUT_MS",
+                default=10_000,
+            )
+        ),
+        "--timeout-navigation",
+        str(
+            load_positive_int_from_env(
+                "SLOTFLOW_PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT_MS",
+                default=60_000,
+            )
+        ),
     ]
-    return SlotFlowMcpConfig(
+    if not sandbox_config.allow_private_network:
+        args.extend(["--blocked-origins", ";".join(PLAYWRIGHT_PRIVATE_ORIGIN_GLOBS)])
+
+    workspace_root = sandbox_config.resolved_workspace_root()
+
+    host_path = os.pathsep.join(
+        [
+            str(Path.home() / ".volta" / "bin"),
+            str(Path.home() / ".local" / "bin"),
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+    )
+    return SlotFlowMcpServerConfig(
+        name=DEFAULT_PLAYWRIGHT_MCP_NAME,
         enabled=enabled,
-        servers=tuple(SlotFlowMcpServerConfig(name=name) for name in server_names),
+        config={
+            "transport": "stdio",
+            "command": str(executable),
+            "args": args,
+            "cwd": str(workspace_root),
+            "env": {"HOME": str(Path.home()), "PATH": host_path},
+        },
+        order=-100,
+        pinned=True,
+        stateful=True,
     )
 
 
@@ -403,14 +494,18 @@ def load_mcp_servers_from_json(raw_config: str) -> list[SlotFlowMcpServerConfig]
 
         server_config = dict(raw_server_config)
         enabled = server_config.pop("enabled", True)
+        stateful = server_config.pop("stateful", False)
         if not isinstance(enabled, bool):
             raise ValueError(f"MCP server {name!r} enabled must be a boolean")
+        if not isinstance(stateful, bool):
+            raise ValueError(f"MCP server {name!r} stateful must be a boolean")
 
         servers.append(
             SlotFlowMcpServerConfig(
                 name=name.strip(),
                 enabled=enabled,
                 config=server_config,
+                stateful=stateful,
             )
         )
     return servers

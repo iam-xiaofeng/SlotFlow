@@ -152,6 +152,7 @@ export type McpServerRecord = {
   protected: boolean;
   order: number;
   pinned: boolean;
+  stateful: boolean;
 };
 
 export type MemoryRecord = {

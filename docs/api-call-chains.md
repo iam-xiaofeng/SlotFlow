@@ -98,8 +98,10 @@ uploads_update 把工作区路径注入最新用户消息 → 模型用 workspac
   / PATCH {name}(enabled/pinned)/ POST /reorder / DELETE {name}。
   落到 skills 目录+配置存储;agent 侧 skill_match/find-skills/skill_install 工具与
   prepare 的 skills preflight 共用注册表。
-- MCP:GET/POST/PATCH/reorder/DELETE 管理 streamable HTTP server 记录;
-  run 前 ensure_mcp_tools_loaded 连接并把 MCP 工具并入 build_harness_tools。
+- MCP:GET/POST/PATCH/reorder/DELETE 管理 streamable HTTP server 记录和受保护的 Playwright
+  preset；run 前 runtime 为真实 MultiServer provider 建立 run-scoped 实例。普通 MCP 工具保持
+  per-call session；`stateful=True` 的 Playwright 由 AsyncExitStack 保持同一 ClientSession，graph
+  流结束/异常/取消后 finally 关闭，再把工具并入 build_harness_tools。
 
 ## 5.1 Agent Reach ??????
 

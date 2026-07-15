@@ -16,7 +16,7 @@ LiteLLM's Chat Completions normalization, including official OpenAI and custom r
 - `app.uploads`: user file upload storage and staging
 - `app.workspace`: artifact and workspace file access
 - `app.skills`: skill listing, upload, install, and state management
-- `app.mcp`: user-managed MCP server configuration
+- `app.mcp`: protected built-in and user-managed MCP server configuration
 - `app.memory`: local long-term memory records
 
 The chat stream path is:
@@ -56,7 +56,7 @@ provider status and selectable model ids.
 ## Extension Points
 
 - Add a skill under the configured skills root or upload it from the UI.
-- Add tools through MCP server configuration.
+- Add tools through MCP server configuration. The built-in Playwright preset uses a run-scoped stateful session; ordinary MCP servers remain stateless per call.
 - Add a sub-agent profile in `app.harness.subagents.config`.
 - Add middleware in `app.harness.middleware.registry`.
 - Add workspace-safe tools under `app.harness.tools`.

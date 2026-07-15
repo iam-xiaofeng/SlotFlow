@@ -106,12 +106,14 @@ It does the following:
 3. Installs Node and pnpm, using the pnpm version declared in `frontend/package.json`.
 4. Installs or refreshes Agent Reach with `uv tool`, then prepares its core host-side channels.
 5. Runs `uv sync` in `backend/`, including MarkItDown all-format and Vision OCR dependencies.
-6. Runs `pnpm install --frozen-lockfile` in `frontend/` and downloads Playwright Chromium for the locked Playwright MCP package.
+6. Runs `pnpm install --frozen-lockfile` in `frontend/`, installs Playwright's Chromium shared libraries on apt hosts, and downloads the locked Chromium runtime.
 7. Copies `backend/.env_example` to `backend/.env` only if `backend/.env` does not exist.
 8. Installs, starts, and prepares Docker when possible.
 9. Pre-pulls the sandbox image when possible.
 
-The script never overwrites an existing `backend/.env`.
+The script never overwrites an existing `backend/.env`. Playwright's official dependency
+installer currently handles Debian/Ubuntu (`apt`) automatically; on other distributions bootstrap
+keeps going with a warning and Chromium runtime libraries may need to be installed manually.
 
 Useful bootstrap knobs:
 
@@ -349,6 +351,23 @@ SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES=524288
 The bridge also turns off when `SLOTFLOW_NETWORK_ENABLED=false`. Cookie/login channels remain an
 explicit user choice and are not enabled by bootstrap.
 
+### Built-in Playwright MCP
+
+The protected `playwright` MCP preset is enabled by default. It uses a headless isolated Chromium
+session that remains alive across browser actions within one run and closes when that run ends;
+concurrent conversations get separate sessions. The preset is workspace-scoped, enables no optional
+vision/PDF/devtools capabilities, and cannot be replaced by a user HTTP server.
+
+```bash
+SLOTFLOW_PLAYWRIGHT_MCP_ENABLED=true
+SLOTFLOW_PLAYWRIGHT_MCP_ACTION_TIMEOUT_MS=10000
+SLOTFLOW_PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT_MS=60000
+```
+
+Its localhost/private-origin blocklist is defense in depth, not a complete security boundary:
+redirects and page content remain untrusted. Set `SLOTFLOW_NETWORK_ALLOW_PRIVATE=true` only when
+browser access to local services is intentional.
+
 ### Network and Docker Sandbox
 
 Network tools:
@@ -427,7 +446,8 @@ The backend routes each run using the provider provenance sent by the frontend.
 
 ### Skills and MCP
 
-The UI supports installed Skills and MCP server management. Skills can be enabled,
+The UI supports installed Skills and MCP server management, including the protected stateful
+Playwright preset. Skills can be enabled,
 disabled, pinned, reordered, installed, uploaded, and deleted. MCP servers can be
 configured from environment JSON or managed from the UI.
 

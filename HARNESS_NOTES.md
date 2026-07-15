@@ -2957,3 +2957,72 @@ SlotFlow 边界验证 doctor JSON、Exa 搜索、Jina 读取 `example.com`、`gh
 YouTube 紧凑元数据全部成功；过程中还抓到并修正了当前 `gh` 字段名应为 `fullName`，以及原始
 `--dump-single-json` 会因 formats 超过输出上限而截断，最终改成 yt-dlp `--print` 的固定字段投影。
 本轮不把网络 smoke 放入离线 pytest，避免把单测稳定性绑定到 Exa/GitHub/YouTube 外部状态。
+
+## 50. 迭代 42（2026-07-16）：Playwright MCP 内置化——状态不能按普通 MCP 每次重建
+
+### 50.1 第一处根因：普通 MCP adapter 的 session 生命周期不适合浏览器
+
+`langchain-mcp-adapters` 当前 `MultiServerMCPClient.get_tools()` 文档和源码都明确：默认生成的
+LangChain tool **每次调用都会新建 MCP session**。这对无状态查询工具成立，但 Playwright 的
+`browser_navigate → browser_snapshot → browser_click` 依赖同一个 browser/page/ref；按旧 loader 直接
+接入会让每一步启动新进程，页面和 ref 全丢失。仅把 `@playwright/mcp` 填进环境 JSON 并不等于可用。
+
+本轮给 `SlotFlowMcpServerConfig` 增加 `stateful` 元数据。`MultiServerMcpToolProvider.aload_tools()` 对
+普通 server 仍走上游默认路径；对 stateful server 则用 `AsyncExitStack` 进入
+`client.session(server_name)`，再将真实 `ClientSession` 传给 `load_mcp_tools()`，直到 provider
+`aclose()` 才退出。配置关闭/变化时也先关闭旧 stack，不残留 MCP 子进程。
+
+### 50.2 第二处根因：全局持久 session 会破坏并发对话隔离
+
+SlotFlow 已支持多个 thread 同时运行。若把 stateful provider 继续放在全局 `SlotFlowRuntimeConfig`
+复用，两个 run 会共享同一个页面/profile，一个 run 收尾还可能关闭另一个 run 的浏览器。
+`RuntimeBackedAgentAdapter` 因而把真实 `MultiServerMcpToolProvider` 视作 template：每次
+`stream_events()` 为当前 run 创建 provider，预加载 stateful session，把该 provider 显式传给 graph，
+并在 async generator 的 `finally` 中关闭。自定义测试 provider 仍保持原注入语义。这样同一 run 的
+多轮工具有状态，并发 run 之间无状态共享，异常/取消也会清理。
+
+### 50.3 第三处根因：上游默认找系统 Chrome，bootstrap 下载的是锁定 Chromium
+
+第一次真实 MCP smoke 能列出 24 个工具，但 `browser_navigate` 报：
+`Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome`。上游 CLI 默认选择系统
+Chrome；阶段 1 的 `playwright install chromium` 下载的是与 pnpm lock 匹配的 Playwright Chromium。
+没有理由再装一份系统 Chrome。新增固定、静默的
+`frontend/scripts/playwright-mcp.mjs`：从直接依赖 `playwright` 读取
+`chromium.executablePath()`，以 argv 方式追加 `--executable-path` 后启动锁定的
+`node_modules/.bin/playwright-mcp`，stdin/stdout/stderr 原样透传，不污染 JSON-RPC stdout。
+
+第二次 smoke 正确找到 Chromium，但动态链接器报 `libnspr4.so` 缺失。根因是下载浏览器二进制不等于
+安装 Linux shared libraries。`bootstrap.sh` 现在在 pnpm install 后，对 apt 主机运行上游官方
+`playwright install-deps chromium`，再下载 Chromium；`SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` 同时跳过
+这一步。非 apt 主机不伪造跨发行版包名，打印明确 warning。当前 WSL 通过该官方命令实际安装
+`libnspr4`/`libnss3`/字体/Xvfb 等锁定浏览器需要的包。
+
+### 50.4 内置 preset 与安全边界（按代码核实）
+
+`load_mcp_config_from_env()` 默认追加受保护、置顶的 `playwright` server；
+`SLOTFLOW_PLAYWRIGHT_MCP_ENABLED=false` 可完全移除，UI 可通过 base-server override 启停，但用户
+不能删除或用同名 HTTP server shadow。preset 使用绝对 launcher、固定 PATH/HOME、workspace cwd，参数为：
+headless、isolated、block service workers、omit image responses、codegen none、stdout output，以及
+可配置 action/navigation timeout。没有 `--allow-unrestricted-file-access`，没有 vision/PDF/devtools caps。
+
+当 `SLOTFLOW_NETWORK_ALLOW_PRIVATE=false` 时传入 localhost、loopback、RFC1918/link-local/metadata
+host glob blocklist。上游文档明确说明 blocked-origins 不处理 redirect、不是安全边界，因此这里仅把它
+作为纵深防护；网页文本、页面脚本和重定向仍是不可信输入，不能提升为系统指令。MCP 的 cwd 指向
+`SlotFlowSandboxConfig.resolved_workspace_root()`；preset 启用时先创建该目录，Playwright 自动生成的
+`.playwright-mcp` snapshot 也被限制在 workspace 内。
+
+API record 增加 `stateful`，前端目录卡片显示“内置有状态”。store 合并时 base server 优先，修掉了
+用户同名 server 可以覆盖环境/base server 的旧缺口；stateful 元数据在 enabled/pinned/reorder override
+中保持，但不会从普通用户 HTTP server JSON 注入。
+
+### 50.5 验证
+
+- 新增 `tests/test_playwright_mcp.py`：固定 preset、workspace cwd、默认 caps、私网开关、默认/显式关闭、
+  base server 防覆盖/防删除、API toggle、stateful session 保活与关闭。
+- `tests/test_runtime.py` 新增 run-scoped provider 用例：连续两个 run 得到不同 provider，均在收尾关闭。
+- `tests/test_distribution_contract.py` 同步检查 `install-deps` 顺序、launcher 可执行位、
+  `chromium.executablePath()` 和 `node --check`。
+- 真实 stateful MCP smoke：加载 **24** 个上游 browser tools，`browser_navigate(example.com)` 后再调用
+  独立的 `browser_snapshot`，第二步仍返回同一 URL/标题和 `Example Domain` accessibility tree，证明
+  session/page 没在工具间重建；provider 退出后进程正常关闭。
+- 浏览器 shared-library 安装通过 Playwright 官方 apt 路径真实执行；非 apt 分支只做代码/契约验证。

@@ -19,13 +19,14 @@ from app.chat.runtime.checkpointer import (
 )
 from app.chat.runtime.config import (
     SlotFlowRuntimeConfig,
+    build_mcp_tool_provider,
     load_runtime_config_from_env,
     refresh_runtime_mcp_config,
     refresh_runtime_skills_config,
 )
 from app.chat.runtime.models import create_chat_model, create_model_for_context
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
-from app.harness.mcp import ensure_mcp_tools_loaded
+from app.harness.mcp import McpToolProvider, MultiServerMcpToolProvider, ensure_mcp_tools_loaded
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -72,21 +73,27 @@ class RuntimeBackedAgentAdapter:
         model_name = bundle.context.model_name or self._runtime_config.model_name
         checkpointer = await self._ensure_checkpointer()
         refresh_runtime_skills_config(self._runtime_config)
-        await self._ensure_mcp_tools_loaded()
-        graph = create_langgraph_agent_graph(
-            model=create_model_for_context(
-                self._model_factory,
-                model_name=model_name,
+        mcp_provider = self._mcp_provider_for_run()
+        try:
+            await self._ensure_mcp_tools_loaded(mcp_provider)
+            graph = create_langgraph_agent_graph(
+                model=create_model_for_context(
+                    self._model_factory,
+                    model_name=model_name,
+                    run_context=bundle.context,
+                ),
+                runtime_config=self._runtime_config,
                 run_context=bundle.context,
-            ),
-            runtime_config=self._runtime_config,
-            run_context=bundle.context,
-            checkpointer=checkpointer,
-        )
-        adapter = LangGraphEventAgentAdapter(graph)
+                checkpointer=checkpointer,
+                mcp_tool_provider=mcp_provider,
+            )
+            adapter = LangGraphEventAgentAdapter(graph)
 
-        async for event in adapter.stream_events(request=request, bundle=bundle):
-            yield event
+            async for event in adapter.stream_events(request=request, bundle=bundle):
+                yield event
+        finally:
+            if mcp_provider is not self._runtime_config.mcp_tool_provider:
+                await _aclose_mcp_provider(mcp_provider)
 
     async def _ensure_checkpointer(self) -> Checkpointer | None:
         if self._runtime_config.checkpointer_backend in ("none", "memory"):
@@ -95,12 +102,24 @@ class RuntimeBackedAgentAdapter:
             self._checkpointer = await create_async_checkpointer(self._runtime_config)
         return self._checkpointer
 
-    async def _ensure_mcp_tools_loaded(self) -> None:
+    def _mcp_provider_for_run(self) -> McpToolProvider | None:
         refresh_runtime_mcp_config(self._runtime_config)
+        provider = self._runtime_config.mcp_tool_provider
+        if isinstance(provider, MultiServerMcpToolProvider):
+            return build_mcp_tool_provider(self._runtime_config.mcp_config)
+        return provider
+
+    async def _ensure_mcp_tools_loaded(self, provider: McpToolProvider | None) -> None:
         await ensure_mcp_tools_loaded(
             config=self._runtime_config.mcp_config,
-            provider=self._runtime_config.mcp_tool_provider,
+            provider=provider,
         )
+
+
+async def _aclose_mcp_provider(provider: McpToolProvider | None) -> None:
+    close = getattr(provider, "aclose", None)
+    if callable(close):
+        await close()
 
 
 def create_langgraph_agent_graph(
@@ -109,6 +128,7 @@ def create_langgraph_agent_graph(
     runtime_config: SlotFlowRuntimeConfig,
     run_context: RunContext,
     checkpointer: Checkpointer | None = None,
+    mcp_tool_provider: McpToolProvider | None = None,
 ):
     """创建 SlotFlow 本地的真实 LangGraph agent graph。
 
@@ -126,7 +146,7 @@ def create_langgraph_agent_graph(
             skills_config_store=runtime_config.skills_config_store,
             memory_store=runtime_config.memory_store,
             mcp_config=runtime_config.mcp_config,
-            mcp_tool_provider=runtime_config.mcp_tool_provider,
+            mcp_tool_provider=mcp_tool_provider or runtime_config.mcp_tool_provider,
             mcp_config_store=runtime_config.mcp_config_store,
             middleware_config=runtime_config.middleware_config,
             sandbox_config=runtime_config.sandbox_config,

@@ -42,7 +42,8 @@ class SlotFlowMcpConfigStore:
             if not is_removed_default_mcp_server(server.name)
         }
         for server in user_servers:
-            servers_by_name[server.name] = server
+            if server.name not in servers_by_name:
+                servers_by_name[server.name] = server
 
         servers = tuple(sort_mcp_servers(servers_by_name.values()))
         return SlotFlowMcpConfig(
@@ -86,6 +87,8 @@ class SlotFlowMcpConfigStore:
         enabled: bool = True,
     ) -> SlotFlowMcpServerConfig:
         validate_http_mcp_server(name=name, url=url)
+        if any(server.name == name for server in self.base_config.servers):
+            raise ProtectedMcpServerError(name)
         user_servers = {
             server.name: server
             for server in self.load_user_servers()
@@ -115,6 +118,7 @@ class SlotFlowMcpConfigStore:
                 config=current.config,
                 order=current.order,
                 pinned=current.pinned,
+                stateful=current.stateful,
             )
             user_servers[name] = next_server
             self._write_user_servers(user_servers)
@@ -152,6 +156,7 @@ class SlotFlowMcpConfigStore:
                 config=current.config,
                 order=current.order,
                 pinned=pinned,
+                stateful=current.stateful,
             )
             user_servers[name] = next_server
             self._write_user_servers(user_servers)
@@ -200,6 +205,7 @@ class SlotFlowMcpConfigStore:
                     config=current.config,
                     order=index,
                     pinned=current.pinned,
+                    stateful=current.stateful,
                 )
                 continue
             current_override = overrides.get(name, {})
@@ -300,6 +306,7 @@ def apply_server_override(
         config=server.config,
         order=order if isinstance(order, int) else server.order,
         pinned=pinned if isinstance(pinned, bool) else server.pinned,
+        stateful=server.stateful,
     )
 
 

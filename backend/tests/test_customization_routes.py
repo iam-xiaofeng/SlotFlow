@@ -543,6 +543,7 @@ def test_create_and_delete_http_mcp_server_refreshes_runtime(tmp_path: Path) -> 
         "protected": False,
         "order": 0,
         "pinned": False,
+        "stateful": False,
     }
     assert [server.name for server in runtime_config.mcp_config.servers] == ["search"]
 
