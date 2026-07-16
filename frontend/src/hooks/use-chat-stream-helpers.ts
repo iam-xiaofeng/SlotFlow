@@ -5,8 +5,8 @@ import {
   type WorkspaceEntryRecord,
 } from "@/lib/chat-stream";
 
-export type ChatUiMessageRole = "user" | "assistant" | "system" | "tool";
-export type ChatUiMessageStatus = "streaming" | "done" | "error" | "cancelled";
+type ChatUiMessageRole = "user" | "assistant" | "system" | "tool";
+type ChatUiMessageStatus = "streaming" | "done" | "error" | "cancelled";
 
 export type ChatUiMessage = {
   id: string;
@@ -24,9 +24,9 @@ export type ChatUiMessage = {
   metadata?: Record<string, unknown>;
 };
 
-export type ChatToolStatusPhase = "starting" | "running" | "completed" | "error";
+type ChatToolStatusPhase = "starting" | "running" | "completed" | "error";
 
-export type ChatToolStatus = {
+type ChatToolStatus = {
   toolName: string;
   phase: ChatToolStatusPhase;
   message: string;
@@ -71,7 +71,7 @@ export function settleRunningToolActivities(
   );
 }
 
-export type ChatTodoStatus = "pending" | "in_progress" | "completed";
+type ChatTodoStatus = "pending" | "in_progress" | "completed";
 
 export type ChatTodo = {
   content: string;

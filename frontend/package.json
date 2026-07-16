@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:dead-code": "knip --include files,exports,types"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
-    "@radix-ui/react-slot": "^1.2.4",
     "@tailwindcss/postcss": "^4.0.15",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -37,6 +37,7 @@
     "@types/node": "^20.14.10",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "knip": "5.64.0",
     "playwright": "1.62.0-alpha-1783623505000",
     "typescript": "^5.8.2"
   },

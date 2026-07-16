@@ -61,3 +61,13 @@ def test_bootstrap_prepares_host_integrations_in_dependency_order() -> None:
     ]
     positions = [main.index(f"  {call}\n") for call in calls]
     assert positions == sorted(positions)
+
+
+def test_frontend_dead_code_contract_is_part_of_verify() -> None:
+    frontend = json.loads((REPO_ROOT / "frontend" / "package.json").read_text())
+    assert frontend["scripts"]["check:dead-code"] == "knip --include files,exports,types"
+    assert frontend["devDependencies"]["knip"] == "5.64.0"
+
+    knip = json.loads((REPO_ROOT / "frontend" / "knip.json").read_text())
+    assert knip["ignore"] == ["scripts/playwright-mcp.mjs"]
+    assert "dead-code-frontend" in (REPO_ROOT / "Makefile").read_text()

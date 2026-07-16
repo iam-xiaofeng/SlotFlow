@@ -1,4 +1,4 @@
-export type ChatStreamEventName =
+type ChatStreamEventName =
   | "run.prepared"
   | "context.compressing"
   | "message.delta"
@@ -15,7 +15,7 @@ export type ChatStreamEvent = {
   data: Record<string, unknown>;
 };
 
-export type SseBufferDrainResult = {
+type SseBufferDrainResult = {
   events: ChatStreamEvent[];
   rest: string;
 };
@@ -54,7 +54,7 @@ export function drainSseBuffer(
   return { events, rest };
 }
 
-export function parseSseFrame(frame: string): ChatStreamEvent | null {
+function parseSseFrame(frame: string): ChatStreamEvent | null {
   const lines = frame.split("\n");
   const eventLine = lines.find((line) => line.startsWith("event:"));
   const dataLines = lines

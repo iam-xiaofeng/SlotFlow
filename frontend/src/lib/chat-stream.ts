@@ -1,6 +1,6 @@
 import { drainSseBuffer, type ChatStreamEvent } from "@/lib/sse-parser";
 
-export type { ChatStreamEvent, ChatStreamEventName } from "@/lib/sse-parser";
+export type { ChatStreamEvent } from "@/lib/sse-parser";
 
 const localDevStreamBaseUrl = "http://127.0.0.1:8000";
 
@@ -58,7 +58,7 @@ export type ModelOptionRecord = {
   source: "api" | "fallback" | "catalog" | string;
 };
 
-export type ModelProviderRecord = {
+type ModelProviderRecord = {
   provider: ModelProvider;
   configured: boolean;
   base_url?: string | null;
@@ -168,7 +168,7 @@ export type MemoryRecord = {
 
 export type MemoryKind = "manual" | "preference" | "profile" | "topic" | "fact";
 
-export type ChatRequestOptions = {
+type ChatRequestOptions = {
   signal?: AbortSignal;
 };
 
@@ -431,7 +431,7 @@ export async function installSkill(
   return response.json() as Promise<SkillRecord>;
 }
 
-export type SkillGroupRequest = {
+type SkillGroupRequest = {
   name: string;
   description: string;
   content?: string;

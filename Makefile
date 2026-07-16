@@ -1,4 +1,4 @@
-.PHONY: test-backend typecheck-frontend build-frontend verify
+.PHONY: test-backend typecheck-frontend dead-code-frontend build-frontend verify
 
 test-backend:
 	cd backend && uv run pytest -q
@@ -6,10 +6,13 @@ test-backend:
 typecheck-frontend:
 	cd frontend && pnpm typecheck
 
+dead-code-frontend:
+	cd frontend && pnpm check:dead-code
+
 build-frontend:
 	cd frontend && pnpm build
 
-verify: test-backend typecheck-frontend build-frontend
+verify: test-backend typecheck-frontend dead-code-frontend build-frontend
 
 # Start local frontend and backend development servers.
 dev:
