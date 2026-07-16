@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -106,61 +107,23 @@ class SlotFlowMcpConfigStore:
         return user_servers[name]
 
     def set_server_enabled(self, name: str, enabled: bool) -> SlotFlowMcpServerConfig:
-        user_servers = {
-            server.name: server
-            for server in self.load_user_servers()
-        }
-        if name in user_servers:
-            current = user_servers[name]
-            next_server = SlotFlowMcpServerConfig(
-                name=current.name,
-                enabled=enabled,
-                config=current.config,
-                order=current.order,
-                pinned=current.pinned,
-                stateful=current.stateful,
-            )
-            user_servers[name] = next_server
-            self._write_user_servers(user_servers)
-            return next_server
-
-        base_servers = {
-            server.name: server
-            for server in self.base_config.servers
-            if not is_removed_default_mcp_server(server.name)
-        }
-        if name not in base_servers:
-            raise McpServerNotFoundError(name)
-
-        data = self._read_data()
-        raw_overrides = data.get("overrides", {})
-        overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
-        current_override = overrides.get(name, {})
-        if not isinstance(current_override, dict):
-            current_override = {}
-        overrides[name] = {**current_override, "enabled": enabled}
-        data["overrides"] = overrides
-        self._write_data(data)
-        return apply_server_override(base_servers[name], overrides[name])
+        return self._set_server_flag(name, "enabled", enabled)
 
     def set_server_pinned(self, name: str, pinned: bool) -> SlotFlowMcpServerConfig:
-        user_servers = {
-            server.name: server
-            for server in self.load_user_servers()
-        }
-        if name in user_servers:
-            current = user_servers[name]
-            next_server = SlotFlowMcpServerConfig(
-                name=current.name,
-                enabled=current.enabled,
-                config=current.config,
-                order=current.order,
-                pinned=pinned,
-                stateful=current.stateful,
-            )
-            user_servers[name] = next_server
+        return self._set_server_flag(name, "pinned", pinned)
+
+    def _set_server_flag(
+        self,
+        name: str,
+        field: str,
+        value: bool,
+    ) -> SlotFlowMcpServerConfig:
+        user_servers = {server.name: server for server in self.load_user_servers()}
+        if current := user_servers.get(name):
+            updated = replace(current, **{field: value})
+            user_servers[name] = updated
             self._write_user_servers(user_servers)
-            return next_server
+            return updated
 
         base_servers = {
             server.name: server
@@ -173,10 +136,8 @@ class SlotFlowMcpConfigStore:
         data = self._read_data()
         raw_overrides = data.get("overrides", {})
         overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
-        current_override = overrides.get(name, {})
-        if not isinstance(current_override, dict):
-            current_override = {}
-        overrides[name] = {**current_override, "pinned": pinned}
+        current = overrides.get(name, {})
+        overrides[name] = {**(current if isinstance(current, dict) else {}), field: value}
         data["overrides"] = overrides
         self._write_data(data)
         return apply_server_override(base_servers[name], overrides[name])
