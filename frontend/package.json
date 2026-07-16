@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "check:dead-code": "knip --include files,exports,types"
+    "check:dead-code": "knip --include files,exports,types",
+    "test": "vitest run"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
@@ -39,7 +40,8 @@
     "@types/react-dom": "^19.0.0",
     "knip": "5.64.0",
     "playwright": "1.62.0-alpha-1783623505000",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "3.2.4"
   },
   "packageManager": "pnpm@10.26.2"
 }
