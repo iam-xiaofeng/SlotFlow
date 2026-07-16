@@ -72,6 +72,7 @@ def isolate_user_config_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.setenv("SLOTFLOW_MCP_CONFIG_PATH", str(tmp_path / "mcp.json"))
     monkeypatch.setenv("SLOTFLOW_SKILLS_ROOT", str(tmp_path / "skills"))
     monkeypatch.setenv("SLOTFLOW_SKILLS_CONFIG_PATH", str(tmp_path / "skills.json"))
+    monkeypatch.setenv("SLOTFLOW_PLAYWRIGHT_MCP_ENABLED", "false")
 
 
 def test_load_runtime_config_from_env_uses_small_defaults(
@@ -735,3 +736,64 @@ def _sqlite_table_names(database_path: Path) -> set[str]:
         return {str(row[0]) for row in rows}
     finally:
         connection.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_run_scoped_stateful_mcp_providers(monkeypatch) -> None:
+    """Concurrent-capable runtime must not share one stateful browser session across runs."""
+
+    class RunProvider(AsyncCapturingMcpToolProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="playwright",
+                config={"transport": "stdio", "command": "playwright-mcp", "args": []},
+                stateful=True,
+            ),
+        ),
+    )
+    template = MultiServerMcpToolProvider(client_factory=lambda connections: None)
+    run_providers: list[RunProvider] = []
+
+    def provider_factory(mcp_config: SlotFlowMcpConfig) -> RunProvider:
+        assert mcp_config is config
+        provider = RunProvider()
+        run_providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(runtime_module.adapter, "build_mcp_tool_provider", provider_factory)
+    adapter = RuntimeBackedAgentAdapter(
+        SlotFlowRuntimeConfig(
+            checkpointer_backend="memory",
+            mcp_config=config,
+            mcp_tool_provider=template,
+        ),
+        model_factory=lambda model_name: FakeListChatModel(responses=["done"]),
+    )
+
+    for index in range(2):
+        request = ChatStreamRequest(message=f"run {index}", model_name="fake-mcp")
+        events = await collect_agent_events(
+            adapter.stream_events(
+                request=request,
+                bundle=_bundle(
+                    thread_id=f"thread_stateful_{index}",
+                    run_id=f"run_stateful_{index}",
+                    request=request,
+                ),
+            )
+        )
+        assert events[-1].event == "run.finished"
+
+    assert len(run_providers) == 2
+    assert run_providers[0] is not run_providers[1]
+    assert [provider.close_calls for provider in run_providers] == [1, 1]
+    assert all(provider.aload_calls == [config] for provider in run_providers)

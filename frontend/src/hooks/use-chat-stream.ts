@@ -31,15 +31,7 @@ import {
   upsertToolActivity,
 } from "./use-chat-stream-helpers";
 
-export type {
-  ChatTodo,
-  ChatTodoStatus,
-  ChatUiMessage,
-  ChatToolActivity,
-  ChatToolStatus,
-  ChatUiMessageRole,
-  ChatUiMessageStatus,
-} from "./use-chat-stream-helpers";
+export type { ChatToolActivity, ChatUiMessage } from "./use-chat-stream-helpers";
 
 type AssistantDeltaChannel = "content" | "reasoning";
 type PendingAssistantDeltas = Record<AssistantDeltaChannel, string>;
@@ -55,7 +47,7 @@ export type ThreadRunStatus = "streaming" | "attention" | "needs_input" | "error
 
 type ThreadTodoState = { todos: ChatTodo[]; listKey: string | null; signature: string };
 
-export type UseChatStreamOptions = {
+type UseChatStreamOptions = {
   defaultThreadTitle?: string;
   defaultModelName?: string;
   defaultMode?: ChatMode;
@@ -63,11 +55,11 @@ export type UseChatStreamOptions = {
   defaultMetadata?: Record<string, unknown>;
 };
 
-export type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message"> & {
+type SendChatMessageOptions = Omit<Partial<ChatStreamRequest>, "message"> & {
   threadTitle?: string;
 };
 
-export type SendChatMessageResult = {
+type SendChatMessageResult = {
   accepted: boolean;
   thread: ThreadRecord | null;
   artifacts: WorkspaceEntryRecord[];

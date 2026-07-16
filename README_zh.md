@@ -58,6 +58,7 @@ Next.js 聊天界面，支持运行时模型选择、可见 reasoning 流、Skil
 - pnpm 10.26.2，版本来自 `frontend/package.json`
 - `make`、`curl`、`git`
 - Docker Engine，用于代码执行工具和 Docker 沙箱产物
+- `ffmpeg` 和 ExifTool，用于完整的 MarkItDown 音频/元数据转换（`bootstrap.sh` 会尽可能安装）
 
 `./bootstrap.sh` 可以在常见 Linux 发行版上安装或校验大部分依赖：
 `apt`、`dnf`、`yum`、`pacman`、`apk`、`zypper`。它也有基础工具的 Homebrew 路径，
@@ -100,13 +101,15 @@ http://localhost:3000
 1. 安装或校验仓库和 `Makefile` 需要的系统依赖。
 2. 如果缺少 `uv`，自动安装。
 3. 安装 Node 和 pnpm，其中 pnpm 版本读取自 `frontend/package.json`。
-4. 在 `backend/` 运行 `uv sync`。
-5. 在 `frontend/` 运行 `pnpm install --frozen-lockfile`，如果没有 lockfile 则运行普通安装。
-6. 仅在 `backend/.env` 不存在时，把 `backend/.env_example` 复制为 `backend/.env`。
-7. 尽可能安装、启动并准备 Docker。
-8. 尽可能预拉取 Docker 沙箱镜像。
+4. 用 `uv tool` 安装或刷新 Agent Reach，并准备它在宿主机上的基础渠道。
+5. 尽可能安装 MarkItDown 的 ffmpeg/ExifTool，再运行 `uv sync` 安装全格式和视觉 OCR 依赖。
+6. 在 `frontend/` 安装锁定依赖，在 apt 主机安装 Chromium 共享库，并下载锁定的 Chromium runtime。
+7. 仅在 `backend/.env` 不存在时，把 `backend/.env_example` 复制为 `backend/.env`。
+8. 尽可能安装、启动并准备 Docker。
+9. 尽可能预拉取 Docker 沙箱镜像。
 
-脚本不会覆盖已有的 `backend/.env`。
+脚本不会覆盖已有的 `backend/.env`。Playwright 官方依赖安装器目前只会在 Debian/Ubuntu
+（`apt`）上自动安装共享库；其他发行版会得到明确 warning，可能仍需手动安装 Chromium runtime 库。
 
 常用 bootstrap 参数：
 
@@ -116,6 +119,13 @@ SLOTFLOW_SKIP_SYSTEM_PACKAGES=1 ./bootstrap.sh
 
 # 跳过所有 Docker 配置。应用仍可运行，但 sandbox_exec 需要 Docker 可用后才能工作。
 SLOTFLOW_SKIP_DOCKER=1 ./bootstrap.sh
+
+# 分别跳过 Agent Reach 宿主配置或 Playwright Chromium 下载。
+SLOTFLOW_SKIP_AGENT_REACH=1 ./bootstrap.sh
+SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1 ./bootstrap.sh
+
+# 覆盖 uv tool 使用的 Agent Reach Git 源；重新运行 bootstrap 即为更新入口。
+SLOTFLOW_AGENT_REACH_SOURCE=git+https://github.com/Panniantong/Agent-Reach.git ./bootstrap.sh
 
 # 覆盖 bootstrap 使用的运行时工具版本。
 SLOTFLOW_NODE_VERSION=22 ./bootstrap.sh
@@ -315,6 +325,61 @@ SLOTFLOW_CODE_EXECUTION_ENABLED=true
 
 只有在调试具体子系统或受限本地环境中，才建议关闭某个功能。
 
+### Agent Reach 宿主桥接
+
+`bootstrap.sh` 会在宿主机安装 Agent Reach 及其基础上游 CLI。SlotFlow 只向模型提供固定的
+只读操作：渠道体检、Exa 全网搜索、Jina 网页阅读、GitHub 搜索和 YouTube 元数据；不会向
+模型开放宿主 shell，也不提供安装、配置或远程写操作。桥接不会挂载进 Docker，重新运行
+`bootstrap.sh` 即会刷新它。
+
+```bash
+SLOTFLOW_AGENT_REACH_ENABLED=true
+SLOTFLOW_AGENT_REACH_HOME=~/.agent-reach
+SLOTFLOW_AGENT_REACH_TIMEOUT_SECONDS=60
+SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES=524288
+```
+
+`SLOTFLOW_NETWORK_ENABLED=false` 时桥接也会关闭。需要 Cookie/登录态的可选渠道仍由用户
+明确决定，bootstrap 不会自动启用。
+
+### 内置 Playwright MCP
+
+受保护的 `playwright` MCP preset 默认启用。它使用 headless、isolated Chromium；同一次 run
+中的 navigate/snapshot/click 共用一个 session，run 结束即关闭，并发对话互不共享。preset 的 cwd
+限制在 workspace，不启用可选 vision/PDF/devtools 能力，也不能被用户 HTTP server 覆盖。
+
+```bash
+SLOTFLOW_PLAYWRIGHT_MCP_ENABLED=true
+SLOTFLOW_PLAYWRIGHT_MCP_ACTION_TIMEOUT_MS=10000
+SLOTFLOW_PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT_MS=60000
+```
+
+localhost/私网 origin blocklist 只是纵深防护，并非完整安全边界；重定向和网页内容仍必须视为不可信。
+只有确实要访问本地服务时才设置 `SLOTFLOW_NETWORK_ALLOW_PRIVATE=true`。
+
+### MarkItDown 转换与视觉 OCR
+
+唯一的 `convert_file_to_markdown` 工具可转换 workspace 内的 PDF、Word、Excel、PowerPoint、
+HTML/数据、图片、音频、EPUB 和压缩包。LiteLLM 判定当前 run 模型支持视觉时会自动复用；否则可配置
+专用 OpenAI-compatible Vision 模型。扫描 PDF 和嵌入图片使用官方 `markitdown-ocr` 插件。文件大小、
+压缩包展开、OCR 页数/图片数、输出长度、路径和 artifact 写入都有上限。
+
+```bash
+SLOTFLOW_MARKITDOWN_ENABLED=true
+SLOTFLOW_MARKITDOWN_MAX_INPUT_BYTES=52428800
+SLOTFLOW_MARKITDOWN_MAX_OUTPUT_CHARS=750000
+SLOTFLOW_MARKITDOWN_VISION_ENABLED=true
+SLOTFLOW_MARKITDOWN_VISION_MAX_PAGES=20
+SLOTFLOW_MARKITDOWN_VISION_MAX_IMAGES=20
+
+# 可选的专用 OpenAI-compatible client：
+# SLOTFLOW_MARKITDOWN_VISION_MODEL=gpt-4o
+# SLOTFLOW_MARKITDOWN_VISION_BASE_URL=https://api.openai.com/v1
+# SLOTFLOW_MARKITDOWN_VISION_API_KEY=sk-...
+```
+
+没有兼容视觉模型时仍会运行普通提取，但图片/扫描 PDF 会返回明确 warning，不会假装 OCR 成功。
+
 ### 网络和 Docker 沙箱
 
 网络工具：
@@ -392,7 +457,8 @@ http://localhost:3000
 
 ### Skills 和 MCP
 
-界面支持已安装 Skills 和 MCP server 管理。Skills 可以启用、禁用、置顶、排序、安装、
+界面支持已安装 Skills 和 MCP server 管理，也会显示受保护的有状态 Playwright preset。
+Skills 可以启用、禁用、置顶、排序、安装、
 上传和删除。MCP servers 可以通过环境 JSON 配置，也可以从界面管理。
 
 ### Sub-Agents

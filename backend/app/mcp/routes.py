@@ -153,6 +153,7 @@ def mcp_server_to_record(
         protected=source != "user",
         order=server.order,
         pinned=server.pinned,
+        stateful=server.stateful,
     )
 
 

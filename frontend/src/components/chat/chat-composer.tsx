@@ -57,7 +57,6 @@ type ChatComposerProps = {
   onThinkingEnabledChange: (enabled: boolean) => void;
 };
 
-export type { ComposerQueuedMessage, ComposerTodo } from "./composer-parts";
 
 export function ChatComposer({
   attachments,

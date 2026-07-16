@@ -61,6 +61,7 @@ Recommended platform:
 - pnpm 10.26.2, read from `frontend/package.json`
 - `make`, `curl`, `git`
 - Docker Engine for code execution tools and Docker sandbox artifacts
+- `ffmpeg` and ExifTool for complete MarkItDown audio/metadata conversion (`bootstrap.sh` installs them where supported)
 
 `./bootstrap.sh` can install or validate most of these on common Linux families:
 `apt`, `dnf`, `yum`, `pacman`, `apk`, and `zypper`. It also has a Homebrew path for
@@ -104,13 +105,16 @@ It does the following:
 1. Installs or validates system prerequisites used by the repo and `Makefile`.
 2. Installs `uv` if it is missing.
 3. Installs Node and pnpm, using the pnpm version declared in `frontend/package.json`.
-4. Runs `uv sync` in `backend/`.
-5. Runs `pnpm install --frozen-lockfile` in `frontend/` when `pnpm-lock.yaml` exists.
-6. Copies `backend/.env_example` to `backend/.env` only if `backend/.env` does not exist.
-7. Installs, starts, and prepares Docker when possible.
-8. Pre-pulls the sandbox image when possible.
+4. Installs or refreshes Agent Reach with `uv tool`, then prepares its core host-side channels.
+5. Installs MarkItDown's ffmpeg/ExifTool helpers where supported, then runs `uv sync` with all-format and Vision OCR dependencies.
+6. Runs `pnpm install --frozen-lockfile` in `frontend/`, installs Playwright's Chromium shared libraries on apt hosts, and downloads the locked Chromium runtime.
+7. Copies `backend/.env_example` to `backend/.env` only if `backend/.env` does not exist.
+8. Installs, starts, and prepares Docker when possible.
+9. Pre-pulls the sandbox image when possible.
 
-The script never overwrites an existing `backend/.env`.
+The script never overwrites an existing `backend/.env`. Playwright's official dependency
+installer currently handles Debian/Ubuntu (`apt`) automatically; on other distributions bootstrap
+keeps going with a warning and Chromium runtime libraries may need to be installed manually.
 
 Useful bootstrap knobs:
 
@@ -122,6 +126,13 @@ SLOTFLOW_SKIP_SYSTEM_PACKAGES=1 ./bootstrap.sh
 # Skip all Docker setup. The app can still run, but sandbox_exec will not work
 # until Docker is installed and reachable.
 SLOTFLOW_SKIP_DOCKER=1 ./bootstrap.sh
+
+# Skip Agent Reach host setup or the Playwright Chromium download independently.
+SLOTFLOW_SKIP_AGENT_REACH=1 ./bootstrap.sh
+SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1 ./bootstrap.sh
+
+# Override the Agent Reach Git source used by uv tool. Rerunning bootstrap is the update path.
+SLOTFLOW_AGENT_REACH_SOURCE=git+https://github.com/Panniantong/Agent-Reach.git ./bootstrap.sh
 
 # Override runtime tool versions used by bootstrap.
 SLOTFLOW_NODE_VERSION=22 ./bootstrap.sh
@@ -324,6 +335,65 @@ SLOTFLOW_CODE_EXECUTION_ENABLED=true
 Disable a feature only when debugging a subsystem or running in a constrained
 environment.
 
+### Agent Reach Host Bridge
+
+`bootstrap.sh` installs Agent Reach and its core upstream CLIs on the host. SlotFlow exposes only
+fixed read-only operations for status, Exa web search, Jina page reading, GitHub search, and YouTube
+metadata; it never gives the model a host shell or install/configure/write command. The bridge is not
+mounted into Docker and is refreshed by rerunning `bootstrap.sh`.
+
+```bash
+SLOTFLOW_AGENT_REACH_ENABLED=true
+SLOTFLOW_AGENT_REACH_HOME=~/.agent-reach
+SLOTFLOW_AGENT_REACH_TIMEOUT_SECONDS=60
+SLOTFLOW_AGENT_REACH_MAX_OUTPUT_BYTES=524288
+```
+
+The bridge also turns off when `SLOTFLOW_NETWORK_ENABLED=false`. Cookie/login channels remain an
+explicit user choice and are not enabled by bootstrap.
+
+### Built-in Playwright MCP
+
+The protected `playwright` MCP preset is enabled by default. It uses a headless isolated Chromium
+session that remains alive across browser actions within one run and closes when that run ends;
+concurrent conversations get separate sessions. The preset is workspace-scoped, enables no optional
+vision/PDF/devtools capabilities, and cannot be replaced by a user HTTP server.
+
+```bash
+SLOTFLOW_PLAYWRIGHT_MCP_ENABLED=true
+SLOTFLOW_PLAYWRIGHT_MCP_ACTION_TIMEOUT_MS=10000
+SLOTFLOW_PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT_MS=60000
+```
+
+Its localhost/private-origin blocklist is defense in depth, not a complete security boundary:
+redirects and page content remain untrusted. Set `SLOTFLOW_NETWORK_ALLOW_PRIVATE=true` only when
+browser access to local services is intentional.
+
+### MarkItDown Conversion and Vision OCR
+
+The single `convert_file_to_markdown` tool converts workspace-local PDF, Word, Excel, PowerPoint,
+HTML/data, image, audio, EPUB, and archive files. It uses the selected run model automatically when
+LiteLLM reports Vision support; otherwise configure a dedicated OpenAI-compatible Vision model.
+Scanned PDFs and images use the official `markitdown-ocr` plugin. Large files, archive expansion,
+page/image OCR count, output size, paths, and artifact writes are bounded.
+
+```bash
+SLOTFLOW_MARKITDOWN_ENABLED=true
+SLOTFLOW_MARKITDOWN_MAX_INPUT_BYTES=52428800
+SLOTFLOW_MARKITDOWN_MAX_OUTPUT_CHARS=750000
+SLOTFLOW_MARKITDOWN_VISION_ENABLED=true
+SLOTFLOW_MARKITDOWN_VISION_MAX_PAGES=20
+SLOTFLOW_MARKITDOWN_VISION_MAX_IMAGES=20
+
+# Optional dedicated OpenAI-compatible client:
+# SLOTFLOW_MARKITDOWN_VISION_MODEL=gpt-4o
+# SLOTFLOW_MARKITDOWN_VISION_BASE_URL=https://api.openai.com/v1
+# SLOTFLOW_MARKITDOWN_VISION_API_KEY=sk-...
+```
+
+Without a compatible selected model or dedicated client, normal extraction still runs and image/
+scanned-PDF results carry an explicit warning instead of silently claiming OCR succeeded.
+
 ### Network and Docker Sandbox
 
 Network tools:
@@ -402,7 +472,8 @@ The backend routes each run using the provider provenance sent by the frontend.
 
 ### Skills and MCP
 
-The UI supports installed Skills and MCP server management. Skills can be enabled,
+The UI supports installed Skills and MCP server management, including the protected stateful
+Playwright preset. Skills can be enabled,
 disabled, pinned, reordered, installed, uploaded, and deleted. MCP servers can be
 configured from environment JSON or managed from the UI.
 

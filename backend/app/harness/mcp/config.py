@@ -19,6 +19,7 @@ class SlotFlowMcpServerConfig:
     config: dict[str, Any] | None = None
     order: int = 0
     pinned: bool = False
+    stateful: bool = False
 
 
 @dataclass(frozen=True, slots=True)

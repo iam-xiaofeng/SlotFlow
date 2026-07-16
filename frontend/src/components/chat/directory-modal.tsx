@@ -723,7 +723,13 @@ function McpGrid({
             {server.url || server.transport || "—"}
           </p>
           <div className="mt-auto flex items-center justify-between gap-2 pt-1">
-            <CardChip>{server.source === "environment" ? "环境配置" : "用户添加"}</CardChip>
+            <CardChip>
+              {server.stateful
+                ? "内置有状态"
+                : server.source === "environment"
+                  ? "环境配置"
+                  : "用户添加"}
+            </CardChip>
             <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
               <Button
                 type="button"

@@ -59,7 +59,7 @@ export type ComposerTodo = {
   status: "pending" | "in_progress" | "completed";
 };
 
-export const MODE_OPTIONS: Record<ChatMode, { label: string; description: string }> = {
+const MODE_OPTIONS: Record<ChatMode, { label: string; description: string }> = {
   flash: {
     label: "Flash",
     description: "快速响应，适合简单问答。",

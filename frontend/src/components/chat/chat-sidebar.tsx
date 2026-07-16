@@ -291,7 +291,7 @@ function CollapsedSidebarControls({
   );
 }
 
-export function UserMenu() {
+function UserMenu() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger

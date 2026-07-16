@@ -89,6 +89,32 @@ type QueuedChatMessage = {
   thinkingEnabled: boolean;
 };
 
+type UiActionOptions<T> = {
+  failure: string;
+  after?: (value: T) => void | Promise<void>;
+  recover?: () => void | Promise<void>;
+  success?: string | ((value: T) => string);
+};
+
+async function runUiAction<T>(
+  action: () => Promise<T>,
+  options: UiActionOptions<T>,
+): Promise<T | undefined> {
+  try {
+    const value = await action();
+    await options.after?.(value);
+    if (options.success) {
+      toast.success(
+        typeof options.success === "function" ? options.success(value) : options.success,
+      );
+    }
+    return value;
+  } catch (caught) {
+    toast.error(caught instanceof Error ? caught.message : options.failure);
+    await options.recover?.();
+  }
+}
+
 export function ChatApp() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [threadQuery, setThreadQuery] = useState("");
@@ -516,49 +542,38 @@ export function ChatApp() {
   async function handleSkillFolderChange(event: ChangeEvent<HTMLInputElement>) {
     const selectedFiles = Array.from(event.target.files ?? []);
     event.target.value = "";
-    if (selectedFiles.length === 0) {
-      return;
-    }
+    if (selectedFiles.length === 0) return;
 
-    try {
-      const uploadedSkills = await uploadSkillFolder(selectedFiles);
-      await refreshSkills();
-      toast.success(
-        uploadedSkills.length === 1
-          ? `${uploadedSkills[0].name} skill added`
-          : `${uploadedSkills.length} skills added`,
-      );
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "upload skill folder failed";
-      toast.error(message);
-    }
+    await runUiAction(() => uploadSkillFolder(selectedFiles), {
+      failure: "upload skill folder failed",
+      after: refreshSkills,
+      success: (skills) =>
+        skills.length === 1
+          ? `${skills[0].name} skill added`
+          : `${skills.length} skills added`,
+    });
   }
 
   async function handleInstallSkillFromRegistry(request?: SkillInstallRequest) {
     const packageUrl =
       request?.package_url ??
       window.prompt("Skill package URL", "https://github.com/vercel-labs/skills");
-    if (!packageUrl?.trim()) {
-      return;
-    }
+    if (!packageUrl?.trim()) return;
+    const skillName = request?.skill_name ?? window.prompt("Skill name", "find-skills");
+    if (!skillName?.trim()) return;
 
-    const skillName =
-      request?.skill_name ?? window.prompt("Skill name", "find-skills");
-    if (!skillName?.trim()) {
-      return;
-    }
-
-    try {
-      const skill = await installSkill({
-        package_url: packageUrl.trim(),
-        skill_name: skillName.trim(),
-      });
-      await refreshSkills();
-      toast.success(`${skill.name} skill installed`);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "install skill failed";
-      toast.error(message);
-    }
+    await runUiAction(
+      () =>
+        installSkill({
+          package_url: packageUrl.trim(),
+          skill_name: skillName.trim(),
+        }),
+      {
+        failure: "install skill failed",
+        after: refreshSkills,
+        success: (skill) => `${skill.name} skill installed`,
+      },
+    );
   }
 
   async function handleGroupSkills(input: {
@@ -567,179 +582,126 @@ export function ChatApp() {
     content: string;
     members: string[];
   }) {
-    try {
-      const group = await groupSkills(input);
-      await refreshSkills();
-      toast.success(`已合成索引 Skill：${group.name}`);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "group skills failed";
-      toast.error(message);
-    }
+    await runUiAction(() => groupSkills(input), {
+      failure: "group skills failed",
+      after: refreshSkills,
+      success: (group) => `????? Skill?${group.name}`,
+    });
   }
 
   async function handleToggleSkill(skill: SkillRecord, enabled: boolean) {
-    try {
-      await setSkillEnabled(skill.name, enabled);
-      await refreshSkills();
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "update skill failed";
-      toast.error(message);
-    }
+    await runUiAction(() => setSkillEnabled(skill.name, enabled), {
+      failure: "update skill failed",
+      after: refreshSkills,
+    });
   }
 
   async function handlePinSkill(skill: SkillRecord, pinned: boolean) {
-    try {
-      await setSkillPinned(skill.name, pinned);
-      await refreshSkills();
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "update skill failed";
-      toast.error(message);
-    }
+    await runUiAction(() => setSkillPinned(skill.name, pinned), {
+      failure: "update skill failed",
+      after: refreshSkills,
+    });
   }
 
   async function handleReorderSkills(names: string[]) {
     setSkills((current) => sortRecordsByNames(current, names));
-    try {
-      setSkills(await reorderSkills(names));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "reorder skills failed";
-      toast.error(message);
-      await refreshSkills();
-    }
+    await runUiAction(() => reorderSkills(names), {
+      failure: "reorder skills failed",
+      after: setSkills,
+      recover: refreshSkills,
+    });
   }
 
   async function handleDeleteSkill(skill: SkillRecord) {
-    if (skill.protected) {
-      return;
-    }
-    try {
-      await deleteSkill(skill.name);
-      await refreshSkills();
-      toast.success(`${skill.name} skill deleted`);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "delete skill failed";
-      toast.error(message);
-    }
+    if (skill.protected) return;
+    await runUiAction(() => deleteSkill(skill.name), {
+      failure: "delete skill failed",
+      after: refreshSkills,
+      success: `${skill.name} skill deleted`,
+    });
   }
 
   async function handleAddHttpMcpServer() {
-    const name = window.prompt("MCP name");
-    if (!name?.trim()) {
-      return;
-    }
+    const name = window.prompt("MCP name")?.trim();
+    if (!name) return;
+    const url = window.prompt("MCP HTTP URL")?.trim();
+    if (!url) return;
 
-    const url = window.prompt("MCP HTTP URL");
-    if (!url?.trim()) {
-      return;
-    }
-
-    try {
-      const server = await createHttpMcpServer({
-        name: name.trim(),
-        url: url.trim(),
-      });
-      await refreshMcpServers();
-      toast.success(`${server.name} MCP added`);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "create MCP server failed";
-      toast.error(message);
-    }
+    await runUiAction(() => createHttpMcpServer({ name, url }), {
+      failure: "create MCP server failed",
+      after: refreshMcpServers,
+      success: (server) => `${server.name} MCP added`,
+    });
   }
 
   async function handleToggleMcpServer(server: McpServerRecord, enabled: boolean) {
-    try {
-      await setMcpServerEnabled(server.name, enabled);
-      await refreshMcpServers();
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "update MCP server failed";
-      toast.error(message);
-    }
+    await runUiAction(() => setMcpServerEnabled(server.name, enabled), {
+      failure: "update MCP server failed",
+      after: refreshMcpServers,
+    });
   }
 
   async function handlePinMcpServer(server: McpServerRecord, pinned: boolean) {
-    try {
-      await setMcpServerPinned(server.name, pinned);
-      await refreshMcpServers();
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "update MCP server failed";
-      toast.error(message);
-    }
+    await runUiAction(() => setMcpServerPinned(server.name, pinned), {
+      failure: "update MCP server failed",
+      after: refreshMcpServers,
+    });
   }
 
   async function handleReorderMcpServers(names: string[]) {
     setMcpServers((current) => sortRecordsByNames(current, names));
-    try {
-      setMcpServers(await reorderMcpServers(names));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "reorder MCP servers failed";
-      toast.error(message);
-      await refreshMcpServers();
-    }
+    await runUiAction(() => reorderMcpServers(names), {
+      failure: "reorder MCP servers failed",
+      after: setMcpServers,
+      recover: refreshMcpServers,
+    });
   }
 
   async function handleDeleteMcpServer(server: McpServerRecord) {
-    if (server.protected) {
-      return;
-    }
-    try {
-      await deleteMcpServer(server.name);
-      await refreshMcpServers();
-      toast.success(`${server.name} MCP deleted`);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "delete MCP server failed";
-      toast.error(message);
-    }
+    if (server.protected) return;
+    await runUiAction(() => deleteMcpServer(server.name), {
+      failure: "delete MCP server failed",
+      after: refreshMcpServers,
+      success: `${server.name} MCP deleted`,
+    });
   }
 
   async function handleAddMemory(content: string, kind: MemoryKind) {
-    if (!content.trim()) {
-      return;
-    }
-
-    try {
-      await createMemory(content.trim(), kind);
-      await refreshMemories();
-      toast.success("记忆已添加");
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "create memory failed";
-      toast.error(message);
-    }
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    await runUiAction(() => createMemory(trimmed, kind), {
+      failure: "create memory failed",
+      after: refreshMemories,
+      success: "?????",
+    });
   }
 
-  async function handleEditMemory(memory: MemoryRecord, content: string, kind: MemoryKind) {
-    if (!content.trim()) {
-      return;
-    }
-
-    try {
-      await updateMemory(memory.id, content.trim(), kind);
-      await refreshMemories();
-      toast.success("记忆已更新");
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "update memory failed";
-      toast.error(message);
-    }
+  async function handleEditMemory(
+    memory: MemoryRecord,
+    content: string,
+    kind: MemoryKind,
+  ) {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    await runUiAction(() => updateMemory(memory.id, trimmed, kind), {
+      failure: "update memory failed",
+      after: refreshMemories,
+      success: "?????",
+    });
   }
 
   async function handleDeleteMemory(memory: MemoryRecord) {
     setMemories((current) => current.filter((item) => item.id !== memory.id));
-    try {
-      await deleteMemory(memory.id);
-      await refreshMemories();
-      toast.success("记忆已删除");
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "delete memory failed";
-      await refreshMemories();
-      toast.error(message);
-    }
+    await runUiAction(() => deleteMemory(memory.id), {
+      failure: "delete memory failed",
+      after: refreshMemories,
+      recover: refreshMemories,
+      success: "?????",
+    });
   }
 
   function handlePreviewArtifact(artifact: WorkspaceEntryRecord) {
-    if (artifact.kind !== "file") {
-      return;
-    }
-
-    // 只负责选路径+开面板;文件内容由 WorkspacePanel 自行拉取,这里不再重复请求一次。
+    if (artifact.kind !== "file") return;
     setSelectedArtifactPath(artifact.path);
     setIsArtifactPanelOpen(true);
     setPanelRequest({ mode: "files", nonce: Date.now() });

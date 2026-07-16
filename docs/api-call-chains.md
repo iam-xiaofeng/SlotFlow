@@ -98,8 +98,27 @@ uploads_update 把工作区路径注入最新用户消息 → 模型用 workspac
   / PATCH {name}(enabled/pinned)/ POST /reorder / DELETE {name}。
   落到 skills 目录+配置存储;agent 侧 skill_match/find-skills/skill_install 工具与
   prepare 的 skills preflight 共用注册表。
-- MCP:GET/POST/PATCH/reorder/DELETE 管理 streamable HTTP server 记录;
-  run 前 ensure_mcp_tools_loaded 连接并把 MCP 工具并入 build_harness_tools。
+- MCP:GET/POST/PATCH/reorder/DELETE 管理 streamable HTTP server 记录和受保护的 Playwright
+  preset；run 前 runtime 为真实 MultiServer provider 建立 run-scoped 实例。普通 MCP 工具保持
+  per-call session；`stateful=True` 的 Playwright 由 AsyncExitStack 保持同一 ClientSession，graph
+  流结束/异常/取消后 finally 关闭，再把工具并入 build_harness_tools。
+
+## 5.1 Agent Reach ??????
+
+run config ? `SlotFlowAgentReachConfig` ? harness builder ? tools registry ?
+`build_agent_reach_tools`??/? agent ??????? StructuredTool???????????
+`agent-reach`/`mcporter`/`curl`/`gh`/`yt-dlp` argv?`FixedHostCommandRunner` ?
+`~/.agent-reach` ????? allowlist?timeout?????? secret redaction????????????
+`SLOTFLOW_NETWORK_ENABLED=false` ?????????
+
+## 5.2 MarkItDown 本地转换
+
+runtime config → `SlotFlowMarkItDownConfig` → harness tools registry →
+`convert_file_to_markdown`。输入先经 workspace resolver/文件与 archive/OCR workload 上限，再调用
+`MarkItDown.convert_local`；兼容视觉的当前模型通过 LangChain facade 注入，或使用专用
+OpenAI-compatible client。纯图片走 built-in image converter，扫描/嵌图 PDF/Office 走官方
+`markitdown-ocr` plugin。可选 output_path 经 artifact normalizer 写入当前 thread；sync 解析和 Vision
+调用由 StructuredTool async coroutine 放入 worker thread。
 
 ## 6. Terminal(WS /api/terminal/ws)
 

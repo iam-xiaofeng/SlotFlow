@@ -7,6 +7,9 @@ BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 NODE_VERSION="${SLOTFLOW_NODE_VERSION:-22}"
 PNPM_VERSION="${SLOTFLOW_PNPM_VERSION:-}"
+AGENT_REACH_SOURCE="${SLOTFLOW_AGENT_REACH_SOURCE:-git+https://github.com/Panniantong/Agent-Reach.git}"
+SKIP_AGENT_REACH="${SLOTFLOW_SKIP_AGENT_REACH:-0}"
+SKIP_PLAYWRIGHT_BROWSER="${SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER:-0}"
 SKIP_SYSTEM_PACKAGES="${SLOTFLOW_SKIP_SYSTEM_PACKAGES:-0}"
 SKIP_DOCKER="${SLOTFLOW_SKIP_DOCKER:-0}"
 DOCKER_IMAGE="${SLOTFLOW_DOCKER_IMAGE:-${SLOTFLOW_DOCKER_SANDBOX_IMAGE:-python:3.12}}"
@@ -163,6 +166,43 @@ install_system_packages() {
   warn "No supported system package manager found. Install make, curl, git, python3, and psmisc manually if missing."
 }
 
+install_markitdown_system_dependencies() {
+  if [ "$SKIP_SYSTEM_PACKAGES" = "1" ]; then
+    warn "Skipping MarkItDown system helpers because SLOTFLOW_SKIP_SYSTEM_PACKAGES=1."
+    return
+  fi
+  if has_cmd ffmpeg && has_cmd exiftool; then
+    log "MarkItDown system helpers are already available."
+    return
+  fi
+
+  log "Installing MarkItDown audio/metadata helpers (ffmpeg + ExifTool)..."
+  if has_cmd apt-get; then
+    run_as_root apt-get update
+    run_as_root apt-get install -y ffmpeg libimage-exiftool-perl
+  elif has_cmd dnf; then
+    if ! run_as_root dnf install -y ffmpeg perl-Image-ExifTool; then
+      warn "dnf could not install ffmpeg/ExifTool; enable the appropriate multimedia repository and retry."
+    fi
+  elif has_cmd yum; then
+    if ! run_as_root yum install -y ffmpeg perl-Image-ExifTool; then
+      warn "yum could not install ffmpeg/ExifTool; enable the appropriate multimedia repository and retry."
+    fi
+  elif has_cmd pacman; then
+    run_as_root pacman -Sy --needed --noconfirm ffmpeg perl-image-exiftool
+  elif has_cmd apk; then
+    run_as_root apk add --no-cache ffmpeg exiftool
+  elif has_cmd zypper; then
+    if ! run_as_root zypper --non-interactive install ffmpeg perl-Image-ExifTool; then
+      warn "zypper could not install ffmpeg/ExifTool; enable the appropriate multimedia repository and retry."
+    fi
+  elif has_cmd brew; then
+    brew install ffmpeg exiftool
+  else
+    warn "No supported package manager for MarkItDown's optional ffmpeg/ExifTool helpers."
+  fi
+}
+
 require_basic_tools() {
   has_cmd curl || die "curl is required to install uv/Node tooling. Install curl and rerun ./bootstrap.sh."
   has_cmd git || die "git is required by package managers and dependency installers. Install git and rerun ./bootstrap.sh."
@@ -275,6 +315,28 @@ install_node_and_pnpm_with_volta() {
   log "Installed Node $(node --version) and pnpm $(pnpm --version)."
 }
 
+install_agent_reach() {
+  if [ "$SKIP_AGENT_REACH" = "1" ]; then
+    warn "Skipping Agent Reach setup because SLOTFLOW_SKIP_AGENT_REACH=1."
+    return
+  fi
+
+  log "Installing or refreshing Agent Reach and its zero-configuration host channels..."
+  uv tool install --force --with-executables-from yt-dlp "$AGENT_REACH_SOURCE"
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r || true
+  has_cmd agent-reach || die "Agent Reach installation finished but agent-reach is not on PATH. Add ~/.local/bin to PATH and rerun."
+
+  # Agent Reach is intentionally installed on the host, not in SlotFlow's Docker
+  # sandbox. Its installer owns the upstream CLI selection and can be refreshed by
+  # rerunning bootstrap.sh; optional cookie/login channels remain user-managed. Run it
+  # from Agent Reach's own home because mcporter resolves config from the current directory.
+  mkdir -p "$HOME/.agent-reach"
+  cd "$HOME/.agent-reach"
+  agent-reach install --env=auto
+  log "Installed $(agent-reach version 2>/dev/null || printf 'Agent Reach')."
+}
+
 install_backend_dependencies() {
   log "Installing backend dependencies with uv..."
   cd "$BACKEND_DIR"
@@ -289,6 +351,35 @@ install_frontend_dependencies() {
   else
     pnpm install
   fi
+}
+
+install_playwright_system_dependencies() {
+  if [ "$SKIP_SYSTEM_PACKAGES" = "1" ]; then
+    warn "Skipping Playwright system libraries because SLOTFLOW_SKIP_SYSTEM_PACKAGES=1."
+    return
+  fi
+  if ! has_cmd apt-get; then
+    warn "Playwright can install Chromium shared libraries automatically only on apt-based hosts. Install your distribution's Chromium runtime libraries manually if browser launch fails."
+    return
+  fi
+
+  log "Installing Chromium shared libraries required by Playwright MCP..."
+  cd "$FRONTEND_DIR"
+  # Playwright owns the exact Debian/Ubuntu package list for its locked browser
+  # revision. The CLI uses sudo when the current user is not root, matching the
+  # explicitly user-invoked bootstrap privilege boundary.
+  pnpm exec playwright install-deps chromium
+}
+
+install_playwright_browser() {
+  if [ "$SKIP_PLAYWRIGHT_BROWSER" = "1" ]; then
+    warn "Skipping Playwright browser download because SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1."
+    return
+  fi
+
+  log "Downloading the Chromium runtime used by the built-in Playwright MCP server..."
+  cd "$FRONTEND_DIR"
+  pnpm exec playwright install chromium
 }
 
 prepare_backend_env() {
@@ -578,6 +669,11 @@ You can now run:
   make dev
   make kill
 
+Host integrations:
+  - Agent Reach: installed/refreshed with uv tool; core host channels are prepared by Agent Reach
+  - Playwright MCP: package locked by pnpm; apt hosts get required shared libraries and Chromium is downloaded to the user cache
+  - MarkItDown: all format extras plus Vision OCR are locked in uv.lock; ffmpeg/ExifTool are installed when supported
+
 Docker sandbox (sandbox_exec):
   - image: $DOCKER_IMAGE (pre-pulled when possible); persistent container is created on first use
   - if this is WSL and systemd was just enabled, run 'wsl --shutdown' once from Windows so the
@@ -592,11 +688,15 @@ EOF
 main() {
   cd "$ROOT_DIR"
   install_system_packages
+  install_markitdown_system_dependencies
   require_basic_tools
   install_uv
   install_node_and_pnpm
+  install_agent_reach
   install_backend_dependencies
   install_frontend_dependencies
+  install_playwright_system_dependencies
+  install_playwright_browser
   prepare_backend_env
   setup_docker_sandbox
   print_next_steps

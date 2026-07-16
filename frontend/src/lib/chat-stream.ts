@@ -1,6 +1,7 @@
+import { requestJson, requestOk } from "@/lib/api-client";
 import { drainSseBuffer, type ChatStreamEvent } from "@/lib/sse-parser";
 
-export type { ChatStreamEvent, ChatStreamEventName } from "@/lib/sse-parser";
+export type { ChatStreamEvent } from "@/lib/sse-parser";
 
 const localDevStreamBaseUrl = "http://127.0.0.1:8000";
 
@@ -58,7 +59,7 @@ export type ModelOptionRecord = {
   source: "api" | "fallback" | "catalog" | string;
 };
 
-export type ModelProviderRecord = {
+type ModelProviderRecord = {
   provider: ModelProvider;
   configured: boolean;
   base_url?: string | null;
@@ -152,6 +153,7 @@ export type McpServerRecord = {
   protected: boolean;
   order: number;
   pinned: boolean;
+  stateful: boolean;
 };
 
 export type MemoryRecord = {
@@ -167,29 +169,23 @@ export type MemoryRecord = {
 
 export type MemoryKind = "manual" | "preference" | "profile" | "topic" | "fact";
 
-export type ChatRequestOptions = {
+type ChatRequestOptions = {
   signal?: AbortSignal;
 };
 
 export async function listChatModels(
   options: ChatRequestOptions = {},
 ): Promise<ModelCatalogRecord> {
-  const response = await fetch(resolveChatStreamUrl("/api/chat/models"), {
+  return requestJson<ModelCatalogRecord>("list chat models failed", resolveChatStreamUrl("/api/chat/models"), {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list chat models failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ModelCatalogRecord>;
 }
 
 export async function createThread(
   title?: string,
   options: ChatRequestOptions = {},
 ): Promise<ThreadRecord> {
-  const response = await fetch("/api/chat/threads", {
+  return requestJson<ThreadRecord>("create thread failed", "/api/chat/threads", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -197,26 +193,14 @@ export async function createThread(
     body: JSON.stringify({ title }),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`create thread failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ThreadRecord>;
 }
 
 export async function listThreads(
   options: ChatRequestOptions = {},
 ): Promise<ThreadRecord[]> {
-  const response = await fetch("/api/chat/threads", {
+  return requestJson<ThreadRecord[]>("list threads failed", "/api/chat/threads", {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list threads failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ThreadRecord[]>;
 }
 
 export async function searchThreads(
@@ -227,44 +211,28 @@ export async function searchThreads(
     q: query,
     limit: "30",
   });
-  const response = await fetch(`/api/chat/search?${params.toString()}`, {
+  return requestJson<ThreadSearchResultRecord[]>("search threads failed", `/api/chat/search?${params.toString()}`, {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`search threads failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ThreadSearchResultRecord[]>;
 }
 
 export async function deleteThread(
   threadId: string,
   options: ChatRequestOptions = {},
 ): Promise<void> {
-  const response = await fetch(`/api/chat/threads/${threadId}`, {
+  await requestOk("delete thread failed", `/api/chat/threads/${threadId}`, {
     method: "DELETE",
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`delete thread failed: ${response.status}`);
-  }
 }
 
 export async function listThreadMessages(
   threadId: string,
   options: ChatRequestOptions = {},
 ): Promise<MessageRecord[]> {
-  const response = await fetch(`/api/chat/threads/${threadId}/messages`, {
+  return requestJson<MessageRecord[]>("list messages failed", `/api/chat/threads/${threadId}/messages`, {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list messages failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<MessageRecord[]>;
 }
 
 export async function uploadFile(
@@ -274,17 +242,11 @@ export async function uploadFile(
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await fetch("/api/uploads", {
+  return requestJson<UploadedFileRecord>("upload file failed", "/api/uploads", {
     method: "POST",
     body: formData,
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`upload file failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<UploadedFileRecord>;
 }
 
 export async function listArtifacts(
@@ -295,32 +257,20 @@ export async function listArtifacts(
     params.set("path", options.path);
   }
   const query = params.toString();
-  const response = await fetch(
+  return requestJson<WorkspaceEntryRecord[]>("list artifacts failed",
     `/api/workspace/artifacts${query ? `?${query}` : ""}`,
     {
       signal: options.signal,
     },
   );
-
-  if (!response.ok) {
-    throw new Error(`list artifacts failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<WorkspaceEntryRecord[]>;
 }
 
 export async function listThreadWorkspaces(
   options: ChatRequestOptions = {},
 ): Promise<ThreadWorkspaceRecord[]> {
-  const response = await fetch("/api/workspace/threads", {
+  return requestJson<ThreadWorkspaceRecord[]>("list thread workspaces failed", "/api/workspace/threads", {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list thread workspaces failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<ThreadWorkspaceRecord[]>;
 }
 
 export async function readArtifact(
@@ -328,15 +278,9 @@ export async function readArtifact(
   options: ChatRequestOptions = {},
 ): Promise<WorkspaceReadRecord> {
   const params = new URLSearchParams({ path });
-  const response = await fetch(`/api/workspace/artifacts/read?${params.toString()}`, {
+  return requestJson<WorkspaceReadRecord>("read artifact failed", `/api/workspace/artifacts/read?${params.toString()}`, {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`read artifact failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<WorkspaceReadRecord>;
 }
 
 export function resolveArtifactRawUrl(
@@ -362,28 +306,18 @@ export async function deleteArtifact(
   options: ChatRequestOptions = {},
 ): Promise<void> {
   const params = new URLSearchParams({ path });
-  const response = await fetch(`/api/workspace/artifacts?${params.toString()}`, {
+  await requestOk("delete artifact failed", `/api/workspace/artifacts?${params.toString()}`, {
     method: "DELETE",
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`delete artifact failed: ${response.status}`);
-  }
 }
 
 export async function listSkills(
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord[]> {
-  const response = await fetch("/api/skills", {
+  return requestJson<SkillRecord[]>("list skills failed", "/api/skills", {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list skills failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SkillRecord[]>;
 }
 
 export async function uploadSkillFolder(
@@ -397,24 +331,18 @@ export async function uploadSkillFolder(
     formData.append("files", file, relativePath);
   }
 
-  const response = await fetch("/api/skills/upload", {
+  return requestJson<SkillRecord[]>("upload skill folder failed", "/api/skills/upload", {
     method: "POST",
     body: formData,
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`upload skill folder failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SkillRecord[]>;
 }
 
 export async function installSkill(
   body: SkillInstallRequest,
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord> {
-  const response = await fetch("/api/skills/install", {
+  return requestJson<SkillRecord>("install skill failed", "/api/skills/install", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -422,15 +350,9 @@ export async function installSkill(
     body: JSON.stringify(body),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`install skill failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SkillRecord>;
 }
 
-export type SkillGroupRequest = {
+type SkillGroupRequest = {
   name: string;
   description: string;
   content?: string;
@@ -441,7 +363,7 @@ export async function groupSkills(
   body: SkillGroupRequest,
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord> {
-  const response = await fetch("/api/skills/group", {
+  return requestJson<SkillRecord>("group skills failed", "/api/skills/group", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -449,12 +371,6 @@ export async function groupSkills(
     body: JSON.stringify(body),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`group skills failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SkillRecord>;
 }
 
 async function updateSkillState(
@@ -465,7 +381,7 @@ async function updateSkillState(
   },
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord> {
-  const response = await fetch(`/api/skills/${encodeURIComponent(skillName)}`, {
+  return requestJson<SkillRecord>("update skill failed", `/api/skills/${encodeURIComponent(skillName)}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
@@ -473,12 +389,6 @@ async function updateSkillState(
     body: JSON.stringify(body),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`update skill failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SkillRecord>;
 }
 
 export async function setSkillEnabled(
@@ -501,7 +411,7 @@ export async function reorderSkills(
   names: string[],
   options: ChatRequestOptions = {},
 ): Promise<SkillRecord[]> {
-  const response = await fetch("/api/skills/reorder", {
+  return requestJson<SkillRecord[]>("reorder skills failed", "/api/skills/reorder", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -509,40 +419,24 @@ export async function reorderSkills(
     body: JSON.stringify({ names }),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`reorder skills failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<SkillRecord[]>;
 }
 
 export async function deleteSkill(
   skillName: string,
   options: ChatRequestOptions = {},
 ): Promise<void> {
-  const response = await fetch(`/api/skills/${encodeURIComponent(skillName)}`, {
+  await requestOk("delete skill failed", `/api/skills/${encodeURIComponent(skillName)}`, {
     method: "DELETE",
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`delete skill failed: ${response.status}`);
-  }
 }
 
 export async function listMcpServers(
   options: ChatRequestOptions = {},
 ): Promise<McpServerRecord[]> {
-  const response = await fetch("/api/mcp/servers", {
+  return requestJson<McpServerRecord[]>("list MCP servers failed", "/api/mcp/servers", {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list MCP servers failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<McpServerRecord[]>;
 }
 
 export async function createHttpMcpServer(
@@ -552,7 +446,7 @@ export async function createHttpMcpServer(
   },
   options: ChatRequestOptions = {},
 ): Promise<McpServerRecord> {
-  const response = await fetch("/api/mcp/servers", {
+  return requestJson<McpServerRecord>("create MCP server failed", "/api/mcp/servers", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -560,12 +454,6 @@ export async function createHttpMcpServer(
     body: JSON.stringify(body),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`create MCP server failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<McpServerRecord>;
 }
 
 async function updateMcpServerState(
@@ -576,7 +464,7 @@ async function updateMcpServerState(
   },
   options: ChatRequestOptions = {},
 ): Promise<McpServerRecord> {
-  const response = await fetch(`/api/mcp/servers/${encodeURIComponent(serverName)}`, {
+  return requestJson<McpServerRecord>("update MCP server failed", `/api/mcp/servers/${encodeURIComponent(serverName)}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
@@ -584,12 +472,6 @@ async function updateMcpServerState(
     body: JSON.stringify(body),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`update MCP server failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<McpServerRecord>;
 }
 
 export async function setMcpServerEnabled(
@@ -612,7 +494,7 @@ export async function reorderMcpServers(
   names: string[],
   options: ChatRequestOptions = {},
 ): Promise<McpServerRecord[]> {
-  const response = await fetch("/api/mcp/servers/reorder", {
+  return requestJson<McpServerRecord[]>("reorder MCP servers failed", "/api/mcp/servers/reorder", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -620,40 +502,24 @@ export async function reorderMcpServers(
     body: JSON.stringify({ names }),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`reorder MCP servers failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<McpServerRecord[]>;
 }
 
 export async function deleteMcpServer(
   serverName: string,
   options: ChatRequestOptions = {},
 ): Promise<void> {
-  const response = await fetch(`/api/mcp/servers/${encodeURIComponent(serverName)}`, {
+  await requestOk("delete MCP server failed", `/api/mcp/servers/${encodeURIComponent(serverName)}`, {
     method: "DELETE",
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`delete MCP server failed: ${response.status}`);
-  }
 }
 
 export async function listMemories(
   options: ChatRequestOptions = {},
 ): Promise<MemoryRecord[]> {
-  const response = await fetch("/api/memory", {
+  return requestJson<MemoryRecord[]>("list memories failed", "/api/memory", {
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`list memories failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<MemoryRecord[]>;
 }
 
 export async function createMemory(
@@ -661,7 +527,7 @@ export async function createMemory(
   kind: MemoryKind = "manual",
   options: ChatRequestOptions = {},
 ): Promise<MemoryRecord> {
-  const response = await fetch("/api/memory", {
+  return requestJson<MemoryRecord>("create memory failed", "/api/memory", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -669,12 +535,6 @@ export async function createMemory(
     body: JSON.stringify({ content, kind }),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`create memory failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<MemoryRecord>;
 }
 
 export async function updateMemory(
@@ -683,7 +543,7 @@ export async function updateMemory(
   kind?: MemoryKind,
   options: ChatRequestOptions = {},
 ): Promise<MemoryRecord> {
-  const response = await fetch(`/api/memory/${encodeURIComponent(memoryId)}`, {
+  return requestJson<MemoryRecord>("update memory failed", `/api/memory/${encodeURIComponent(memoryId)}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
@@ -691,26 +551,16 @@ export async function updateMemory(
     body: JSON.stringify({ content, kind }),
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`update memory failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<MemoryRecord>;
 }
 
 export async function deleteMemory(
   memoryId: string,
   options: ChatRequestOptions = {},
 ): Promise<void> {
-  const response = await fetch(`/api/memory/${encodeURIComponent(memoryId)}`, {
+  await requestOk("delete memory failed", `/api/memory/${encodeURIComponent(memoryId)}`, {
     method: "DELETE",
     signal: options.signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`delete memory failed: ${response.status}`);
-  }
 }
 
 export async function* streamThreadRun(

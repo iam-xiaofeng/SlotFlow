@@ -118,7 +118,7 @@ provider/version quirks are normalized before the projection layer maps LangGrap
 ## Layout
 
 ```
-bootstrap.sh            first-run setup for Makefile prerequisites, uv, Node/pnpm, and deps
+bootstrap.sh            first-run setup for system/runtime deps, host integrations, and Docker
 Makefile                root developer commands (`verify`, `dev`, `kill`)
 backend/app/
   chat/                 chat API, Pydantic models, SQLite repository, run config, SSE
@@ -149,10 +149,17 @@ frontend/src/
 - **First-run setup**: `./bootstrap.sh` is the root setup entry for machines that cannot yet run
   `make`, `uv`, or frontend dependency commands. It installs/validates system Makefile
   prerequisites (`make`, `curl`, `git`, Python/build tools, `fuser` via `psmisc` where available),
+  installs MarkItDown's ffmpeg/ExifTool system helpers through supported package managers,
   installs `uv`, installs Node plus the `packageManager` pnpm version from `frontend/package.json`
-  (Volta fallback for user-local Node), runs `uv sync` in `backend/` and `pnpm install
-  --frozen-lockfile` in `frontend/`, copies `backend/.env_example` to `backend/.env` only when
-  no local `.env` exists, then prepares the **Docker sandbox** end to end. Docker setup is
+  (Volta fallback for user-local Node), installs/refreshes Agent Reach from its configurable Git
+  source with `uv tool` and prepares its zero-configuration channels on the **host**, runs `uv sync`
+  in `backend/` (including `markitdown[all]` plus `markitdown-ocr[llm]`), runs `pnpm install
+  --frozen-lockfile` in `frontend/` (including the locked `@playwright/mcp` and matching
+  `playwright`), installs Playwright's exact Chromium shared-library set on apt hosts, and downloads
+  Chromium, copies `backend/.env_example` to `backend/.env` only when no local `.env` exists, then
+  prepares the **Docker sandbox** end to end. Agent Reach is deliberately not installed into that
+  sandbox; rerunning `bootstrap.sh` is its refresh path, and optional cookie/login channels remain
+  user-managed. Docker setup is
   best-effort for common Linux families (apt/dnf/yum/pacman/apk/zypper, plus WSL); it installs
   Docker Engine if missing, adds the user to the `docker` group, enables systemd in
   `/etc/wsl.conf` on WSL hosts without it, starts the daemon (systemctl → service → rc-service →
@@ -161,9 +168,11 @@ frontend/src/
   mirrors are configured, and pre-pulls the sandbox image (`SLOTFLOW_DOCKER_SANDBOX_IMAGE`, with
   `SLOTFLOW_DOCKER_IMAGE` as a bootstrap-only alias; default `python:3.12`). Adding a non-root
   user to the docker group still requires a fresh login before non-sudo Docker access is available.
-  Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package installation and
-  `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup. Bootstrap-only knobs:
-  `SLOTFLOW_NODE_VERSION`, `SLOTFLOW_PNPM_VERSION`, `SLOTFLOW_DOCKER_REGISTRY_MIRRORS`,
+  Use `SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` to skip OS package installation,
+  `SLOTFLOW_SKIP_AGENT_REACH=1` to skip Agent Reach, `SLOTFLOW_SKIP_PLAYWRIGHT_BROWSER=1`
+  to skip the Chromium download, and `SLOTFLOW_SKIP_DOCKER=1` to skip all Docker setup.
+  Bootstrap-only knobs: `SLOTFLOW_NODE_VERSION`, `SLOTFLOW_PNPM_VERSION`,
+  `SLOTFLOW_AGENT_REACH_SOURCE`, `SLOTFLOW_DOCKER_REGISTRY_MIRRORS`,
   `SLOTFLOW_DOCKER_DAEMON_WAIT_SECONDS`.
 - **README onboarding**: `README.md` and `README_zh.md` are the first-run/onboarding
   documents. Their `bootstrap.sh` and `Makefile` sections must stay mechanically consistent
@@ -231,6 +240,52 @@ frontend/src/
   the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
   assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
   normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
+- **Agent Reach host bridge**: Agent Reach is installed/refreshed by `bootstrap.sh` with `uv tool`
+  and initialized from `~/.agent-reach`; it is deliberately **not** installed or mounted into the
+  Docker sandbox. `harness/tools/agent_reach.py` is the only model-facing boundary. It exposes five
+  read-only StructuredTools (`agent_reach_status`, `agent_reach_web_search`,
+  `agent_reach_read_url`, `agent_reach_github_search`, `agent_reach_youtube_metadata`) and never
+  accepts an executable, argv, shell fragment, install/update/configure action, or remote write.
+  `FixedHostCommandRunner` resolves only `agent-reach`, `mcporter`, `curl`, `gh`, and `yt-dlp` from
+  fixed user/system bin directories, invokes argv arrays with `shell=False` semantics and stdin
+  closed, fixes cwd to `SLOTFLOW_AGENT_REACH_HOME`, bounds time/output, and redacts secret-valued
+  environment strings from errors/results. The Jina/YouTube tools reuse the public-URL/private-IP
+  guard from `harness/tools/network.py`; the whole bridge also obeys `SLOTFLOW_NETWORK_ENABLED`.
+  Main and child agents receive the same fixed tools. The system prompt directs the model to call
+  `agent_reach_status` before multi-platform research and never pretend unavailable channels work.
+  Rerunning `bootstrap.sh` is the only repository-provided refresh path; there is intentionally no
+  maintenance command/tool, and optional cookie/login channels remain user-controlled.
+- **Built-in Playwright MCP**: `chat.runtime.config.build_playwright_mcp_server()` appends a
+  protected/pinned `playwright` stdio preset by default. It launches the pnpm-locked upstream MCP
+  through `frontend/scripts/playwright-mcp.mjs`; that silent fixed launcher resolves the matching
+  locked Chromium via `chromium.executablePath()` instead of requiring system Chrome. The preset is
+  headless + isolated, blocks service workers, omits image responses, disables codegen and optional
+  vision/PDF/devtools caps, does not allow unrestricted file access, and fixes cwd/output under the
+  SlotFlow workspace. Its private/loopback origin list is defense-in-depth only (upstream explicitly
+  says origin filters do not cover redirects), not a substitute for treating browsed pages as
+  untrusted. `SlotFlowMcpServerConfig.stateful=True` makes `MultiServerMcpToolProvider` keep one MCP
+  `ClientSession` open across navigate/snapshot/click calls. `RuntimeBackedAgentAdapter` creates that
+  provider/session per run and closes it in `finally`; concurrent runs never share a page/profile.
+  Stateless MCP servers keep the original one-session-per-call adapter behavior. The preset can be
+  toggled but cannot be deleted or shadowed by a user HTTP server. `bootstrap.sh` installs the locked
+  package, runs official `playwright install-deps chromium` on apt hosts, and downloads Chromium;
+  non-apt hosts receive a precise shared-library warning. No separate maintenance command exists.
+- **MarkItDown local conversion**: `harness/tools/markitdown.py` exposes exactly one model tool,
+  `convert_file_to_markdown`. The top-level function of the same name calls upstream
+  `MarkItDown.convert_local()` only—never permissive URL conversion—and the tool resolves `path`
+  through `SlotFlowWorkspace`; optional output is normalized into `artifacts/<thread>/`. All-format
+  Python extras and the official `markitdown-ocr` plugin are uv-locked; bootstrap additionally
+  installs ffmpeg + ExifTool where the host package manager is supported. Archives are bounded by
+  compressed input, entry count and total uncompressed bytes; Vision work is bounded by PDF pages
+  and embedded-image count; converted output is bounded before entering model context/workspace.
+  When `use_vision=true`, a Vision-capable selected run model (checked through LiteLLM's public
+  `supports_vision`) is wrapped behind the tiny OpenAI `chat.completions.create` shape expected by
+  MarkItDown. Dedicated `SLOTFLOW_MARKITDOWN_VISION_{MODEL,BASE_URL,API_KEY}` settings can instead
+  create an OpenAI-compatible client without exposing its key. Pure images use MarkItDown's image
+  converter; embedded/scanned PDF/Office images use the upstream OCR plugin. A text-only model or
+  missing dedicated client does not trigger a blind call: standard extraction runs and the result
+  carries an explicit Vision warning. The sync conversion/LLM work runs via the existing threaded
+  StructuredTool async boundary. Main and child agents receive the same tool.
 - **Network tools**: `web_fetch` and `web_search` live in `harness/tools/network.py` and remain
   read-only, public-URL-only tools under `SlotFlowSandboxConfig` limits. `web_search` uses plain
   HTML search endpoints with fallback: Bing HTML first, then DuckDuckGo Lite. The parser filters

@@ -2895,3 +2895,201 @@ DeepSeek 真机探针轮 1 正文里流出了 `<slotflow-todo-enforcer>…</slot
   塞进 `messages` 或 `llm_input_messages`——v3 messages 投影会把新 message 对象当可见增量流出,
   `messages` 还会被 checkpointer 持久化回放。
 - todo enforcement 的防循环用 `todo_enforcement.attempted` 标志,不靠扫描历史里的命名消息。
+
+## 49. 迭代 41（2026-07-16）：Agent Reach 固定宿主桥接——互联网能力不等于宿主 shell
+
+### 49.1 需求与边界判断
+
+用户拍板 Agent Reach 放在宿主机，不进入 Docker；依赖和上游刷新统一由根目录
+`bootstrap.sh` 完成，不再提供额外维护命令。对照 Agent Reach 1.5.0 的实际 Skill/安装器后确认：
+Agent Reach 自身是渠道选择器、安装器、体检器和路由说明，真正取数依赖 `mcporter`、`gh`、
+`yt-dlp`、Jina Reader 等上游工具。因此“只复制 Skill”不能让 SlotFlow graph 获得能力；反过来把
+任意宿主命令交给模型又会破坏现有的“代码只进 Docker”不变量。
+
+本轮选择中间边界：宿主保留 Agent Reach 和登录态，模型只得到 SlotFlow 固定 argv 的只读工具。
+
+### 49.2 bootstrap 实测抓到的工作目录根因
+
+首次在仓库根运行 `agent-reach install --env=auto` 时，上游 `mcporter` 按 cwd 生成了
+`config/mcporter.json`，污染工作树。不是 gitignore 问题，而是调用方工作目录错了。修复后
+`bootstrap.sh::install_agent_reach` 先创建并进入 `~/.agent-reach`，配置稳定落到
+`~/.agent-reach/config/mcporter.json`。`uv tool install` 同时用
+`--with-executables-from yt-dlp` 暴露依赖包的 `yt-dlp` executable；否则 uv 隔离环境只链接根包的
+`agent-reach` 命令，doctor 会把已经作为 Python dependency 安装的 yt-dlp 误判为“不可用”。
+
+真实 bootstrap smoke（跳过系统包/Docker/Playwright 下载）结果：Agent Reach v1.5.0，GitHub、
+YouTube、V2EX、RSS、Exa、Jina 和 B站基础搜索共 7/15 渠道可用；仓库保持干净。需要 Cookie、
+浏览器登录或额外账号的 8 个渠道没有自动启用。
+
+### 49.3 代码链路（逐代码核实）
+
+1. `chat.runtime.config.load_agent_reach_config_from_env()` 读取 enabled/home/timeout/output limit，
+   进入 `SlotFlowRuntimeConfig.agent_reach_config`。
+2. `chat.runtime.adapter.create_langgraph_agent_graph()` 显式传入
+   `SlotFlowHarnessConfig.agent_reach_config`；builder 再交给统一 tool registry。
+3. `build_harness_tools()` 构建 Agent Reach 工具，并同时放进主 agent 和 subagent 的
+   `environment_tools`。若桥接自身关闭或 `SLOTFLOW_NETWORK_ENABLED=false`，返回空列表。
+4. `harness/tools/agent_reach.py` 暴露五个固定只读工具：status、Exa search、Jina read、GitHub
+   search、YouTube metadata。用户参数只能进入各操作预定义的位置；没有 command/argv/script 字段。
+5. `FixedHostCommandRunner` 只解析 allowlist 中的五个 executable，搜索路径不含 cwd，调用
+   `subprocess.run([binary, *args], stdin=DEVNULL, stdout/stderr=PIPE, timeout=...)`，没有 shell；cwd
+   固定为 Agent Reach home，输出截断，并以环境变量名标记对 token/key/secret/password/cookie 值脱敏。
+6. Jina 和 YouTube 的原始目标 URL 继续走 `network.validate_public_url()`，继承 HTTP(S)、DNS 和私网
+   拒绝规则；YouTube 再限制 hostname。yt-dlp 的巨大 format URL 列表不会返给模型，只投影紧凑元数据、
+   chapters 和字幕语言。
+7. system prompt 的 `<slotflow-agent-reach-status>` 明示这是只读桥接而非 shell；多平台调研先 doctor，
+   渠道不可用要如实报告，模型不能安装、更新、配置、发帖或修改远程状态。
+
+### 49.4 安全与行为不变量
+
+- Agent Reach/登录态只留宿主，不复制到 Docker，不把 `~/.agent-reach` 挂载给沙箱。
+- 原有 `sandbox_exec` 仍是模型运行任意代码/安装依赖的唯一入口；固定桥接不是通用 subprocess tool。
+- bridge 不接受 remote write，也不向模型提供 Agent Reach install/update/configure/uninstall。
+- 重新运行 `bootstrap.sh` 是仓库唯一刷新入口；自动刷新基础组件不等于自动启用登录态渠道。
+- Agent Reach 失败不删除原 `web_search`/`web_fetch`，两条只读网络路径可独立退化。
+
+### 49.5 验证
+
+新增 `tests/test_agent_reach_tools.py` 覆盖工具集合、双开关、固定 argv、结果上限、Jina route、GitHub
+shape、YouTube 紧凑投影、async path、allowlist、无 shell、cwd、timeout、截断、secret redaction 和 env
+映射；`test_harness_builder.py` 覆盖 prompt 结构锚点与有效开关。真实 StructuredTool smoke 已从
+SlotFlow 边界验证 doctor JSON、Exa 搜索、Jina 读取 `example.com`、`gh search repos` 和 yt-dlp
+YouTube 紧凑元数据全部成功；过程中还抓到并修正了当前 `gh` 字段名应为 `fullName`，以及原始
+`--dump-single-json` 会因 formats 超过输出上限而截断，最终改成 yt-dlp `--print` 的固定字段投影。
+本轮不把网络 smoke 放入离线 pytest，避免把单测稳定性绑定到 Exa/GitHub/YouTube 外部状态。
+
+## 50. 迭代 42（2026-07-16）：Playwright MCP 内置化——状态不能按普通 MCP 每次重建
+
+### 50.1 第一处根因：普通 MCP adapter 的 session 生命周期不适合浏览器
+
+`langchain-mcp-adapters` 当前 `MultiServerMCPClient.get_tools()` 文档和源码都明确：默认生成的
+LangChain tool **每次调用都会新建 MCP session**。这对无状态查询工具成立，但 Playwright 的
+`browser_navigate → browser_snapshot → browser_click` 依赖同一个 browser/page/ref；按旧 loader 直接
+接入会让每一步启动新进程，页面和 ref 全丢失。仅把 `@playwright/mcp` 填进环境 JSON 并不等于可用。
+
+本轮给 `SlotFlowMcpServerConfig` 增加 `stateful` 元数据。`MultiServerMcpToolProvider.aload_tools()` 对
+普通 server 仍走上游默认路径；对 stateful server 则用 `AsyncExitStack` 进入
+`client.session(server_name)`，再将真实 `ClientSession` 传给 `load_mcp_tools()`，直到 provider
+`aclose()` 才退出。配置关闭/变化时也先关闭旧 stack，不残留 MCP 子进程。
+
+### 50.2 第二处根因：全局持久 session 会破坏并发对话隔离
+
+SlotFlow 已支持多个 thread 同时运行。若把 stateful provider 继续放在全局 `SlotFlowRuntimeConfig`
+复用，两个 run 会共享同一个页面/profile，一个 run 收尾还可能关闭另一个 run 的浏览器。
+`RuntimeBackedAgentAdapter` 因而把真实 `MultiServerMcpToolProvider` 视作 template：每次
+`stream_events()` 为当前 run 创建 provider，预加载 stateful session，把该 provider 显式传给 graph，
+并在 async generator 的 `finally` 中关闭。自定义测试 provider 仍保持原注入语义。这样同一 run 的
+多轮工具有状态，并发 run 之间无状态共享，异常/取消也会清理。
+
+### 50.3 第三处根因：上游默认找系统 Chrome，bootstrap 下载的是锁定 Chromium
+
+第一次真实 MCP smoke 能列出 24 个工具，但 `browser_navigate` 报：
+`Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome`。上游 CLI 默认选择系统
+Chrome；阶段 1 的 `playwright install chromium` 下载的是与 pnpm lock 匹配的 Playwright Chromium。
+没有理由再装一份系统 Chrome。新增固定、静默的
+`frontend/scripts/playwright-mcp.mjs`：从直接依赖 `playwright` 读取
+`chromium.executablePath()`，以 argv 方式追加 `--executable-path` 后启动锁定的
+`node_modules/.bin/playwright-mcp`，stdin/stdout/stderr 原样透传，不污染 JSON-RPC stdout。
+
+第二次 smoke 正确找到 Chromium，但动态链接器报 `libnspr4.so` 缺失。根因是下载浏览器二进制不等于
+安装 Linux shared libraries。`bootstrap.sh` 现在在 pnpm install 后，对 apt 主机运行上游官方
+`playwright install-deps chromium`，再下载 Chromium；`SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` 同时跳过
+这一步。非 apt 主机不伪造跨发行版包名，打印明确 warning。当前 WSL 通过该官方命令实际安装
+`libnspr4`/`libnss3`/字体/Xvfb 等锁定浏览器需要的包。
+
+### 50.4 内置 preset 与安全边界（按代码核实）
+
+`load_mcp_config_from_env()` 默认追加受保护、置顶的 `playwright` server；
+`SLOTFLOW_PLAYWRIGHT_MCP_ENABLED=false` 可完全移除，UI 可通过 base-server override 启停，但用户
+不能删除或用同名 HTTP server shadow。preset 使用绝对 launcher、固定 PATH/HOME、workspace cwd，参数为：
+headless、isolated、block service workers、omit image responses、codegen none、stdout output，以及
+可配置 action/navigation timeout。没有 `--allow-unrestricted-file-access`，没有 vision/PDF/devtools caps。
+
+当 `SLOTFLOW_NETWORK_ALLOW_PRIVATE=false` 时传入 localhost、loopback、RFC1918/link-local/metadata
+host glob blocklist。上游文档明确说明 blocked-origins 不处理 redirect、不是安全边界，因此这里仅把它
+作为纵深防护；网页文本、页面脚本和重定向仍是不可信输入，不能提升为系统指令。MCP 的 cwd 指向
+`SlotFlowSandboxConfig.resolved_workspace_root()`；preset 启用时先创建该目录，Playwright 自动生成的
+`.playwright-mcp` snapshot 也被限制在 workspace 内。
+
+API record 增加 `stateful`，前端目录卡片显示“内置有状态”。store 合并时 base server 优先，修掉了
+用户同名 server 可以覆盖环境/base server 的旧缺口；stateful 元数据在 enabled/pinned/reorder override
+中保持，但不会从普通用户 HTTP server JSON 注入。
+
+### 50.5 验证
+
+- 新增 `tests/test_playwright_mcp.py`：固定 preset、workspace cwd、默认 caps、私网开关、默认/显式关闭、
+  base server 防覆盖/防删除、API toggle、stateful session 保活与关闭。
+- `tests/test_runtime.py` 新增 run-scoped provider 用例：连续两个 run 得到不同 provider，均在收尾关闭。
+- `tests/test_distribution_contract.py` 同步检查 `install-deps` 顺序、launcher 可执行位、
+  `chromium.executablePath()` 和 `node --check`。
+- 真实 stateful MCP smoke：加载 **24** 个上游 browser tools，`browser_navigate(example.com)` 后再调用
+  独立的 `browser_snapshot`，第二步仍返回同一 URL/标题和 `Example Domain` accessibility tree，证明
+  session/page 没在工具间重建；provider 退出后进程正常关闭。
+- 浏览器 shared-library 安装通过 Playwright 官方 apt 路径真实执行；非 apt 分支只做代码/契约验证。
+
+## 51. 迭代 43（2026-07-16）：MarkItDown 单工具内置化 + 官方 Vision OCR
+
+### 51.1 为什么不是把 `markitdown` CLI 交给模型
+
+用户要求核心只保留 `convert_file_to_markdown`，并指出纯图片、扫描 PDF 必须注入大模型客户端。若把
+`markitdown <path>` 当宿主 shell 命令暴露，会重复前述宿主执行风险，也绕开 SlotFlow workspace/artifact
+边界；若只替换 `workspace_read`，又会把轻量源码读取和重型 Office/PDF/OCR 混成一层。本轮保持两条路：
+`workspace_read` 继续做快速、安全预览；格式复杂或明确要 Markdown 时调用唯一新工具。
+
+`harness/tools/markitdown.py::convert_file_to_markdown()` 只接受已经过边界解析的本地 `Path`，内部只调
+上游 `MarkItDown.convert_local()`，没有 `convert()` 的 URL/response 多态 I/O。model-facing closure 再用
+`SlotFlowWorkspace.resolve_path()` 限定输入，`normalize_artifact_path()` 限定可选输出到当前 thread artifact。
+无 output_path 时返回内联 Markdown；有 output_path 时返回元数据和 artifact 路径，避免大文档重复进上下文。
+
+### 51.2 Vision client 的两级选择
+
+MarkItDown 0.1.5 的图片 converter 和 `markitdown-ocr` 0.1.0 实际都调用
+`client.chat.completions.create(model=..., messages=[...image_url data URI...])`。按锁定源码实现两级客户端：
+
+1. 当前 run 的 `BaseChatModel` 若有 model id 且 LiteLLM 公共 `supports_vision()` 返回真，
+   `LangChainVisionClient` 将这一个模型包装成最小 OpenAI chat facade；messages 通过 LangChain
+   `convert_to_messages()`，响应通过既有 `message_content_text()` 归一化。工具发生在模型发出 tool call 后，
+   原始 chat model 尚未被工具绑定，不会形成“Vision 调用又发工具”的循环。
+2. 用户要固定另一视觉模型时，显式配置 `SLOTFLOW_MARKITDOWN_VISION_MODEL/BASE_URL/API_KEY`，构造
+   OpenAI SDK client。API key 在 dataclass 中 `repr=False/compare=False`，不进入 prompt/tool schema/result。
+
+两者都没有时不盲调文本模型：普通 converter 继续工作；图片或空文本 PDF 返回
+“无兼容 Vision client”的 warning。client 外再包一层只计数/记异常类型的 tracking facade，因为上游 OCR
+service 会吞掉单图异常并返回空文本；因此结果能明确报告 OCR failure，而不是仅把“走过 Vision 路径”当成功。
+`use_vision=false` 可按次禁止。prompt 默认要求忠实提取可见文字并保持
+Markdown 阅读顺序；无文字时才给简短事实描述。
+
+### 51.3 官方 OCR 路径与成本边界
+
+启用 client 时 `MarkItDown(enable_plugins=True, llm_client=..., llm_model=...)` 会发现官方仓库随包发布的
+`markitdown-ocr` entry point。锁定源码确认：插件以更高优先级替换 PDF/DOCX/PPTX/XLSX converter，先保留
+原生文本，再 OCR embedded images；PDF 无文本时把整页渲染为 PNG 走同一个 Vision service。因此本项目
+不再自己拆 PDF/图片，也不复制 OCR 协议。
+
+上游插件本身没有费用上限，所以 SlotFlow 在调用前增加：input bytes、archive entry 数、总未压缩 bytes、
+PDF pages、PDF/OpenXML embedded image 数；输出超限直接报错，不静默截断。ZIP/Office/EPUB 先用
+`zipfile` 只读 central directory 做 zip-bomb 预检。PDF 页数用 pypdf，嵌图数尽可能用 PyMuPDF；计数失败
+不替代上游解析错误，但明确超限必拒绝。所有同步 Magika/Office/PDF/LLM 工作经
+`threaded_structured_tool` 放进 worker thread，不阻塞 async graph loop。
+
+### 51.4 “全格式依赖”的实际含义
+
+`backend/pyproject.toml` 已锁 `markitdown[all]` 和 `markitdown-ocr[llm]`，涵盖 PDF、DOCX、PPTX、
+XLS/XLSX、Outlook、audio transcription、YouTube transcript、Azure extras 等 Python 依赖。真实源码审计又
+发现音频 MP3/MP4 转 WAV 依赖系统 ffmpeg，图片/音频 metadata 可选 ExifTool；只装 Python extras 会出现
+“包已装但格式能力不完整”。`bootstrap.sh::install_markitdown_system_dependencies` 因而在 apt/dnf/yum/
+pacman/apk/zypper/brew 尝试安装 ffmpeg + ExifTool，apt 路径已在当前 WSL 真实安装。多媒体仓库不默认
+可用的 dnf/yum/zypper 失败时给出明确 warning，不伪造成功；`SLOTFLOW_SKIP_SYSTEM_PACKAGES=1` 同时跳过。
+
+### 51.5 图链路与验证
+
+runtime env → `SlotFlowMarkItDownConfig` → harness config → unified tool registry；主 agent 和 subagent 的
+environment tools 都含同一个 `convert_file_to_markdown`。system prompt 的
+`<slotflow-markitdown-status>` 说明复杂文档优先转换、large result 用 output_path、Vision warning 必须如实处理。
+
+新增 `tests/test_markitdown_tools.py`，真实创建并转换 HTML、CSV、DOCX、XLSX、PPTX、文本 PDF 和 ZIP；
+另用 Pillow PNG + fake OpenAI-compatible client 验证纯图 data URI，用 PyMuPDF 创建无文本扫描 PDF 并证明
+**上游 `markitdown-ocr` 真实调用 client**、OCR 文本进入 Markdown；还覆盖 selected-model facade、无 client
+warning、workspace escape、thread artifact、input/output/archive/page/image 上限、nested ZIP 拒绝、上游吞掉的
+Vision failure warning 和 env secret 配置。
+这些 OCR 测试故意用 deterministic fake client，不消耗真实视觉 API；格式解析和官方 plugin 路径本身是真实的。
