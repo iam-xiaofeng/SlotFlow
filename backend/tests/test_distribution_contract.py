@@ -71,3 +71,9 @@ def test_frontend_dead_code_contract_is_part_of_verify() -> None:
     knip = json.loads((REPO_ROOT / "frontend" / "knip.json").read_text())
     assert knip["ignore"] == ["scripts/playwright-mcp.mjs"]
     assert "dead-code-frontend" in (REPO_ROOT / "Makefile").read_text()
+
+
+def test_dev_server_watches_source_only() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    assert "--reload-dir app" in makefile
+    assert "--reload-dir .slotflow" not in makefile

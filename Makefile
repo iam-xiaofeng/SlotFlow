@@ -21,7 +21,7 @@ verify: test-backend test-frontend typecheck-frontend dead-code-frontend build-f
 dev:
 	@echo "Starting servers (Ctrl+C to stop both)..."
 	@(cd frontend && pnpm dev) & \
-	(cd backend && uv run uvicorn app.main:app --env-file ./.env --reload)
+	(cd backend && uv run uvicorn app.main:app --env-file ./.env --reload --reload-dir app)
 
 # Stop local development servers by port (avoids pkill -f matching this recipe's
 # own shell, which was killing make itself).
