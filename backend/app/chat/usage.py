@@ -136,6 +136,13 @@ class RunUsageCollector(BaseCallbackHandler):
         with self._lock:
             calls = [dict(call) for call in self._calls]
         observable = [call for call in calls if call["cache_status"] != "unknown"]
+        # 上下文占用以"最近一次成功调用的 prompt tokens"为准:它就是当前送进模型的
+        # 完整上下文大小,比所有调用的累加值更能反映窗口占用。
+        context_tokens: int | None = None
+        for call in reversed(calls):
+            if call["status"] == "success" and call["input_tokens"] is not None:
+                context_tokens = call["input_tokens"]
+                break
         return {
             "llm_requests": len(calls),
             "llm_successes": sum(call["status"] == "success" for call in calls),
@@ -143,6 +150,7 @@ class RunUsageCollector(BaseCallbackHandler):
             "input_tokens": sum(call["input_tokens"] or 0 for call in calls),
             "output_tokens": sum(call["output_tokens"] or 0 for call in calls),
             "total_tokens": sum(call["total_tokens"] or 0 for call in calls),
+            "context_tokens": context_tokens,
             "cached_input_tokens": sum(call["cached_input_tokens"] or 0 for call in observable) if observable else None,
             "cache_creation_input_tokens": sum(call["cache_creation_input_tokens"] or 0 for call in calls if call["cache_creation_input_tokens"] is not None) or None,
             "cache_observable_requests": len(observable),

@@ -117,15 +117,28 @@ class RuntimeBackedAgentAdapter:
             adapter = LangGraphEventAgentAdapter(graph)
 
             usage_emitted = False
+
+            def usage_event() -> AgentEvent:
+                # 上下文占用与窗口一起下发,前端一条 run.usage 即可渲染 已用/最大 token。
+                return AgentEvent(
+                    event="run.usage",
+                    data={
+                        **usage_collector.summary(),
+                        "context_window_tokens": window,
+                        "context_input_budget_tokens": budget,
+                        "context_window_source": window_source,
+                    },
+                )
+
             try:
                 async for event in adapter.stream_events(request=request, bundle=bundle):
                     if event.event == "run.finished":
-                        yield AgentEvent(event="run.usage", data=usage_collector.summary())
+                        yield usage_event()
                         usage_emitted = True
                     yield event
             except Exception:
                 if not usage_emitted:
-                    yield AgentEvent(event="run.usage", data=usage_collector.summary())
+                    yield usage_event()
                 raise
         finally:
             if mcp_provider is not self._runtime_config.mcp_tool_provider:

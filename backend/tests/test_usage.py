@@ -56,3 +56,30 @@ def test_usage_collector_aggregates_calls_without_prompt_content() -> None:
     assert summary["cache_hit_requests"] == 1
     assert summary["calls"][0]["cache_status"] == "hit"
     assert "secret prompt" not in str(summary)
+
+
+def test_context_tokens_tracks_latest_successful_prompt_size() -> None:
+    collector = RunUsageCollector(model_name="glm-5.2", provider="custom")
+
+    def record(run_id, input_tokens: int) -> None:
+        collector.on_chat_model_start({}, [[]], run_id=run_id, invocation_params={})
+        collector.on_llm_end(
+            SimpleNamespace(
+                generations=[[SimpleNamespace(message=SimpleNamespace(usage_metadata={
+                    "input_tokens": input_tokens,
+                    "output_tokens": 10,
+                    "total_tokens": input_tokens + 10,
+                }))]],
+                llm_output=None,
+            ),
+            run_id=run_id,
+        )
+
+    first, second = uuid4(), uuid4()
+    record(first, 1200)
+    record(second, 3400)
+    summary = collector.summary()
+    # 上下文占用取最近一次成功调用的 prompt tokens,而非所有调用的累加。
+    assert summary["context_tokens"] == 3400
+    assert summary["input_tokens"] == 4600
+
