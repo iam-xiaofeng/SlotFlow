@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any, Protocol
@@ -11,6 +12,9 @@ from typing import Any, Protocol
 from langchain_core.tools import BaseTool
 
 from app.harness.mcp.config import SlotFlowMcpConfig
+
+
+_logger = logging.getLogger(__name__)
 
 
 class McpToolProvider(Protocol):
@@ -40,11 +44,12 @@ class MultiServerMcpToolProvider:
         self._persistent_tool_loader = persistent_tool_loader or self._default_persistent_tool_loader
         self._loaded_config: SlotFlowMcpConfig | None = None
         self._tools: list[BaseTool] | None = None
+        self._load_errors: dict[str, str] = {}
         self._session_stack: AsyncExitStack | None = None
         self._load_lock = asyncio.Lock()
 
     async def aload_tools(self, config: SlotFlowMcpConfig) -> list[BaseTool]:
-        """Load tools, retaining sessions only for explicitly stateful servers."""
+        """Load each server independently and retain successful stateful sessions."""
 
         active_config = active_mcp_config(config)
         async with self._load_lock:
@@ -52,6 +57,7 @@ class MultiServerMcpToolProvider:
                 await self._close_sessions()
                 self._loaded_config = None
                 self._tools = []
+                self._load_errors = {}
                 return []
 
             if self._loaded_config == active_config and self._tools is not None:
@@ -59,35 +65,51 @@ class MultiServerMcpToolProvider:
 
             await self._close_sessions()
             connections = build_multi_server_mcp_connections(active_config)
-            client = self._client_factory(connections)
-            stateful_servers = [server for server in active_config.servers if server.stateful]
-
-            if not stateful_servers:
-                tools_result = client.get_tools()
-                tools = await tools_result if inspect.isawaitable(tools_result) else tools_result
-                loaded_tools = list(tools)
-            else:
-                stack = AsyncExitStack()
-                loaded_tools = []
-                try:
-                    for server in active_config.servers:
+            stack = AsyncExitStack()
+            loaded_tools: list[BaseTool] = []
+            load_errors: dict[str, str] = {}
+            try:
+                for server in active_config.servers:
+                    client = self._client_factory(
+                        {server.name: connections[server.name]},
+                    )
+                    server_stack = AsyncExitStack()
+                    try:
                         if server.stateful:
-                            session = await stack.enter_async_context(client.session(server.name))
+                            session = await server_stack.enter_async_context(
+                                client.session(server.name),
+                            )
                             result = self._persistent_tool_loader(
                                 session,
                                 server_name=server.name,
                             )
                         else:
-                            result = client.get_tools(server_name=server.name)
-                        server_tools = await result if inspect.isawaitable(result) else result
-                        loaded_tools.extend(server_tools)
-                except BaseException:
-                    await stack.aclose()
-                    raise
-                self._session_stack = stack
+                            result = client.get_tools()
+                        server_tools = (
+                            await result if inspect.isawaitable(result) else result
+                        )
+                    except Exception as exc:  # noqa: BLE001 - optional servers degrade alone
+                        await server_stack.aclose()
+                        summary = _exception_summary(exc)
+                        load_errors[server.name] = summary
+                        _logger.warning(
+                            "MCP server %s unavailable during tool discovery: %s",
+                            server.name,
+                            summary,
+                        )
+                        continue
 
+                    loaded_tools.extend(server_tools)
+                    if server.stateful:
+                        stack.push_async_callback(server_stack.aclose)
+            except BaseException:
+                await stack.aclose()
+                raise
+
+            self._session_stack = stack
             self._loaded_config = active_config
             self._tools = loaded_tools
+            self._load_errors = load_errors
             return list(self._tools)
 
     def load_tools(self, config: SlotFlowMcpConfig) -> list[BaseTool]:
@@ -102,6 +124,12 @@ class MultiServerMcpToolProvider:
             )
         return list(self._tools)
 
+    @property
+    def load_errors(self) -> dict[str, str]:
+        """Return sanitized per-server discovery failures from the latest load."""
+
+        return dict(self._load_errors)
+
     async def aclose(self) -> None:
         """Close retained stateful MCP sessions and clear the cached tools."""
 
@@ -109,6 +137,7 @@ class MultiServerMcpToolProvider:
             await self._close_sessions()
             self._loaded_config = None
             self._tools = None
+            self._load_errors = {}
 
     async def _close_sessions(self) -> None:
         stack = self._session_stack
@@ -127,6 +156,16 @@ class MultiServerMcpToolProvider:
         from langchain_mcp_adapters.client import MultiServerMCPClient
 
         return MultiServerMCPClient(connections)
+
+
+def _first_exception_leaf(error: BaseException) -> BaseException:
+    if isinstance(error, BaseExceptionGroup) and error.exceptions:
+        return _first_exception_leaf(error.exceptions[0])
+    return error
+
+
+def _exception_summary(error: BaseException) -> str:
+    return type(_first_exception_leaf(error)).__name__
 
 
 def load_mcp_tools(

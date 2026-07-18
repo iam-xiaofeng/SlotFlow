@@ -45,6 +45,14 @@ class FakeStatefulClient:
             self.events.append(f"close:{server_name}")
 
 
+class FakeFailingClient:
+    async def get_tools(self) -> None:
+        raise ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [TimeoutError()],
+        )
+
+
 def persistent_tool_loader(session: FakeSession, *, server_name: str):
     @tool("stateful_ping")
     def stateful_ping() -> str:
@@ -192,6 +200,48 @@ async def test_stateful_provider_keeps_session_until_closed() -> None:
     assert events == ["open:playwright", "close:playwright"]
     with pytest.raises(RuntimeError, match="session closed"):
         tools[0].invoke({})
+
+
+@pytest.mark.asyncio
+async def test_failed_optional_server_does_not_close_healthy_stateful_session() -> None:
+    events: list[str] = []
+
+    def client_factory(
+        connections: dict[str, dict],
+    ) -> FakeStatefulClient | FakeFailingClient:
+        server_name = next(iter(connections))
+        if server_name == "playwright":
+            return FakeStatefulClient(connections, events)
+        return FakeFailingClient()
+
+    config = SlotFlowMcpConfig(
+        enabled=True,
+        servers=(
+            SlotFlowMcpServerConfig(
+                name="playwright",
+                config={"transport": "stdio", "command": "playwright-mcp", "args": []},
+                stateful=True,
+            ),
+            SlotFlowMcpServerConfig(
+                name="offline",
+                config={"transport": "streamable_http", "url": "http://localhost:9999/mcp"},
+            ),
+        ),
+    )
+    provider = MultiServerMcpToolProvider(
+        client_factory=client_factory,
+        persistent_tool_loader=persistent_tool_loader,
+    )
+
+    tools = await provider.aload_tools(config)
+
+    assert [tool.name for tool in tools] == ["stateful_ping"]
+    assert tools[0].invoke({}) == "playwright"
+    assert provider.load_errors == {"offline": "TimeoutError"}
+    assert events == ["open:playwright"]
+
+    await provider.aclose()
+    assert events == ["open:playwright", "close:playwright"]
 
 
 @pytest.mark.asyncio
