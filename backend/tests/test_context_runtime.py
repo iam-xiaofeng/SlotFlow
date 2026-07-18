@@ -3,9 +3,12 @@
 
 import pytest
 from langchain_core.messages import HumanMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from app.chat.runtime.models import resolve_model_context_budget
 from app.harness.graph import emergency_context_projection, is_context_overflow_error
+from app.harness.state import SlotFlowAgentState, merge_promoted_tool_names
 from app.harness.subagents.tools import resolve_subagent_tool_spaces
 
 
@@ -50,3 +53,38 @@ def test_subagent_tool_spaces_are_bounded_and_never_all() -> None:
     assert resolve_subagent_tool_spaces(
         "coder", ["workspace", "sandbox", "network", "browser"]
     )[1]
+
+
+def test_promoted_tool_names_reducer_is_ordered_union() -> None:
+    assert merge_promoted_tool_names(None, None) == []
+    assert merge_promoted_tool_names(["a"], None) == ["a"]
+    assert merge_promoted_tool_names(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
+
+
+def test_concurrent_tool_space_promotion_does_not_raise_invalid_update() -> None:
+    """Two *_tools loaders in one model step must not trip INVALID_CONCURRENT_GRAPH_UPDATE."""
+
+    def fan(_state):
+        return [Send("promote_a", _state), Send("promote_b", _state)]
+
+    def promote_a(_state):
+        return {"promoted_tool_names": ["web_search", "web_fetch"]}
+
+    def promote_b(_state):
+        return {"promoted_tool_names": ["sandbox_exec", "web_search"]}
+
+    graph = StateGraph(SlotFlowAgentState)
+    graph.add_node("promote_a", promote_a)
+    graph.add_node("promote_b", promote_b)
+    graph.add_conditional_edges(START, fan, ["promote_a", "promote_b"])
+    graph.add_edge("promote_a", END)
+    graph.add_edge("promote_b", END)
+    compiled = graph.compile()
+
+    result = compiled.invoke({"messages": [], "promoted_tool_names": ["artifact_write"]})
+
+    promoted = result.get("promoted_tool_names")
+    assert promoted[0] == "artifact_write"
+    assert set(promoted) == {"artifact_write", "web_search", "web_fetch", "sandbox_exec"}
+    assert len(promoted) == len(set(promoted))
+

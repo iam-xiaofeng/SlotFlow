@@ -3252,4 +3252,16 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 `agent` 对 provider context-overflow 文本（中英文 maximum-context/prompt-too-long 标记，含 ExceptionGroup）单独处理：canonical messages 不变，每次重试只对 model-facing input 使用更小、经 dangling-tool repair 的尾部投影，并按 `SLOTFLOW_CONTEXT_OVERFLOW_RETRY_DELAY_SECONDS * attempt` 等待；默认最多五次。认证、权限、普通 BadRequest、取消、已执行工具和 mid-stream failure 不进入整轮重试。该 emergency path 是正常 model-aware summarization 未能提前避免 overflow 时的最后防线。
 ### 54.6 真机减量与指标验证
 
-热重载完成后通过本机 `/api/chat` 使用真实 custom `glm-5.2`（Flash）运行最小请求，thread `thread_d8879de7acb6`、run `run_73cb9d60a376` 正常 `run.finished` 且无 `run.error`。SSE 在 finished 前发出 `run.usage`；SQLite `run_metrics` 持久化成功。该真实调用从改造前的 54 tools / 约 30,617 Schema 字符下降为 11 tools / 8,885 Schema 字符；usage 为 input 4,848、output 301、total 5,149，TTFT 2,561ms、latency 6,811ms。中转未返回 cached token 明细，因此正确记录 `cache_status=unknown`、`cached_input_tokens=null`，没有伪造 miss。最终 `make verify` 全绿：backend 420 passed / 1 skipped，frontend Vitest、TypeScript、Knip 和 Next.js build 通过。
+热重载完成后通过本机 `/api/chat` 使用真实 custom `glm-5.2`（Flash）运行最小请求，thread `thread_d8879de7acb6`、run `run_73cb9d60a376` 正常 `run.finished` 且无 `run.error`。SSE 在 finished 前发出 `run.usage`；SQLite `run_metrics` 持久化成功。该真实调用从改造前的 54 tools / 约 30,617 Schema 字符下降为 11 tools / 8,885 Schema 字符；usage 为 input 4,848、output 301、total 5,149，TTFT 2,561ms、latency 6,811ms。中转未返回 cached token 明细，因此正确记录 `cache_status=unknown`、`cached_input_tokens=null`,没有伪造 miss。最终 `make verify` 全绿：backend 420 passed / 1 skipped，frontend Vitest、TypeScript、Knip 和 Next.js build 通过。
+
+### 54.7 后续修复（2026-07-18）：`promoted_tool_names` 并发写入根因
+
+**症状**：前端浏览器报 `At key 'promoted_tool_names': Can receive only one value per step. Use an Annotated key to handle multiple values.`(LangGraph `INVALID_CONCURRENT_GRAPH_UPDATE`)。
+
+**根因**：渐进式工具空间披露落地时,`SlotFlowAgentState.promoted_tool_names` 是一个**无 reducer** 的普通 last-write 通道(`NotRequired[list[str] | None]`)。但模型完全可以在**同一个模型步**里一次发出多个 `*_tools` 加载器调用(并行 tool_calls);ToolNode 会并发执行它们,每个 `load_space_tools` 都返回 `Command(update={"promoted_tool_names": ...})`。同一步对同一 key 的第二次写入没有归并规则,LangGraph 直接拒绝。这不是前端 bug,而是 state schema 缺 reducer——是 §54 工具空间特性自带的并发缺陷,只是要多空间同时激活才触发。
+
+**修复**:给该通道加**保序去重的并集 reducer** `merge_promoted_tool_names`,字段改为 `NotRequired[Annotated[list[str] | None, merge_promoted_tool_names]]`。并集与工具披露的语义天然一致——一个 context epoch 内只增不减,且对重复激活幂等;并发写入被折叠成有序并集,已激活项不会重复。加载器本身无需改动(它返回 `[*current, *added]`,reducer 会去重)。
+
+**验证**:用 fan-out(`Send` 到两个并发节点各写 `promoted_tool_names`)复现,修复前抛 `INVALID_CONCURRENT_GRAPH_UPDATE`,修复后合并为有序并集。回归测试 `test_promoted_tool_names_reducer_is_ordered_union` 与 `test_concurrent_tool_space_promotion_does_not_raise_invalid_update` 固定该行为。
+
+**调试手段沉淀**:本次同时把 LangSmith 链路审查方法写进 `AGENTS.md`(见 "Debugging with LangSmith")——LangGraph 图的每个节点/模型调用/工具调用/interrupt 都是可展开的 span,这类"某节点并发写冲突"能被精确定位到触发它的 span,是排查链路问题的首选。
