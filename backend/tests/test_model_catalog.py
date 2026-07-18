@@ -239,6 +239,7 @@ async def test_custom_provider_uses_litellm_endpoint_discovery(
     )
     monkeypatch.setenv("CUSTOM_API_KEY", "key")
     monkeypatch.setenv("CUSTOM_BASE_URL", "https://relay.local/v1")
+    monkeypatch.delenv("CUSTOM_MODELS", raising=False)
     calls: list[tuple[str, str]] = []
 
     def fake_discover(*, api_key: str, api_base: str) -> tuple[str, ...]:
@@ -299,6 +300,7 @@ async def test_custom_provider_sanitizes_discovery_errors(
     )
     monkeypatch.setenv("CUSTOM_API_KEY", "key")
     monkeypatch.setenv("CUSTOM_BASE_URL", "https://relay.local/v1")
+    monkeypatch.delenv("CUSTOM_MODELS", raising=False)
     monkeypatch.setattr(
         litellm_provider,
         "discover_custom_openai_models",

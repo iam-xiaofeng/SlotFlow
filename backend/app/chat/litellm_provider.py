@@ -6,6 +6,8 @@ import os
 from functools import lru_cache
 from typing import Any
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 # SlotFlow owns environment loading. LiteLLM must neither hydrate backend/.env nor
 # refresh its model map from GitHub; package upgrades update the bundled catalog.
 os.environ["LITELLM_MODE"] = "PRODUCTION"
@@ -206,6 +208,50 @@ class ChatLiteLLM(_ChatLiteLLM):
     echoing back what the provider itself produced, with no per-provider
     branches.
     """
+
+    retry_min_wait_seconds: int = 4
+    retry_max_wait_seconds: int = 30
+    retry_multiplier_seconds: int = 1
+
+    def _slotflow_retry_decorator(self):
+        transient = (
+            litellm.Timeout,
+            litellm.APIError,
+            litellm.APIConnectionError,
+            litellm.RateLimitError,
+        )
+        return retry(
+            retry=retry_if_exception_type(transient),
+            stop=stop_after_attempt(self.max_retries + 1),
+            wait=wait_exponential(
+                multiplier=self.retry_multiplier_seconds,
+                min=self.retry_min_wait_seconds,
+                max=self.retry_max_wait_seconds,
+            ),
+            reraise=True,
+        )
+
+    def completion_with_retry(self, run_manager=None, **kwargs: Any) -> Any:
+        """Retry only transient pre-response failures with configurable backoff."""
+
+        del run_manager
+
+        @self._slotflow_retry_decorator()
+        def invoke(**call_kwargs: Any) -> Any:
+            return self.client.completion(**call_kwargs)
+
+        return invoke(**kwargs)
+
+    async def acompletion_with_retry(self, run_manager=None, **kwargs: Any) -> Any:
+        """Async counterpart; stream-iteration failures are intentionally not replayed."""
+
+        del run_manager
+
+        @self._slotflow_retry_decorator()
+        async def invoke(**call_kwargs: Any) -> Any:
+            return await self.client.acompletion(**call_kwargs)
+
+        return await invoke(**kwargs)
 
     def _create_message_dicts(
         self,

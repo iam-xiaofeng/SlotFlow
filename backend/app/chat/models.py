@@ -197,6 +197,9 @@ class RunContext(BaseModel):
     thinking_enabled: bool
     is_plan_mode: bool
     subagent_enabled: bool
+    context_window_tokens: int | None = None
+    context_input_budget_tokens: int | None = None
+    context_window_source: str = "unknown"
 
 
 class RunConfigBundle(BaseModel):
