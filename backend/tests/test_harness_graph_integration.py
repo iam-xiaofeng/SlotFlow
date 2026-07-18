@@ -74,6 +74,16 @@ async def test_harness_graph_turns_tool_exception_into_error_tool_message(tmp_pa
                     content="",
                     tool_calls=[
                         {
+                            "name": "workspace_tools",
+                            "args": {"names": ["workspace_read"]},
+                            "id": "call_load_workspace",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
                             "name": "workspace_read",
                             "args": {"path": "../outside.txt"},
                             "id": "call_bad_path",
@@ -101,11 +111,12 @@ async def test_harness_graph_turns_tool_exception_into_error_tool_message(tmp_pa
         for message in result["messages"]
         if isinstance(message, ToolMessage)
     ]
-    payload = json.loads(str(tool_messages[0].content))
+    error_message = next(message for message in tool_messages if message.name == "workspace_read")
+    payload = json.loads(str(error_message.content))
 
-    assert len(tool_messages) == 1
-    assert tool_messages[0].status == "error"
-    assert tool_messages[0].name == "workspace_read"
+    assert len(tool_messages) == 2
+    assert error_message.status == "error"
+    assert error_message.name == "workspace_read"
     assert payload["error"]["type"] == "tool_execution_error"
     assert payload["error"]["source"] == "slotflow_tool_safety"
     assert result["messages"][-1].content == "工具错误已收到。"
@@ -176,8 +187,12 @@ async def test_summarization_never_leaks_remove_message_sentinel_to_model() -> N
         context=bundle.context,
     )
 
-    assert any("早前对话已压缩" in str(m.content) for m in result["messages"]), (
-        "摘要应当真的被触发，否则本测试没有覆盖到目标路径"
+    epoch_messages = (result.get("context_epoch") or {}).get("messages") or []
+    assert any("早前对话已压缩" in str(m.content) for m in epoch_messages), (
+        "摘要应当进入 model-facing epoch，否则本测试没有覆盖到目标路径"
+    )
+    assert any("历史问题0" in str(m.content) for m in result["messages"]), (
+        "canonical history must remain lossless for context_archive access"
     )
     assert model.received, "fake model 应该至少被调用一次"
     for batch in model.received:

@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
 from app.chat.models import RunContext
@@ -39,6 +40,7 @@ class SubagentTaskResult:
     role_name: str = ""
     role_id: str = ""
     role_path: str = ""
+    tool_spaces: tuple[str, ...] = ()
     source: str = "slotflow_subagent_task_tool"
 
     def to_json(self) -> str:
@@ -54,6 +56,7 @@ class SubagentTaskResult:
                 "role_name": self.role_name,
                 "role_id": self.role_id,
                 "role_path": self.role_path,
+                "tool_spaces": list(self.tool_spaces),
                 "result": self.result,
                 "source": self.source,
             },
@@ -124,6 +127,8 @@ class SubagentTaskRunner:
         priority: str = "normal",
         domain: str = "",
         role_name: str = "",
+        tool_spaces: list[str] | None = None,
+        runnable_config: RunnableConfig | None = None,
     ) -> SubagentTaskResult:
         clean_agent_name = agent_name.strip()
         clean_task = task.strip()
@@ -132,6 +137,23 @@ class SubagentTaskRunner:
         clean_priority = normalize_priority(priority)
         clean_domain = domain.strip()
         clean_role_name = role_name.strip()
+        resolved_tool_spaces, tool_space_error = resolve_subagent_tool_spaces(
+            clean_agent_name,
+            tool_spaces,
+        )
+        if tool_space_error:
+            return SubagentTaskResult(
+                status="error",
+                agent_name=clean_agent_name,
+                task=clean_task,
+                context=clean_context,
+                expected_output=clean_expected_output,
+                priority=clean_priority,
+                domain=clean_domain,
+                role_name=clean_role_name,
+                tool_spaces=resolved_tool_spaces,
+                result=tool_space_error,
+            )
 
         if not clean_task:
             return SubagentTaskResult(
@@ -185,7 +207,10 @@ class SubagentTaskRunner:
 
             sub_tools = usable_tools_for_model(
                 model=self._model,
-                tools=self._environment_tools,
+                tools=filter_tools_for_spaces(
+                    self._environment_tools,
+                    resolved_tool_spaces,
+                ),
             )
             sub_features = SlotFlowHarnessFeatures(
                 thinking_enabled=self._run_context.thinking_enabled,
@@ -235,7 +260,10 @@ class SubagentTaskRunner:
                         }
                     ]
                 },
-                config={"recursion_limit": self._recursion_limit},
+                config={
+                    **dict(runnable_config or {}),
+                    "recursion_limit": self._recursion_limit,
+                },
             )
         except Exception as exc:  # noqa: BLE001 - return model-readable tool result
             return SubagentTaskResult(
@@ -263,8 +291,70 @@ class SubagentTaskRunner:
             role_name=role_template.name if role_template is not None else clean_role_name,
             role_id=role_template.id if role_template is not None else "",
             role_path=role_template.path if role_template is not None else "",
+            tool_spaces=resolved_tool_spaces,
             result=latest_assistant_text(result) or "",
         )
+
+
+SUBAGENT_TOOL_SPACES = (
+    "workspace",
+    "sandbox",
+    "browser",
+    "network",
+    "documents",
+    "extensions",
+    "memory",
+)
+DEFAULT_PROFILE_TOOL_SPACES = {
+    "researcher": ("network", "documents", "workspace"),
+    "analyst": ("workspace", "sandbox"),
+    "planner": ("workspace",),
+    "coder": ("workspace", "sandbox"),
+    "reviewer": ("workspace", "sandbox"),
+    "writer": ("workspace", "documents"),
+}
+
+
+def resolve_subagent_tool_spaces(
+    profile_name: str,
+    requested: list[str] | None,
+) -> tuple[tuple[str, ...], str | None]:
+    values = requested if requested is not None else list(DEFAULT_PROFILE_TOOL_SPACES.get(profile_name, ("workspace",)))
+    cleaned = tuple(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+    if any(value in {"all", "*"} for value in cleaned):
+        return (), "tool_spaces does not allow all or wildcard"
+    unknown = [value for value in cleaned if value not in SUBAGENT_TOOL_SPACES]
+    if unknown:
+        return (), f"unknown tool spaces: {', '.join(unknown)}"
+    if len(cleaned) > 3:
+        return (), "at most three tool spaces may be delegated to one subagent"
+    return cleaned, None
+
+
+def tool_space_for_name(name: str) -> str | None:
+    if name.startswith(("workspace_", "artifact_", "context_archive_")):
+        return "workspace"
+    if name.startswith(("sandbox_", "docker_")):
+        return "sandbox"
+    if name.startswith("browser_"):
+        return "browser"
+    if name.startswith(("web_", "agent_reach_")):
+        return "network"
+    if name.startswith(("convert_", "markitdown_", "view_image")):
+        return "documents"
+    if name.startswith(("skill_", "find_skills", "search_skill", "mcp_")):
+        return "extensions"
+    if name.startswith("memory_"):
+        return "memory"
+    return None
+
+
+def filter_tools_for_spaces(
+    tools: Sequence[BaseTool],
+    spaces: tuple[str, ...],
+) -> list[BaseTool]:
+    allowed = set(spaces)
+    return [tool for tool in tools if tool_space_for_name(tool.name) in allowed]
 
 
 def build_subagent_tools(
@@ -356,6 +446,8 @@ def build_subagent_tools(
         priority: str = "normal",
         domain: str = "",
         role_name: str = "",
+        tool_spaces: list[str] | None = None,
+        config: RunnableConfig | None = None,
     ) -> str:
         """Delegate a focused task to a named SlotFlow subagent profile.
 
@@ -372,6 +464,8 @@ def build_subagent_tools(
             priority=priority,
             domain=domain,
             role_name=role_name,
+            tool_spaces=tool_spaces,
+            runnable_config=config,
         )
         return result.to_json()
 

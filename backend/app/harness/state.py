@@ -33,3 +33,5 @@ class SlotFlowAgentState(AgentState):
     retrieved_memories: NotRequired[list[Any] | None]
     artifacts_baseline: NotRequired[set[str] | None]
     todo_enforcement: NotRequired[dict[str, Any] | None]
+    context_epoch: NotRequired[dict[str, Any] | None]
+    promoted_tool_names: NotRequired[list[str] | None]

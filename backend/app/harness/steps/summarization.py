@@ -15,7 +15,9 @@ SLOTFLOW_SUMMARY_PROMPT = """Summarize the earlier SlotFlow conversation for the
 
 Keep only durable context: user intent, decisions, created or modified files, tool results,
 open questions, and concrete next steps. Preserve exact paths, identifiers, and user
-preferences. Omit small talk.
+preferences. Omit small talk. The complete earlier message/tool history remains available through
+context_archive_search and context_archive_read; explicitly remind the agent to use those
+tools when exact older details are needed.
 
 Messages:
 {messages}

@@ -16,6 +16,7 @@ from app.harness.skills import SlotFlowSkillsConfigStore
 from app.harness.subagents import SlotFlowSubagentConfig, build_subagent_tools
 from app.harness.tools.agent_reach import SlotFlowAgentReachConfig, build_agent_reach_tools
 from app.harness.tools.builtins import ask_clarification_tool
+from app.harness.tools.context_archive import build_context_archive_tools
 from app.harness.tools.todo import write_todos_tool
 from app.harness.tools.customization import build_customization_tools
 from app.harness.tools.host_execution import is_unsafe_host_execution_tool_name
@@ -77,6 +78,7 @@ def build_harness_tools(
         model=model,
         thread_id=run_context.thread_id if run_context is not None else None,
     )
+    context_archive_tools = build_context_archive_tools()
     customization_tools = build_customization_tools(
         skills_root=skills_root,
         skills_config_store=skills_config_store,
@@ -94,6 +96,7 @@ def build_harness_tools(
             *network_tools,
             *agent_reach_tools,
             *markitdown_tools,
+            *context_archive_tools,
             *customization_tools,
             *mcp_tools,
         ],
@@ -108,6 +111,7 @@ def build_harness_tools(
                 *(extra_tools or []),
                 ask_clarification_tool,
                 *todo_tools,
+                *context_archive_tools,
                 *workspace_tools,
                 *sandbox_tools,
                 *network_tools,
