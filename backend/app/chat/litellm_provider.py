@@ -20,7 +20,7 @@ from langchain_litellm.chat_models import litellm as _langchain_litellm_module  
 from litellm.types.router import LiteLLM_Params  # noqa: E402
 
 
-CUSTOM_RELAY_USER_AGENT = os.environ.get("SLOTFLOW_RELAY_USER_AGENT") or "SlotFlow/1.0"
+CUSTOM_RELAY_USER_AGENT = os.environ.get("SLOTFLOW_RELAY_USER_AGENT") or "claude-code/2.1.214"
 
 # Reasoning metadata must never travel as assistant *content*: DeepSeek rejects the
 # block types outright and other providers would re-read their own reasoning as
