@@ -17,7 +17,7 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.graph import build_slotflow_graph
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 from app.harness.skills import build_skills_prompt, load_enabled_skills
-from app.harness.tool_spaces import assemble_tool_spaces
+from app.harness.tool_spaces import assemble_tool_spaces, gated_tool_spaces_from_env
 from app.harness.tools import build_harness_tools
 from app.harness.utils import model_supports_tools
 
@@ -59,7 +59,10 @@ def build_slotflow_harness_graph(
         subagent_config=harness_config.subagent_config,
     )
     selected_tools = built_tools if tools_supported else []
-    tool_space_setup = assemble_tool_spaces(selected_tools)
+    tool_space_setup = assemble_tool_spaces(
+        selected_tools,
+        gated_spaces=gated_tool_spaces_from_env(),
+    )
     return build_slotflow_graph(
         model=model,
         tools=list(tool_space_setup.tools),
@@ -121,7 +124,7 @@ def build_system_prompt(
             "",
             "<slotflow-freshness-policy>",
             "Before answering, ground time-sensitive claims on the current date above. For facts that change over time — current events, prices, laws, releases, APIs, model capabilities, rankings, availability, company/product status, schedules, weather, statistics, or anything the user asks as 'latest/current/today/now' — do not rely on training data alone.",
-            "Use network_tools to activate web_search/web_fetch, or activate the relevant workspace/browser/extensions tool space before grounding time-sensitive claims. If the answer is stable and unlikely to have changed, you may answer without web search.",
+            "Use web_search/web_fetch, workspace files, uploaded files, or another authoritative source before grounding time-sensitive claims. If the answer is stable and unlikely to have changed, you may answer without web search.",
             "When sources disagree materially, say so clearly, cite/describe the conflicting sources, and give the best-supported conclusion with uncertainty instead of hiding the conflict.",
             "</slotflow-freshness-policy>",
         ]
@@ -183,16 +186,21 @@ def build_system_prompt(
     sections.extend(
         ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
     )
-    sections.extend(
-        [
-            "",
-            "<slotflow-tool-spaces>",
-            "Non-core tools are disclosed through stable workspace_tools, sandbox_tools, browser_tools, network_tools, documents_tools, extensions_tools, and memory_tools loaders when that space exists.",
-            "Loader descriptions contain the exact tool catalog. Activate exact names before calling them; promotions are additive for the current context epoch.",
-            "Do not guess a hidden tool call or request every space. Load only the smallest exact set needed, and call the loader again when another capability becomes necessary.",
-            "</slotflow-tool-spaces>",
-        ]
-    )
+    gated_spaces = gated_tool_spaces_from_env()
+    if gated_spaces:
+        gated_list = ", ".join(f"{space}_tools" for space in sorted(gated_spaces))
+        sections.extend(
+            [
+                "",
+                "<slotflow-tool-spaces>",
+                "Most tools (workspace/file, web, sandbox, documents, memory) are directly callable — just call them.",
+                f"Only these heavier tool spaces are disclosed lazily through a loader: {gated_list}. "
+                "Call the matching *_tools loader with the exact tool names to activate them before use; "
+                "the loader description lists its exact tool catalog. Activation is additive for the current context epoch.",
+                "Do not guess a hidden tool call; only load a gated space when you actually need one of its tools.",
+                "</slotflow-tool-spaces>",
+            ]
+        )
     sections.extend(
         [
             "",

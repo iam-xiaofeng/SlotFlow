@@ -32,6 +32,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
+from app.chat.litellm_provider import repair_streamed_tool_call_names
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -132,6 +133,34 @@ def _message_prefix_signature(messages: list[Any]) -> str:
             digest.update(str(message_id).encode("utf-8", errors="replace"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def project_with_context_epoch(
+    canonical_input: list[Any],
+    epoch: Any,
+) -> tuple[list[Any], bool]:
+    """Project the compacted epoch prefix + appended tail; report whether the epoch was used.
+
+    Returns ``(projected_messages, epoch_used)``. When ``epoch`` is a valid dict whose
+    ``source_signature`` still matches ``canonical_input[:source_count]`` (both sides computed
+    over the SAME repaired view), the compacted ``epoch.messages`` replaces the prefix and the
+    newer messages are appended verbatim — so a compaction happens once and later turns simply
+    append. ``epoch_used`` is False only when a present epoch went stale (caller should clear it).
+    """
+
+    if not isinstance(epoch, dict):
+        return canonical_input, True
+    source_count = epoch.get("source_message_count")
+    epoch_messages = epoch.get("messages")
+    source_signature = epoch.get("source_signature")
+    if (
+        isinstance(source_count, int)
+        and 0 <= source_count <= len(canonical_input)
+        and isinstance(epoch_messages, list)
+        and source_signature == _message_prefix_signature(canonical_input[:source_count])
+    ):
+        return [*epoch_messages, *canonical_input[source_count:]], True
+    return canonical_input, False
 
 
 # ---------------------------------------------------------------------------
@@ -285,20 +314,9 @@ def make_pre_model_node(inputs: _GraphInputs):
         # left a checkpointed stale snapshot that hid later tool results and user turns.
         canonical_input = repair_dangling_tool_calls(messages)
         epoch = state.get("context_epoch")
-        projected_input = canonical_input
-        if isinstance(epoch, dict):
-            source_count = epoch.get("source_message_count")
-            epoch_messages = epoch.get("messages")
-            source_signature = epoch.get("source_signature")
-            if (
-                isinstance(source_count, int)
-                and 0 <= source_count <= len(canonical_input)
-                and isinstance(epoch_messages, list)
-                and source_signature == _message_prefix_signature(canonical_input[:source_count])
-            ):
-                projected_input = [*epoch_messages, *canonical_input[source_count:]]
-            else:
-                updates["context_epoch"] = None
+        projected_input, epoch_used = project_with_context_epoch(canonical_input, epoch)
+        if isinstance(epoch, dict) and not epoch_used:
+            updates["context_epoch"] = None
         updates["llm_input_messages"] = projected_input
 
         # Compose the final system prompt for this step: base + memory section.
@@ -379,7 +397,13 @@ def make_summarization_node(inputs: _GraphInputs):
         model_input = [
             message for message in summarized if not isinstance(message, RemoveMessage)
         ]
-        canonical_messages = list(state.get("messages") or [])
+        # Compute the epoch source over the SAME repaired view that `pre_model` re-derives on
+        # every later turn (`repair_dangling_tool_calls(messages)`). Using the RAW messages here
+        # made the signature mismatch whenever history had a dangling tool call, so the epoch was
+        # reset EVERY turn → summarization re-fired every turn → the fixed keep-window slid and
+        # older messages (e.g. the user's earlier turn) were dropped. Aligning the views lets the
+        # epoch actually be reused, so compaction happens once and new turns simply append.
+        canonical_messages = repair_dangling_tool_calls(list(state.get("messages") or []))
         return {
             "llm_input_messages": model_input,
             "context_epoch": {
@@ -453,6 +477,7 @@ def make_agent_node(inputs: _GraphInputs):
                     config,
                 )
                 response.name = "slotflow"
+                repair_streamed_tool_call_names(response)
                 return {"messages": [response]}
             except Exception as exc:
                 if not is_context_overflow_error(exc) or attempt >= retries:
@@ -477,6 +502,7 @@ def make_agent_node(inputs: _GraphInputs):
             [SystemMessage(content=system_text), *messages], config
         )
         response.name = "slotflow"
+        repair_streamed_tool_call_names(response)
         return {"messages": [response]}
 
     return agent, agent_sync

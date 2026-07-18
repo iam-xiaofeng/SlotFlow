@@ -3265,3 +3265,15 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 **验证**:用 fan-out(`Send` 到两个并发节点各写 `promoted_tool_names`)复现,修复前抛 `INVALID_CONCURRENT_GRAPH_UPDATE`,修复后合并为有序并集。回归测试 `test_promoted_tool_names_reducer_is_ordered_union` 与 `test_concurrent_tool_space_promotion_does_not_raise_invalid_update` 固定该行为。
 
 **调试手段沉淀**:本次同时把 LangSmith 链路审查方法写进 `AGENTS.md`(见 "Debugging with LangSmith")——LangGraph 图的每个节点/模型调用/工具调用/interrupt 都是可展开的 span,这类"某节点并发写冲突"能被精确定位到触发它的 span,是排查链路问题的首选。
+
+### 54.8 后续修复（2026-07-18 下午）：grok 中转"工具全部 tool_not_activated"三段根因
+
+用户报告主模型(custom 中转 `grok-4.5`)所有工具调用都返回 `tool_not_activated`——**包括核心工具**——且一次压缩后继续对话丢失全部上下文。用今天实际对话 + LangSmith + 真机 grok/glm 排查,定位到三个独立根因,均已修复并真机验证。
+
+**根因 A（真正让 grok 全盘失效的）：中转流式装配丢失 tool_call 名字。** 在真实 harness 流里,`agent` 节点 `ainvoke` 返回的 AIMessage,其 `additional_kwargs["tool_calls"][j]["function"]["name"]` 是正确的(如 `web_search`),但 LangChain 解析出的 `message.tool_calls[i]["name"]` 却是**空字符串**(每个 chunk 的 `index` 都是 0)。空名字导致 ToolNode 无法分派——任何工具(核心的也一样)都失败。**这不是渐进式工具空间的问题**,gate 只是把它显示成 `tool_not_activated`。孤立 `ainvoke`/`astream` 复现不出(简单 prompt 名字正常),只在真实流里必现。修复:`litellm_provider.py::repair_streamed_tool_call_names` 按 `id`(全缺失且数量一致时退化为按位置)从 `additional_kwargs` 回填空名字;`graph.py` 的 `agent`/`agent_sync` 在拿到 response 后调用它。子代理走同一 graph,自动受益。回归 `tests/test_tool_call_name_repair.py`;真机 grok 建 `ok.md` 成功、`na=0`。
+
+**根因 B：渐进式工具空间把日常工具全 gate 在 loader 后。** 原设计 gate 了所有非核心工具(workspace/artifact/web/sandbox/memory/documents),模型必须先调用 `*_tools` loader 才能用,弱/中转模型很少这么做。改为**默认只 gate `browser,extensions`**(schema 最臃肿、最少用),其余日常工具默认进入 `initial_names`、turn-1 直接可调用;`SLOTFLOW_TOOL_SPACES_GATED` 可调。loader→promote→可调用链本身正确(确定性测试 `test_gated_space_becomes_callable_after_loader_promotes_it` 固定)。`tool_spaces.py::assemble_tool_spaces(gated_spaces=...)` + `builder.py` 读 env + prompt 只列被 gate 的空间。
+
+**根因 C：context epoch 每轮被重置 → 反复摘要 → keep 窗口滑走旧消息。** epoch 的 `source_signature/source_message_count` 在 `make_summarization_node` 用**原始** `state["messages"]` 计算,而 `pre_model` 用 `repair_dangling_tool_calls(messages)` 复算——历史里只要有 dangling tool call,两者视图不同 → 签名必失配 → epoch 每轮重置 → summarization 每轮重触发 → 固定"keep 最近 20 条"窗口滑动,把更早的用户轮次(如"A")挤掉。修复:两处都用 repaired 视图;投影逻辑抽成纯函数 `graph.py::project_with_context_epoch` 并测试(`test_context_epoch_is_reused_across_appended_turns_not_reset` / `..._resets_when_prefix_signature_changes`)。
+
+**旁证:issue3(注释 DeepSeek 仍可用)非代码 bug**——磁盘 `.env` 第 12 行 `DEEPSEEK_API_KEY=` 当时并未真正注释,进程据此加载;真正注释保存后完整 `make kill && make dev` 即消失。

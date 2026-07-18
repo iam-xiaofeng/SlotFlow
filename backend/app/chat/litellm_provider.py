@@ -194,6 +194,48 @@ def _consolidated_thinking_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
     return []
 
 
+def repair_streamed_tool_call_names(message: BaseMessage) -> BaseMessage:
+    """Backfill tool-call names lost by streamed chunk assembly from the raw payload.
+
+    Some OpenAI-compatible relays (observed live: grok-4.5 via a custom relay) stream tool-call
+    deltas such that langchain's parsed ``message.tool_calls[i]["name"]`` comes out EMPTY while the
+    raw ``additional_kwargs["tool_calls"][j]["function"]["name"]`` still carries the real name. An
+    empty name makes the ToolNode unable to dispatch the call — it fails closed and every tool
+    (core ones too) surfaces as ``tool_not_activated``/unknown. Recover the name by matching call
+    ``id`` (with a strict positional fallback only when every name is missing and counts line up),
+    so the model's intended tool actually runs. No-op when names are already present.
+    """
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls:
+        return message
+    raw = message.additional_kwargs.get("tool_calls") if isinstance(message, BaseMessage) else None
+    raw = raw if isinstance(raw, list) else []
+    name_by_id: dict[str, str] = {}
+    names_in_order: list[str] = []
+    for entry in raw:
+        function = entry.get("function") if isinstance(entry, dict) else None
+        raw_name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(raw_name, str) and raw_name:
+            names_in_order.append(raw_name)
+            entry_id = entry.get("id")
+            if isinstance(entry_id, str) and entry_id:
+                name_by_id[entry_id] = raw_name
+    if not names_in_order:
+        return message
+    missing = [tool_call for tool_call in tool_calls if not tool_call.get("name")]
+    allow_positional = len(missing) == len(names_in_order) == len(tool_calls)
+    for position, tool_call in enumerate(tool_calls):
+        if tool_call.get("name"):
+            continue
+        recovered = name_by_id.get(tool_call.get("id"))
+        if not recovered and allow_positional:
+            recovered = names_in_order[position]
+        if recovered:
+            tool_call["name"] = recovered
+    return message
+
+
 class ChatLiteLLM(_ChatLiteLLM):
     """ChatLiteLLM with lossless reasoning-state handling at the request boundary.
 

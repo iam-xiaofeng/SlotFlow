@@ -13,6 +13,25 @@ from langgraph.types import Command
 
 TOOL_SPACE_ORDER = ("workspace", "sandbox", "browser", "network", "documents", "extensions", "memory")
 
+# 默认只对这两个"重/稀有"空间做渐进式披露(loader + 未激活失败关闭):browser 是 MCP 浏览器
+# 自动化、extensions 是 skills + 所有 MCP 工具,二者的工具 schema 最臃肿、日常使用频率最低,gate
+# 它们能保住主要 token 收益;而 workspace/network/sandbox/documents/memory 这些日常工具默认激活、
+# turn-1 即可直接调用,避免"读写文件/联网/生成 artifact 全部 tool_not_activated"的死路。
+DEFAULT_GATED_SPACES = frozenset({"browser", "extensions"})
+
+
+def gated_tool_spaces_from_env() -> frozenset[str]:
+    """Read the set of tool spaces that stay behind a loader (progressive disclosure)."""
+
+    import os
+
+    raw = os.environ.get("SLOTFLOW_TOOL_SPACES_GATED")
+    if raw is None:
+        return DEFAULT_GATED_SPACES
+    names = {piece.strip().lower() for piece in raw.split(",") if piece.strip()}
+    return frozenset(name for name in names if name in TOOL_SPACE_ORDER)
+
+
 
 @dataclass(frozen=True)
 class ToolSpaceSetup:
@@ -43,7 +62,12 @@ def tool_space_for_tool(tool: BaseTool) -> str | None:
     return None
 
 
-def assemble_tool_spaces(candidate_tools: list[BaseTool]) -> ToolSpaceSetup:
+def assemble_tool_spaces(
+    candidate_tools: list[BaseTool],
+    *,
+    gated_spaces: frozenset[str] | None = None,
+) -> ToolSpaceSetup:
+    gated = DEFAULT_GATED_SPACES if gated_spaces is None else gated_spaces
     grouped: dict[str, list[BaseTool]] = {name: [] for name in TOOL_SPACE_ORDER}
     core: list[BaseTool] = []
     for candidate in candidate_tools:
@@ -53,21 +77,37 @@ def assemble_tool_spaces(candidate_tools: list[BaseTool]) -> ToolSpaceSetup:
         else:
             grouped[space].append(candidate)
 
-    loaders = [
-        _build_space_loader(space, tools)
-        for space, tools in grouped.items()
-        if tools
-    ]
-    all_tools = [*core, *loaders, *candidate_tools]
+    # 只对被 gate 的空间建 loader 并做渐进式披露;其余空间的工具直接进入 initial(默认激活)。
+    active_space_tools: list[BaseTool] = []
+    loaders: list[BaseTool] = []
+    gated_catalog: dict[str, tuple[str, ...]] = {}
+    for space in TOOL_SPACE_ORDER:
+        space_tools = grouped[space]
+        if not space_tools:
+            continue
+        if space in gated:
+            loaders.append(_build_space_loader(space, space_tools))
+            gated_catalog[space] = tuple(tool.name for tool in space_tools)
+        else:
+            active_space_tools.extend(space_tools)
+
+    all_tools = [*core, *active_space_tools, *loaders, *candidate_tools]
     unique: dict[str, BaseTool] = {}
     for candidate in all_tools:
         unique.setdefault(candidate.name, candidate)
-    initial = frozenset([*(tool.name for tool in core), *(tool.name for tool in loaders)])
+    initial = frozenset(
+        [
+            *(tool.name for tool in core),
+            *(tool.name for tool in active_space_tools),
+            *(tool.name for tool in loaders),
+        ]
+    )
     return ToolSpaceSetup(
         tools=tuple(unique.values()),
         initial_names=initial,
-        spaces={space: tuple(tool.name for tool in tools) for space, tools in grouped.items() if tools},
+        spaces=gated_catalog,
     )
+
 
 
 def _build_space_loader(space: str, tools: list[BaseTool]) -> BaseTool:

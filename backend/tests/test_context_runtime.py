@@ -2,14 +2,22 @@
 
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import tools_condition
 from langgraph.types import Send
 
 from app.chat.runtime.models import resolve_model_context_budget
-from app.harness.graph import emergency_context_projection, is_context_overflow_error
+from app.harness.graph import (
+    emergency_context_projection,
+    is_context_overflow_error,
+    make_tools_node,
+    project_with_context_epoch,
+)
 from app.harness.state import SlotFlowAgentState, merge_promoted_tool_names
 from app.harness.subagents.tools import resolve_subagent_tool_spaces
+from app.harness.tool_spaces import assemble_tool_spaces
 
 
 def test_custom_context_window_uses_per_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,4 +95,109 @@ def test_concurrent_tool_space_promotion_does_not_raise_invalid_update() -> None
     assert promoted[0] == "artifact_write"
     assert set(promoted) == {"artifact_write", "web_search", "web_fetch", "sandbox_exec"}
     assert len(promoted) == len(set(promoted))
+
+
+def _fake_tool(name: str):
+    @tool(name)
+    def _f(query: str = "") -> str:
+        """fake"""
+        return f"{name}:{query}"
+
+    return _f
+
+
+def test_default_partition_keeps_everyday_tools_active_and_gates_heavy_spaces() -> None:
+    names = [
+        "workspace_read",
+        "artifact_write",
+        "web_search",
+        "sandbox_exec",
+        "convert_file_to_markdown",
+        "memory_save",
+        "browser_navigate",
+        "skill_match",
+    ]
+    setup = assemble_tool_spaces([_fake_tool(n) for n in names])
+    # Everyday tools are bound & callable on turn 1 (no loader dance).
+    for n in ["workspace_read", "artifact_write", "web_search", "sandbox_exec", "convert_file_to_markdown", "memory_save"]:
+        assert n in setup.initial_names, n
+    # Only the heavy browser/extensions spaces stay behind a loader.
+    assert "browser_navigate" not in setup.initial_names
+    assert "skill_match" not in setup.initial_names
+    assert {"browser_tools", "extensions_tools"} <= setup.initial_names
+    assert set(setup.spaces) == {"browser", "extensions"}
+
+
+def test_gated_space_becomes_callable_after_loader_promotes_it() -> None:
+    """Loader -> promote -> call must actually work through the real ToolNode gate."""
+
+    web_search = _fake_tool("web_search")
+    setup = assemble_tool_spaces([web_search], gated_spaces=frozenset({"network"}))
+    assert "web_search" not in setup.initial_names  # gated
+    assert "network_tools" in setup.initial_names  # loader active
+
+    def agent(state):
+        ai = sum(1 for m in (state.get("messages") or []) if isinstance(m, AIMessage) and m.tool_calls)
+        if ai == 0:
+            return {"messages": [AIMessage(content="", tool_calls=[{"name": "network_tools", "args": {"names": ["web_search"]}, "id": "c1"}])]}
+        if ai == 1:
+            return {"messages": [AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "today"}, "id": "c2"}])]}
+        return {"messages": [AIMessage(content="done")]}
+
+    graph = StateGraph(SlotFlowAgentState)
+    graph.add_node("agent", agent)
+    graph.add_node("tools", make_tools_node(list(setup.tools), initial_tool_names=setup.initial_names))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", tools_condition)
+    graph.add_edge("tools", "agent")
+    out = graph.compile().invoke({"messages": [], "promoted_tool_names": []}, config={"recursion_limit": 12})
+
+    assert out.get("promoted_tool_names") == ["web_search"]
+    tool_msgs = [m.content for m in out["messages"] if type(m).__name__ == "ToolMessage"]
+    assert any("web_search:today" in c for c in tool_msgs)  # executed, not tool_not_activated
+    assert not any("not_activated" in c for c in tool_msgs)
+
+
+def test_context_epoch_is_reused_across_appended_turns_not_reset() -> None:
+    """After compaction, appending A then B must keep A and B and reuse the epoch (no re-summary)."""
+
+    old = [HumanMessage(content=f"old {i}", id=f"o{i}") for i in range(6)]
+    summary = AIMessage(content="SUMMARY of old 0..5", id="sum")
+    # Epoch built from the (repaired) canonical prefix of the 6 old messages.
+    from app.harness.graph import _message_prefix_signature
+
+    epoch = {
+        "source_message_count": len(old),
+        "source_signature": _message_prefix_signature(old),
+        "messages": [summary],
+    }
+    a = HumanMessage(content="A", id="a")
+    b = HumanMessage(content="B", id="b")
+
+    # Turn after compaction: user sent A.
+    canonical_after_a = [*old, a]
+    projected, used = project_with_context_epoch(canonical_after_a, epoch)
+    assert used is True  # epoch reused, not reset
+    assert projected[0] is summary
+    assert a in projected
+
+    # Next turn: A's answer + B appended.
+    canonical_after_b = [*old, a, AIMessage(content="answer to A", id="ra"), b]
+    projected2, used2 = project_with_context_epoch(canonical_after_b, epoch)
+    assert used2 is True
+    assert projected2[0] is summary
+    assert a in projected2 and b in projected2  # neither turn is forgotten
+
+
+def test_context_epoch_resets_when_prefix_signature_changes() -> None:
+    old = [HumanMessage(content=f"old {i}", id=f"o{i}") for i in range(4)]
+    epoch = {
+        "source_message_count": len(old),
+        "source_signature": "stale-signature-that-will-not-match",
+        "messages": [AIMessage(content="SUMMARY", id="s")],
+    }
+    canonical = [*old, HumanMessage(content="A", id="a")]
+    projected, used = project_with_context_epoch(canonical, epoch)
+    assert used is False  # stale epoch -> caller clears it
+    assert projected == canonical  # falls back to full (repaired) canonical, nothing dropped
 
