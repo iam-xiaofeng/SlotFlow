@@ -147,6 +147,7 @@ export function ChatApp() {
     isStreaming,
     runStates,
     error,
+    contextUsage,
     sendMessage,
     cancelStream,
     loadThread,
@@ -878,6 +879,7 @@ export function ChatApp() {
       attachments={attachments}
       todos={todos}
       todoListKey={todoListKey}
+      contextUsage={contextUsage}
       error={error}
       fileInputRef={fileInputRef}
       isStreaming={isStreaming}

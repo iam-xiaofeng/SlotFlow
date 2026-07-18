@@ -47,6 +47,25 @@ export type ThreadRunStatus = "streaming" | "attention" | "needs_input" | "error
 
 type ThreadTodoState = { todos: ChatTodo[]; listKey: string | null; signature: string };
 
+/** 线程级上下文占用:used = 最近一次成功调用的 prompt tokens;window = 模型上下文上限。 */
+type ThreadContextUsage = {
+  usedTokens: number | null;
+  windowTokens: number | null;
+  budgetTokens: number | null;
+  source: string | null;
+};
+
+const emptyContextUsage: ThreadContextUsage = {
+  usedTokens: null,
+  windowTokens: null,
+  budgetTokens: null,
+  source: null,
+};
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 type UseChatStreamOptions = {
   defaultThreadTitle?: string;
   defaultModelName?: string;
@@ -98,6 +117,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     {},
   );
   const [runStates, setRunStates] = useState<Record<string, ThreadRunStatus>>({});
+  const [contextUsageByThread, setContextUsageByThread] = useState<
+    Record<string, ThreadContextUsage>
+  >({});
 
   const activeThreadIdRef = useRef<string | null>(null);
   activeThreadIdRef.current = thread?.id ?? null;
@@ -130,6 +152,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const todos = activeTodoState?.todos ?? emptyTodos;
   const todoListKey = activeTodoState?.listKey ?? null;
   const error = activeThreadId ? errorsByThread[activeThreadId] ?? null : null;
+  const contextUsage = activeThreadId
+    ? contextUsageByThread[activeThreadId] ?? null
+    : null;
   const isStreaming = activeThreadId
     ? runStates[activeThreadId] === "streaming"
     : false;
@@ -140,6 +165,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     }
     setErrorsByThread((current) => ({ ...current, [threadId]: message }));
   }, []);
+
+  const updateContextUsage = useCallback(
+    (threadId: string, patch: Partial<ThreadContextUsage>) => {
+      setContextUsageByThread((current) => ({
+        ...current,
+        [threadId]: { ...(current[threadId] ?? emptyContextUsage), ...patch },
+      }));
+    },
+    [],
+  );
 
   const setRunState = useCallback(
     (threadId: string, status: ThreadRunStatus | null) => {
@@ -485,6 +520,25 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
                 runId,
               }));
             }
+            const windowTokens = readNumber(streamEvent.data.context_window_tokens);
+            const budgetTokens = readNumber(streamEvent.data.context_input_budget_tokens);
+            const source = streamEvent.data.context_window_source;
+            updateContextUsage(threadId, {
+              windowTokens,
+              budgetTokens,
+              source: typeof source === "string" ? source : null,
+            });
+          }
+
+          if (streamEvent.event === "run.usage") {
+            const usedTokens = readNumber(streamEvent.data.context_tokens);
+            const windowTokens = readNumber(streamEvent.data.context_window_tokens);
+            const budgetTokens = readNumber(streamEvent.data.context_input_budget_tokens);
+            updateContextUsage(threadId, {
+              ...(usedTokens !== null ? { usedTokens } : {}),
+              ...(windowTokens !== null ? { windowTokens } : {}),
+              ...(budgetTokens !== null ? { budgetTokens } : {}),
+            });
           }
 
           if (streamEvent.event === "context.compressing") {
@@ -712,6 +766,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       setThreadError,
       thread,
       updateAssistantMessage,
+      updateContextUsage,
       updateThreadMessages,
     ],
   );
@@ -742,6 +797,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     isAnyStreaming,
     runStates,
     error,
+    contextUsage,
     sendMessage,
     cancelStream,
     resetThread,

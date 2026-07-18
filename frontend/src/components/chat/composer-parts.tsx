@@ -306,12 +306,13 @@ export function ComposerTextarea({
   onPasteFiles: (files: File[]) => void | Promise<void>;
 }) {
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const imageFiles = extractClipboardImageFiles(event);
-    if (imageFiles.length === 0) {
+    // 粘贴时:文字保持默认行为(插入文本框);图片/文件一律走上传。
+    const files = extractClipboardFiles(event);
+    if (files.length === 0) {
       return;
     }
     event.preventDefault();
-    void onPasteFiles(imageFiles);
+    void onPasteFiles(files);
   }
 
   return (
@@ -343,10 +344,10 @@ export function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
   element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
-function extractClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>): File[] {
+function extractClipboardFiles(event: ClipboardEvent<HTMLTextAreaElement>): File[] {
   const items = Array.from(event.clipboardData.items ?? []);
   return items.flatMap((item, index) => {
-    if (item.kind !== "file" || !item.type.startsWith("image/")) {
+    if (item.kind !== "file") {
       return [];
     }
     const file = item.getAsFile();
@@ -356,8 +357,10 @@ function extractClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>):
     if (file.name) {
       return [file];
     }
-    const suffix = item.type.split("/")[1] || "png";
-    return [new File([file], `pasted-image-${index + 1}.${suffix}`, { type: item.type })];
+    // 剪贴板里的图片/文件常常没有文件名(尤其截图),按类型补一个稳定名字。
+    const subtype = item.type.split("/")[1] || "bin";
+    const prefix = item.type.startsWith("image/") ? "pasted-image" : "pasted-file";
+    return [new File([file], `${prefix}-${index + 1}.${subtype}`, { type: item.type })];
   });
 }
 
@@ -400,6 +403,62 @@ export function ComposerTools({
         )}
         <span className="sr-only">添加照片和文件</span>
       </Button>
+    </div>
+  );
+}
+
+export type ComposerContextUsage = {
+  usedTokens: number | null;
+  windowTokens: number | null;
+  budgetTokens: number | null;
+  source: string | null;
+};
+
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
+  }
+  return `${value}`;
+}
+
+export function ComposerContextMeter({ usage }: { usage: ComposerContextUsage | null }) {
+  if (!usage || usage.windowTokens === null || usage.windowTokens <= 0) {
+    return null;
+  }
+  const windowTokens = usage.windowTokens;
+  const used = usage.usedTokens ?? 0;
+  const ratio = Math.min(1, Math.max(0, used / windowTokens));
+  const percent = Math.round(ratio * 100);
+  const textTone =
+    ratio >= 0.9
+      ? "text-red-500"
+      : ratio >= 0.75
+        ? "text-amber-500"
+        : "text-muted-foreground";
+  const barTone =
+    ratio >= 0.9 ? "bg-red-500" : ratio >= 0.75 ? "bg-amber-500" : "bg-primary/60";
+  const barWidth = used > 0 ? Math.max(percent, 2) : 0;
+  return (
+    <div
+      className="flex items-center gap-2 text-xs"
+      title={`上下文 ${used.toLocaleString()} / ${windowTokens.toLocaleString()} tokens (${percent}%)`}
+    >
+      <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-muted sm:block">
+        <div
+          className={`h-full ${barTone} transition-[width] duration-300`}
+          style={{ width: `${barWidth}%` }}
+        />
+      </div>
+      <span className={`tabular-nums ${textTone}`}>
+        {usage.usedTokens === null ? "—" : formatTokenCount(used)}
+        <span className="text-muted-foreground/60">
+          {" / "}
+          {formatTokenCount(windowTokens)}
+        </span>
+      </span>
     </div>
   );
 }
