@@ -5,6 +5,7 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 > **✅ 2026-07-04 大扫除完成,等待人工验证后提 PR**(分支 `cleanup/audit-20260703`)。
 > 改动与问题总览:[`docs/cleanup-2026-07-03-report.md`](docs/cleanup-2026-07-03-report.md);
 > API 调用链路:[`docs/api-call-chains.md`](docs/api-call-chains.md);
+> Agent 上下文压缩、渐进式工具披露与 Codex/Pi/DeerFlow 调研（2026-07-17）：[docs/research/agent-context-tool-disclosure-2026-07-17.md](docs/research/agent-context-tool-disclosure-2026-07-17.md);
 > 工程细节:`HARNESS_NOTES.md` §32;断点续传:
 > [`HANDOFF_CROSS_SESSION_20260703.md`](HANDOFF_CROSS_SESSION_20260703.md)。
 > 行为要点:摘要哨兵/输入冻结两个 P0 已修;tool.status 现挂消息子流 tool_calls 投影
@@ -201,8 +202,13 @@ frontend/src/
   run. `custom` remains the sole SlotFlow-specific transport configuration:
   `CUSTOM_BASE_URL` + `CUSTOM_API_KEY`, LiteLLM endpoint discovery, optional comma-separated
   `CUSTOM_MODELS`, and a neutral `SLOTFLOW_RELAY_USER_AGENT`. LiteLLM catalog work runs in
-  `asyncio.to_thread`, so `/api/chat/models` does not block FastAPI's event loop. Updating the
-  pinned LiteLLM packages updates native provider/model metadata; do not add hand-maintained
+  `asyncio.to_thread`, so `/api/chat/models` does not block FastAPI's event loop. The model transport
+  timeout is provider-agnostic: `SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS` is read when
+  `runtime/models.py` builds each `ChatLiteLLM` instance and defaults to 300 seconds. Do not restore
+  the old hard-coded 30-second timeout: reasoning models and relays may legitimately exceed it before
+  the first stream chunk or between chunks, which LiteLLM surfaces as `MidStreamFallbackError`
+  wrapping a socket read timeout. Updating the pinned LiteLLM packages updates native provider/model
+  metadata; do not add hand-maintained
   Gemini/Bedrock/Mistral/etc. lists or credential maps.
 - **Reasoning streaming**: every provider is constructed through the minimal
   `chat/litellm_provider.py::ChatLiteLLM` subclass of `langchain_litellm.ChatLiteLLM`.
@@ -240,6 +246,18 @@ frontend/src/
   the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
   assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
   normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
+  `chat/sse.py::make_error_event` recursively unwraps LangGraph/AnyIO `ExceptionGroup` failures so
+  `run.error` and the persisted run expose the informative leaf exception instead of the generic
+  `unhandled errors in a TaskGroup` wrapper; cancellation semantics and tracebacks stay server-side.
+- **Request-budget and development reload boundaries**: `title_generation.py` never creates a
+  model when `SLOTFLOW_TITLE_MODEL_ENABLED=false`; it derives a deterministic title from the first
+  user message, and `.env_example` keeps this no-extra-request mode as the default. Do not route this
+  background concern to DeepSeek or another provider. Proactive memory extraction is also one extra
+  post-turn call and may be disabled with `SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION=false` for strict-RPM
+  relays without changing the user-selected model used by the main agent/subagents. `make dev` limits
+  Uvicorn reload watching to `backend/app`, so files written under `.slotflow/workspace` cannot restart
+  an active stream. The adapter suppresses only LangGraph's exact Pregel v3 experimental warning at
+  the `astream_events` boundary; unrelated warnings remain visible.- **Context epochs, local usage metrics, and progressive tool spaces**: every runtime run attaches a local `RunUsageCollector`; `run.usage` is persisted in SQLite `run_metrics` without prompt/tool content. Missing provider cache fields are `unknown`, never a fabricated miss. Context windows resolve from `SLOTFLOW_MODEL_CONTEXT_WINDOWS_JSON`, then LiteLLM's bundled metadata, then a conservative local default; input budget reserves `SLOTFLOW_CONTEXT_RESERVE_TOKENS`. Summarization now stores a model-facing `context_epoch` while canonical `messages` remain intact in the checkpointer. Within an epoch the frozen compacted prefix is reused and new messages append; `context_archive_search/read` can inspect only the current graph state's canonical history. Main-agent non-core tools are hidden behind stable per-space loaders and promoted additively; unpromoted calls fail closed. Child agents have no recursive delegation/todo/HITL and receive at most three explicit tool spaces, with `all/*` rejected. Context-overflow BadRequest errors progressively shrink only model input before configurable retries; transient pre-response transport/rate failures use configurable exponential retry, while mid-stream/tool side effects are never replayed.
 - **Agent Reach host bridge**: Agent Reach is installed/refreshed by `bootstrap.sh` with `uv tool`
   and initialized from `~/.agent-reach`; it is deliberately **not** installed or mounted into the
   Docker sandbox. `harness/tools/agent_reach.py` is the only model-facing boundary. It exposes five
@@ -266,7 +284,10 @@ frontend/src/
   untrusted. `SlotFlowMcpServerConfig.stateful=True` makes `MultiServerMcpToolProvider` keep one MCP
   `ClientSession` open across navigate/snapshot/click calls. `RuntimeBackedAgentAdapter` creates that
   provider/session per run and closes it in `finally`; concurrent runs never share a page/profile.
-  Stateless MCP servers keep the original one-session-per-call adapter behavior. The preset can be
+  MCP discovery is isolated per server: an unavailable optional server is logged and omitted without
+  closing healthy stateful sessions or aborting the chat run; cancellation still closes every opened
+  stack and propagates. Stateless MCP servers keep the original one-session-per-call adapter behavior.
+  The preset can be
   toggled but cannot be deleted or shadowed by a user HTTP server. `bootstrap.sh` installs the locked
   package, runs official `playwright install-deps chromium` on apt hosts, and downloads Chromium;
   non-apt hosts receive a precise shared-library warning. No separate maintenance command exists.
