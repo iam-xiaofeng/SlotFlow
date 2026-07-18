@@ -24,7 +24,13 @@ from app.chat.runtime.config import (
     refresh_runtime_mcp_config,
     refresh_runtime_skills_config,
 )
-from app.chat.runtime.models import create_chat_model, create_model_for_context
+from app.chat.runtime.models import (
+    create_chat_model,
+    create_model_for_context,
+    resolve_model_context_budget,
+    resolve_model_provider,
+)
+from app.chat.usage import RunUsageCollector
 from app.harness import SlotFlowHarnessConfig, build_slotflow_harness_graph
 from app.harness.mcp import McpToolProvider, MultiServerMcpToolProvider, ensure_mcp_tools_loaded
 
@@ -71,6 +77,27 @@ class RuntimeBackedAgentAdapter:
         bundle: RunConfigBundle,
     ) -> AsyncIterator[AgentEvent]:
         model_name = bundle.context.model_name or self._runtime_config.model_name
+        try:
+            resolved_provider = resolve_model_provider(model_name, bundle.context)
+        except Exception:  # test/custom factories may intentionally use synthetic model ids
+            resolved_provider = bundle.context.model_provider or "custom"
+        window, budget, window_source = resolve_model_context_budget(
+            model_name,
+            provider=resolved_provider,
+        )
+        bundle.context = bundle.context.model_copy(
+            update={
+                "context_window_tokens": window,
+                "context_input_budget_tokens": budget,
+                "context_window_source": window_source,
+            }
+        )
+        usage_collector = RunUsageCollector(
+            model_name=model_name,
+            provider=bundle.context.model_provider,
+        )
+        callbacks = list(bundle.config.get("callbacks") or [])
+        bundle.config["callbacks"] = [*callbacks, usage_collector]
         checkpointer = await self._ensure_checkpointer()
         refresh_runtime_skills_config(self._runtime_config)
         mcp_provider = self._mcp_provider_for_run()
@@ -89,8 +116,17 @@ class RuntimeBackedAgentAdapter:
             )
             adapter = LangGraphEventAgentAdapter(graph)
 
-            async for event in adapter.stream_events(request=request, bundle=bundle):
-                yield event
+            usage_emitted = False
+            try:
+                async for event in adapter.stream_events(request=request, bundle=bundle):
+                    if event.event == "run.finished":
+                        yield AgentEvent(event="run.usage", data=usage_collector.summary())
+                        usage_emitted = True
+                    yield event
+            except Exception:
+                if not usage_emitted:
+                    yield AgentEvent(event="run.usage", data=usage_collector.summary())
+                raise
         finally:
             if mcp_provider is not self._runtime_config.mcp_tool_provider:
                 await _aclose_mcp_provider(mcp_provider)

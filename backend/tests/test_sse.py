@@ -121,6 +121,33 @@ def test_make_error_event_keeps_exception_name_and_message() -> None:
     }
 
 
+def test_make_error_event_unwraps_nested_task_group_errors() -> None:
+    """并发流异常不能只把无信息量的 TaskGroup 外壳发给前端。"""
+
+    error = ExceptionGroup(
+        "unhandled errors in a TaskGroup",
+        [ExceptionGroup("projection failed", [TimeoutError("socket read timeout")])],
+    )
+
+    event = make_error_event(error)
+
+    assert event.data == {
+        "name": "TimeoutError",
+        "message": "socket read timeout",
+    }
+
+
+def test_make_error_event_falls_back_to_leaf_type_for_empty_messages() -> None:
+    event = make_error_event(
+        ExceptionGroup("unhandled errors in a TaskGroup", [TimeoutError()]),
+    )
+
+    assert event.data == {
+        "name": "TimeoutError",
+        "message": "TimeoutError",
+    }
+
+
 @pytest.mark.asyncio
 async def test_iter_business_events_converts_stream_exception_to_run_error() -> None:
     """上游流崩掉时，最后一条业务事件应该是 run.error。"""

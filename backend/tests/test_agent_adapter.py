@@ -11,8 +11,10 @@ LangGraph v3 typed projections
 from __future__ import annotations
 
 from types import SimpleNamespace
+import warnings
 
 import pytest
+from langchain_core._api import LangChainBetaWarning
 from langchain_core.messages import AIMessageChunk
 
 from app.chat.agent_adapter import (
@@ -621,16 +623,24 @@ async def test_langgraph_event_adapter_consumes_projection_stream_without_raw_it
 
     class StubGraph:
         async def astream_events(self, *_args, **_kwargs):
+            warnings.warn(
+                "The v3 streaming protocol on Pregel is experimental.",
+                LangChainBetaWarning,
+                stacklevel=2,
+            )
+            warnings.warn("unrelated adapter warning", UserWarning, stacklevel=2)
             return ProjectionOnlyStream()
 
     adapter = LangGraphEventAgentAdapter(StubGraph())
-    events = await collect_agent_events(
-        adapter.stream_events(
-            request=ChatStreamRequest(message="ping"),
-            bundle=_bundle(),
+    with pytest.warns(UserWarning, match="unrelated adapter warning") as caught:
+        events = await collect_agent_events(
+            adapter.stream_events(
+                request=ChatStreamRequest(message="ping"),
+                bundle=_bundle(),
+            )
         )
-    )
 
+    assert all(not isinstance(item.message, LangChainBetaWarning) for item in caught)
     assert [event.event for event in events] == [
         "run.prepared",
         "message.delta",

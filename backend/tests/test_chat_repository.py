@@ -302,3 +302,12 @@ def test_build_chat_repository_accepts_explicit_path(tmp_path: Path) -> None:
         assert isinstance(repo, SQLiteChatRepository)
     finally:
         repo.close()
+
+
+def test_run_metrics_are_persisted_separately() -> None:
+    repo = SQLiteChatRepository(":memory:")
+    thread = repo.create_thread(title="metrics")
+    run = repo.create_run(thread.id, model_name="glm-5.2", mode="pro", agent_name="default")
+    metrics = {"input_tokens": 100, "cached_input_tokens": None, "cache_observable_requests": 0}
+    repo.update_run_metrics(run.id, metrics)
+    assert repo.get_run_metrics(run.id) == metrics

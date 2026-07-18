@@ -9,10 +9,12 @@ typed projection channel（messages / values / tool_calls）并发拉取、近�
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from langchain_core._api import LangChainBetaWarning
 from langgraph.types import Command
 
 from app.chat.agent_adapter.events import (
@@ -66,12 +68,20 @@ class LangGraphEventAgentAdapter:
         else:
             stream_input = build_agent_input(request, bundle=bundle)
 
-        projection_stream = await self._graph.astream_events(
-            stream_input,
-            config=bundle.config,
-            version="v3",
-            context=bundle.context,
-        )
+        # SlotFlow intentionally depends on LangGraph's v3 typed projections. LangGraph emits the
+        # same beta warning on every run; suppress only that exact known warning at this boundary.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"The v3 streaming protocol on Pregel is experimental\.",
+                category=LangChainBetaWarning,
+            )
+            projection_stream = await self._graph.astream_events(
+                stream_input,
+                config=bundle.config,
+                version="v3",
+                context=bundle.context,
+            )
         async for event in iter_projection_agent_events(projection_stream, bundle=bundle):
             yield event
 

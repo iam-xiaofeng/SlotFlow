@@ -23,6 +23,7 @@ from app.chat.agent_adapter import AgentEvent
 
 SseEventName = Literal[
     "run.prepared",
+    "run.usage",
     "context.compressing",
     "message.delta",
     "tool.delta",
@@ -57,18 +58,36 @@ def agent_event_to_sse_event(event: AgentEvent) -> BusinessSseEvent:
     return BusinessSseEvent(event=event.event, data=dict(event.data))
 
 
+def unwrap_exception_group(error: BaseException) -> BaseException:
+    """Return the first informative leaf from nested task-group failures."""
+
+    if not isinstance(error, BaseExceptionGroup):
+        return error
+
+    fallback: BaseException = error
+    for nested in error.exceptions:
+        leaf = unwrap_exception_group(nested)
+        fallback = leaf
+        if str(leaf).strip():
+            return leaf
+    return fallback
+
+
 def make_error_event(error: BaseException) -> BusinessSseEvent:
     """把异常转换成 `run.error`。
 
-    这里保留异常类型和消息，但不把 traceback 直接发给前端。traceback 更适合留在
-    后端日志里，前端只需要知道这次 run 失败了，以及失败的大概原因。
+    LangGraph/AnyIO 的并发投影会用 ``ExceptionGroup`` 包住真正异常。最外层字符串只有
+    ``unhandled errors in a TaskGroup``，对用户和 run 记录都没有诊断价值，因此先递归取
+    第一个带消息的叶子异常。traceback 仍不直接发给前端。
     """
 
+    display_error = unwrap_exception_group(error)
+    message = str(display_error).strip() or type(display_error).__name__
     return BusinessSseEvent(
         event="run.error",
         data={
-            "name": type(error).__name__,
-            "message": str(error),
+            "name": type(display_error).__name__,
+            "message": message,
         },
     )
 

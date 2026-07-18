@@ -17,6 +17,7 @@ from app.chat.models import ChatStreamRequest, RunConfigBundle
 
 AgentEventName = Literal[
     "run.prepared",
+    "run.usage",
     "context.compressing",
     "message.delta",
     "tool.delta",
