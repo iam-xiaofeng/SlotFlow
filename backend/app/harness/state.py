@@ -17,10 +17,32 @@
 
 from __future__ import annotations
 
-from typing import Any, NotRequired
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents import AgentState
 from langchain_core.messages import BaseMessage
+
+
+def merge_promoted_tool_names(
+    existing: list[str] | None,
+    incoming: list[str] | None,
+) -> list[str]:
+    """保序去重地并入 `promoted_tool_names`,支持同一步内的并发写入。
+
+    工具空间加载器(`*_tools`)在模型单步里可能被并行调用(多个 tool_calls),各自返回
+    `Command(update={"promoted_tool_names": ...})`。没有 reducer 时 LangGraph 会对第二次写入
+    抛 `INVALID_CONCURRENT_GRAPH_UPDATE`("Can receive only one value per step")。工具披露是
+    加性的(一个 context epoch 内只增不减),所以用有序并集作为 reducer:既合并并发写入,也
+    对重复激活保持幂等。
+    """
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for name in (*(existing or []), *(incoming or [])):
+        if name not in seen:
+            seen.add(name)
+            merged.append(name)
+    return merged
 
 
 class SlotFlowAgentState(AgentState):
@@ -33,3 +55,5 @@ class SlotFlowAgentState(AgentState):
     retrieved_memories: NotRequired[list[Any] | None]
     artifacts_baseline: NotRequired[set[str] | None]
     todo_enforcement: NotRequired[dict[str, Any] | None]
+    context_epoch: NotRequired[dict[str, Any] | None]
+    promoted_tool_names: NotRequired[Annotated[list[str] | None, merge_promoted_tool_names]]

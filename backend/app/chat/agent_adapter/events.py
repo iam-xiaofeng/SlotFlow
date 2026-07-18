@@ -17,6 +17,7 @@ from app.chat.models import ChatStreamRequest, RunConfigBundle
 
 AgentEventName = Literal[
     "run.prepared",
+    "run.usage",
     "context.compressing",
     "message.delta",
     "tool.delta",
@@ -121,6 +122,9 @@ def make_prepared_event(*, bundle: RunConfigBundle) -> AgentEvent:
             "model_name": bundle.context.model_name,
             "mode": bundle.context.mode,
             "agent_name": bundle.context.agent_name,
+            "context_window_tokens": bundle.context.context_window_tokens,
+            "context_input_budget_tokens": bundle.context.context_input_budget_tokens,
+            "context_window_source": bundle.context.context_window_source,
         },
     )
 

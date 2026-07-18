@@ -6,6 +6,7 @@ checkpointer、RunContext，再把这些运行时依赖显式传给这里。
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -16,6 +17,7 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.graph import build_slotflow_graph
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 from app.harness.skills import build_skills_prompt, load_enabled_skills
+from app.harness.tool_spaces import assemble_tool_spaces, gated_tool_spaces_from_env
 from app.harness.tools import build_harness_tools
 from app.harness.utils import model_supports_tools
 
@@ -57,9 +59,14 @@ def build_slotflow_harness_graph(
         subagent_config=harness_config.subagent_config,
     )
     selected_tools = built_tools if tools_supported else []
+    tool_space_setup = assemble_tool_spaces(
+        selected_tools,
+        gated_spaces=gated_tool_spaces_from_env(),
+    )
     return build_slotflow_graph(
         model=model,
-        tools=selected_tools,
+        tools=list(tool_space_setup.tools),
+        initial_tool_names=tool_space_setup.initial_names,
         system_prompt=build_system_prompt(
             harness_config=harness_config,
             features=features,
@@ -71,7 +78,17 @@ def build_slotflow_harness_graph(
         memory_store=harness_config.memory_store,
         skills_root=harness_config.skills_root,
         skills_config_store=harness_config.skills_config_store,
-        config_flags=harness_config.middleware_config,
+        config_flags=(
+            replace(
+                harness_config.middleware_config,
+                summarization_trigger_tokens=min(
+                    harness_config.middleware_config.summarization_trigger_tokens,
+                    run_context.context_input_budget_tokens,
+                ),
+            )
+            if run_context.context_input_budget_tokens is not None
+            else harness_config.middleware_config
+        ),
         checkpointer=checkpointer,
     )
 
@@ -107,7 +124,7 @@ def build_system_prompt(
             "",
             "<slotflow-freshness-policy>",
             "Before answering, ground time-sensitive claims on the current date above. For facts that change over time — current events, prices, laws, releases, APIs, model capabilities, rankings, availability, company/product status, schedules, weather, statistics, or anything the user asks as 'latest/current/today/now' — do not rely on training data alone.",
-            "Use web_search/web_fetch, workspace files, uploaded files, MCP tools, or another authoritative source before answering time-sensitive questions. If the answer is stable and unlikely to have changed (definitions, timeless concepts, basic math, local code already in the workspace), you may answer without web search.",
+            "Use web_search/web_fetch, workspace files, uploaded files, or another authoritative source before grounding time-sensitive claims. If the answer is stable and unlikely to have changed, you may answer without web search.",
             "When sources disagree materially, say so clearly, cite/describe the conflicting sources, and give the best-supported conclusion with uncertainty instead of hiding the conflict.",
             "</slotflow-freshness-policy>",
         ]
@@ -163,10 +180,36 @@ def build_system_prompt(
                 "- For delegation, call subagent_list before choosing workers when role fit matters. Pick a Layer-1 functional agent_name (researcher/analyst/planner/coder/reviewer/writer), then usually pass only a Layer-2 domain to task_tool for domain guidance.",
                 "- Use subagent_role_search(query, domain) only when the exact Layer-3 professional role matters; pass one returned role_name/id to task_tool. Do not ask to see or summarize the full role library.",
                 "- subagent_list/subagent_role_search expose compact role metadata only; task_tool loads at most one file-backed agency role template into the child subagent.",
+                "- task_tool.tool_spaces may grant at most three named spaces (workspace/sandbox/browser/network/documents/extensions/memory). Never use all or wildcard; split cross-domain work instead. Child agents have no todo, clarification/HITL, memory middleware, or recursive task_tool.",
             ]
         )
     sections.extend(
         ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
+    )
+    gated_spaces = gated_tool_spaces_from_env()
+    if gated_spaces:
+        gated_list = ", ".join(f"{space}_tools" for space in sorted(gated_spaces))
+        sections.extend(
+            [
+                "",
+                "<slotflow-tool-spaces>",
+                "Most tools (workspace/file, web, sandbox, documents, memory) are directly callable — just call them.",
+                f"Only these heavier tool spaces are disclosed lazily through a loader: {gated_list}. "
+                "Call the matching *_tools loader with the exact tool names to activate them before use; "
+                "the loader description lists its exact tool catalog. Activation is additive for the current context epoch.",
+                "Do not guess a hidden tool call; only load a gated space when you actually need one of its tools.",
+                "</slotflow-tool-spaces>",
+            ]
+        )
+    sections.extend(
+        [
+            "",
+            "<slotflow-context-archive>",
+            "Complete canonical message and tool history is retained outside the compact model view.",
+            "When a compaction summary lacks exact older details, call context_archive_search and context_archive_read instead of guessing.",
+            "Archive tools are read-only and scoped to the current LangGraph thread state.",
+            "</slotflow-context-archive>",
+        ]
     )
     sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
     sections.extend(build_agent_reach_status_prompt(harness_config))

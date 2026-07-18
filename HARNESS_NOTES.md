@@ -3093,3 +3093,201 @@ environment tools 都含同一个 `convert_file_to_markdown`。system prompt 的
 warning、workspace escape、thread artifact、input/output/archive/page/image 上限、nested ZIP 拒绝、上游吞掉的
 Vision failure warning 和 env secret 配置。
 这些 OCR 测试故意用 deterministic fake client，不消耗真实视觉 API；格式解析和官方 plugin 路径本身是真实的。
+
+## 52. 迭代 44（2026-07-16）：Grok 中转流式读取超时与生图能力边界实测
+
+### 52.1 `MidStreamFallbackError` 的根因不是 LangGraph 总 run 超时
+
+失败 run `run_0c19cdd93ec7` 使用 custom `grok-4.5` 执行真实工具验证，总共运行约 3 分 26 秒后失败；
+仓库存下的原始错误是 LiteLLM `MidStreamFallbackError`，内层为 OpenAI-compatible transport 的
+`Timeout on reading data from socket`。逐代码核对发现 `chat/runtime/models.py` 给每个
+`ChatLiteLLM` 硬编码 `request_timeout=30`。这个值进入 langchain-litellm `_client_params.timeout`，再进入
+LiteLLM `completion/acompletion`；对流式响应而言，首块之前或任意两个网络读取之间连续 30 秒无数据就会
+触发读取超时。LiteLLM 已经发出部分 chunk 时会把底层连接异常包装为 `MidStreamFallbackError`，但 SlotFlow
+没有第二个等价模型可安全续写；在工具循环中盲目重放还可能重复远程/本地副作用。
+
+当前修复保持 `max_retries=2` 和现有错误传播不变，不在 SlotFlow 层重放已经开始的流；只把过短的传输窗口
+改为 `SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS`，默认 300 秒。该变量在每次构建模型时通过
+`load_positive_int_from_env` 读取，所以适用于 native provider 与 custom relay，且空值回退默认值、零值/
+负数/非整数在请求发出前明确报配置错误。300 秒是单次模型请求的传输等待上限，不是整个 LangGraph run、
+工具执行或浏览器 SSE 连接的总时限。
+
+### 52.2 `.env` 中 Grok 中转的真实网络对照
+
+测试只在进程内读取 `backend/.env`，没有打印或写入 API key。绕过 SlotFlow、直接请求配置的 custom relay：
+
+- `GET /models` 成功并返回 15 个模型，既有 `grok-4.5`，也有 `grok-imagine`、
+  `grok-imagine-image`、`grok-imagine-image-quality` 等独立图片模型；
+- `grok-4.5` 非流式 Chat Completions 约 3.11 秒返回预期文本；流式探针约 14.71 秒收到首事件，完整请求
+  约 19.21 秒，证明中转聊天链路可用，也证明 30 秒静默窗口对拥塞或复杂推理余量很小；
+- 直接让 `grok-4.5` 聊天生成图片时，它明确返回自己只有文本能力，没有图片数据或 URL；
+- `POST /images/generations` 携带 `size` 时中转返回 400 `Argument not supported: size`；按中转接受的最小
+  payload 去掉 `size` 后，对 `grok-4.5` 和三个 `grok-imagine*` 模型均在 SlotFlow 之外直接得到中转/CDN
+  的 502，另一次最小请求等待约 125 秒后得到 524；`POST /responses` + `image_generation` tool 也只返回
+  reasoning/message，没有 image generation call。
+
+因此本次“选 Grok 4.5 却不能生图”不是聊天投影把已有图片丢掉：当前中转的聊天模型没有返回图片，独立
+图片端点又在绕过 SlotFlow 时已经失败。原 Grok 产品界面的生图能力来自产品侧工具/独立图片模型，不能由
+`grok-4.5` Chat Completions 名称推导。SlotFlow 当前公开协议仍是聊天文本/工具/文件产物，也没有把
+`/images/generations` 暴露成 agent tool；在中转图片端点恢复并稳定给出 URL/base64 之前，新增 UI 渲染或
+图片工具只会把上游 502/524 包装成另一层失败，因此本轮不伪造“已支持生图”。
+
+### 52.3 回归保护
+
+`tests/test_runtime.py` 新增三组模型边界契约：默认 timeout 为 300 秒、环境变量可覆盖、无效值必须拒绝。
+`backend/.env_example` 与 `AGENTS.md` 同步记录变量和 30 秒回归风险。model catalog 的两个 discovery
+测试现在显式清除宿主 `CUSTOM_MODELS`，避免真实 `.env` 把“自动发现”场景偷换成“手工列表”场景。真实回归
+继续通过 SlotFlow 的
+`grok-4.5` 运行验证，而图片端点状态作为中转站外部依赖单独报告，不混同为 SlotFlow 测试通过。
+
+### 52.4 TaskGroup 外壳不能覆盖真正错误
+
+LangGraph v3 typed projections/AnyIO 在并发子流失败时可能向上传播嵌套 `ExceptionGroup`。此前
+`chat/sse.py::make_error_event` 直接取最外层 `type(error).__name__` 与 `str(error)`，所以前端和 runs 表只能
+看到 `unhandled errors in a TaskGroup (1 sub-exception)`；本机同一 thread 的多次 DeepSeek 失败都在约
+31 秒处留下这个外壳，与旧 30 秒模型 transport timeout 的时间特征一致，但真正 leaf 已被隐藏，无法证明。
+
+现在 SSE 边界递归遍历 exception group，选择第一个带消息的 leaf，再用它构造 `run.error.name/message`；
+普通异常保持原样，traceback 不发给浏览器，`asyncio.CancelledError` 仍不被 `iter_business_events` 的
+`except Exception` 吞掉。`tests/test_sse.py` 用两层嵌套 group 保护 `TimeoutError("socket read timeout")`
+能够到达前端和 run 持久化边界。修复后若上游仍失败，用户会看到实际 LiteLLM/provider 异常，而不是并发框架
+包装文本。
+### 52.5 真正的 31 秒 TaskGroup 根因：失效的可选 MCP 阻断所有模型
+
+单独调用 `load_runtime_config_from_env → build_mcp_tool_provider → ensure_mcp_tools_loaded`，不创建模型也不经过
+SSE，稳定在 31.27 秒复现。实际 active config 有两个服务器：受保护的 stateful `playwright` stdio，以及用户
+配置中启用但没有服务进程的 stateless `test-mcp`（`streamable_http`，`localhost:9999/test-sse`）。完整异常树为
+`ExceptionGroup → httpx.ConnectTimeout('') → httpcore.ConnectTimeout → TimeoutError → CancelledError(deadline
+exceeded)`；30 秒来自 langchain-mcp-adapters/MCP streamable HTTP 默认 connect/operation timeout，不是
+LiteLLM。旧 loader 先成功打开 Playwright，再加载 `test-mcp`，后者失败后关闭整个共享 stack 并让 graph 在
+创建模型前终止，所以 DeepSeek/Grok 都表现为约 31 秒失败。
+
+`MultiServerMcpToolProvider.aload_tools()` 现在给每个 server 建独立 client，并给每个 stateful server 建独立
+`AsyncExitStack`：成功 server 的 tools/session 保留；普通 `Exception` 只记录经过脱敏的
+`load_errors[name] = "<LeafType>"`、写 warning 并继续（不把可能含 URL/凭据的异常正文写日志）；外层
+cancellation/其他 `BaseException`
+仍关闭所有已成功 stack 后传播。这样一个可选 HTTP MCP 下线不会让聊天和健康 Playwright 工具一起失效。
+`tests/test_playwright_mcp.py` 覆盖“Playwright session 成功 + 后续 optional server 抛两层 TaskGroup/空
+TimeoutError”场景，验证工具仍可调用、失败摘要为 `TimeoutError`、最终 close 正常。SSE 对空 leaf message
+也回退到异常类型，不再把空字符串保存到 runs 表。
+
+本机持久配置中的失效 `test-mcp` 已通过 `/api/mcp/servers/test-mcp` 禁用，因此当前 run 不再额外等待 30 秒；
+即使以后另一个可选 MCP 暂时不可用，新的 per-server degradation 仍会让模型继续运行。
+### 52.6 最终真机回归
+
+禁用失效 `test-mcp` 后再次走真实 provider preload：1.39 秒完成并加载 24 个 Playwright 工具。随后在 Codex
+内置浏览器打开 `http://localhost:3000/`，从模型菜单选择 `Grok 4.5`（Pro + Thinking），发送“请只回复
+SLOT_GROK_OK，不要调用工具。”；页面正常显示 reasoning 步骤和最终 `SLOT_GROK_OK`，数据库 run
+`run_71e8f94dee00` 在约 11.55 秒内变为 `completed` 且 `error=null`。这条验证覆盖前端发送、SSE、每 run
+MCP preload、LangGraph、custom LiteLLM transport、消息持久化和前端渲染，不再出现 TaskGroup 或 30 秒读取
+超时。
+
+最终 `make verify` 通过：backend 409 passed / 1 skipped，frontend Vitest 2 passed，TypeScript、Knip 和
+Next.js production build 全绿；仅保留既有 Starlette/httpx 与 LangGraph v3 beta warning。
+
+## 53. 迭代 45（2026-07-16）：429 请求放大、确定性标题与开发热重载隔离
+
+### 53.1 LangSmith 证明 429 来自中转配额，但 SlotFlow 曾额外消耗配额
+
+官方 LangSmith 配置已真实连通（project `SlotFlow`），可以读取 root graph、child LLM/tool run、错误、metadata 与完整调用时序。最新“只调用一个 Subagent 工具试试”的成功 root graph 运行约 31.7 秒；主 Agent/Subagent 工作流本身完成了 5 次必要 LLM 调用。root 完成后，旧配置又几乎同时发起两次与用户答案无关的调用：
+
+- proactive long-term memory extractor，run `019f6b2f-52a7-7d81-b6b6-99182889009c`，system prompt 以 `You extract DURABLE long-term facts...` 开头；
+- `title_agent`，run `019f6b2f-52b3-7f60-8989-b14f84440cb3`。
+
+两者都使用本轮所选 custom relay 模型并返回真实 429。稍后的另一条 trace 在 28 秒内进行 5 次前台 `ChatLiteLLM` 调用，第 5 次直接 429，与中转站很低的 requests-per-minute 配额一致。因此 429 本身由上游限流产生，不能在 SlotFlow 内“修好”；但 post-turn title + memory 两次隐藏请求会耗尽同一个配额桶，使下一次必要的 Agent/Subagent 调用更容易失败。不能用 DeepSeek 或另一家模型来搬运这些请求：那只会增加新的凭据、可用性、费用和行为不确定性，也违反“用户所选模型是唯一模型来源”的边界。
+
+### 53.2 当前严格配额策略：本地确定性行为，不新增模型依赖
+
+`title_generation.maybe_generate_thread_title()` 在 `SLOTFLOW_TITLE_MODEL_ENABLED=false` 时，直接调用 `fallback_title()`：压缩第一条用户消息的空白并截断到 60 字符，不执行 `create_chat_model()`。仓库默认值在环境变量缺失时本来就是关闭；本轮把 `.env_example` 也改为 `false`，使新环境默认不会为了标题多发一次模型请求。专用标题模型仍只是旧功能的显式 opt-in 配置能力，不是当前运行路径；本机 `.env` 不再保留 DeepSeek 标题覆盖，避免误启用。`tests/test_title_generation.py` 将 `create_chat_model` 替换为一调用就失败的 guard，直接证明关闭时只走本地 fallback。
+
+本机严格-RPM profile 同时设定 `SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION=false`。这只关闭每轮结束后的主动抽取 LLM 调用，不改变主 Agent/Subagent 的模型选择，也不引入单独的 memory model；用户显式调用 `memory_save` 的工具能力和已有长期记忆读取保持原有语义。对于配额宽松且明确需要主动抽取的部署，原功能仍可显式开启；`.env_example` 标注其每轮多一次请求的成本。Ultra/Subagent 工作流自身需要的多轮前台推理不能在不改变 agent 语义的情况下合并，因此极低 RPM 中转仍可能对第 5 次必要调用返回 429，这属于保留的上游边界。
+
+### 53.3 `.slotflow/workspace` 不得触发 Uvicorn 重启
+
+旧 `make dev` 使用裸 `uvicorn --reload`，WatchFiles 会递归观察整个 `backend`。工具在 `.slotflow/workspace/.sandbox/palindrome_test.py` 写入正常运行产物时，终端明确打印 `WatchFiles detected changes ... Reloading`，随后 Uvicorn shutdown；这会截断正在进行的 SSE/工具流、让 LangSmith trace 停留 pending，并使用户重试，进一步放大请求量。
+
+`Makefile` 现在使用 `--reload --reload-dir app`，只观察后端源码。`tests/test_distribution_contract.py` 固定该命令并禁止把 `.slotflow` 配成 reload dir。运行产物、上传文件与 sandbox 代码变化不再重启服务，编辑 `backend/app` 仍保留开发热重载。
+
+### 53.4 Pregel v3 警告是噪声，不是 429 根因
+
+SlotFlow 有意消费 LangGraph v3 typed projection stream；`The v3 streaming protocol on Pregel is experimental.` 是依赖库对每个 run 重复发出的 beta 提示，不代表请求失败，也不触发 LiteLLM 重试。`LangGraphEventAgentAdapter` 只在调用 `graph.astream_events(version="v3")` 的边界用 `warnings.catch_warnings()` 忽略该完整消息和 `LangChainBetaWarning` 类别；没有全局关闭 beta/UserWarning。adapter 回归测试同时发出这条 beta warning 和一条无关 UserWarning，验证前者消失而后者仍可观察。
+
+### 53.5 修复后的真机与 LangSmith 回归
+
+重启 `make dev` 后，Uvicorn 明确报告只观察 `['/home/xf/code/SlotFlow/backend/app']`，reloader PID `1386251`、worker PID `1386365`。在 `backend/.slotflow/workspace/.sandbox/` 创建并删除临时运行产物，等待 WatchFiles 后 worker PID 仍为 `1386365`，stderr 没有 `WatchFiles detected changes`、`Reloading` 或 `Shutting down`，证明 sandbox 写入不再中断服务。
+
+随后通过 Codex 内置浏览器在 SlotFlow 新建 `glm-5.2`（Pro + Thinking）对话，发送“只回复 SLOTFLOW_POSTRUN_OK，不要调用工具。”。页面返回精确文本；数据库 run `run_4ab91cdc6d24`（thread `thread_4d5e95094405`）约 6.35 秒后为 `completed`、`error=null`，thread title 是第一条用户消息的本地 fallback。LangSmith root trace `019f6ba6-bb48-7cf2-a94b-7b4019adf443` 为 success，完整 trace 只有 11 个 runs，其中只有 1 个 LLM run：`ChatLiteLLM` / `glm-5.2`，约 5.08 秒成功；不存在 `title_agent`、proactive memory extractor 或紧随其后的额外 root trace。这直接证明严格-RPM 本机配置没有重复请求，也没有借用 DeepSeek/其他供应商。
+
+最终 `make verify` 全绿：backend 411 passed / 1 skipped，frontend Vitest 2 passed，TypeScript、Knip 与 Next.js production build 通过。warning summary 只剩既有 Starlette/httpx deprecation；重复 Pregel v3 beta warning 已消失。
+## 54. 迭代 46（2026-07-17）：Context Epoch、渐进式工具空间与本地缓存指标
+
+### 54.1 真实输入构成与外部实现调研
+
+最新 `glm-5.2` LangSmith 调用实测为 107,372 input tokens / 166 output tokens；137 条内部消息由 1 System、10 Human、61 AI、65 Tool 构成。ToolMessage 内容约 153,605 字符，AIMessage 内容约 102,561 字符；54 个完整工具 Schema 约 30,617 字符。因此先治理历史 AI/Tool 消息，再治理重复 Schema。Codex/Pi/DeerFlow 的公开代码与 2026-07-17 检查结果单独保存在 `docs/research/agent-context-tool-disclosure-2026-07-17.md`，其中记录精确来源、原生 deferred 与 fallback 的差异以及不能把公开仓库推断为私有产品实现的边界。
+
+### 54.2 Context window 来源和 epoch 语义
+
+`runtime/models.py::resolve_model_context_budget` 完全本地解析：per-model `SLOTFLOW_MODEL_CONTEXT_WINDOWS_JSON` 优先；随后读取 LiteLLM 随包 model metadata；未知 custom model 使用 `SLOTFLOW_DEFAULT_CONTEXT_WINDOW_TOKENS`（默认 128000）并标记 source=default。`SLOTFLOW_CONTEXT_RESERVE_TOKENS`（默认 16384）从 window 中扣除，得到实际输入触发预算；reserve 不得大于等于 window。builder 只把现有 summarization trigger 向下限制到该预算，不把固定 600000 当作所有模型的真实窗口。
+
+摘要不再用 `RemoveMessage` 改写 canonical `messages`。summarization node 只更新 `llm_input_messages` 和 `context_epoch={source_message_count, source_signature, messages}`；`pre_model` 验证 canonical prefix 签名未变化后复用冻结 epoch，并仅追加其后的新消息。回滚/编辑导致前缀不匹配时 epoch 失效并回到 canonical 投影。这样 checkpoint 保留完整 Tool/AI 历史，同一 epoch 不反复改写缓存前缀。
+
+`context_archive_search/context_archive_read` 使用 LangGraph `InjectedState`，只能读取当前 thread 运行时 canonical state，字段不进入模型工具 Schema；结果有 limit/offset/max_chars 上限。模型不获得 SQLite 路径或 SQL 权限。System Prompt 稳定提醒：摘要缺少旧细节时使用 Archive 工具，不得猜测。当前 Archive 的 durable source 是 canonical checkpointer state，而不是让模型解析 `checkpoints.sqlite3`；独立业务 Archive 表仍属于后续可迁移存储实现。
+
+### 54.3 分层延迟工具空间
+
+`tool_spaces.py` 把非核心工具分为 workspace、sandbox、browser、network、documents、extensions、memory。初始模型只绑定核心工具和存在的 `<space>_tools` 加载器；加载器 description 稳定列出该空间的精确工具名与一行能力，调用参数使用 exact names，不依赖严格关键词。加载器通过 LangGraph `Command` 更新 `promoted_tool_names` 并追加 ToolMessage；下一次 agent 调用根据 state 动态 `bind_tools(core + loaders + promoted)`。promotion 在 epoch 内只增不减。ToolNode 虽保留完整执行对象，但 wrapper 对未激活调用返回 `tool_not_activated`，因此模型不能靠幻觉绕过披露。
+
+Browser MCP 按 `browser_*` 进入 browser 空间；带 MCP metadata 的其他未知扩展进入 extensions 空间。完整 MCP session 生命周期仍是 per-run，工具 promotion 不跨 run 复用 session-bound callable。Skills 继续使用既有 `top_level_skills()`：System Prompt 只列顶层 Skill，nested member Skill 不单独出现；Skill 内容读取是资源渐进披露，与 function Schema promotion 是两条独立边界。
+
+Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browser/network/documents/extensions/memory 空间；`all`、`*`、未知空间和四个以上空间均 fail-closed。未显式提供时按 profile 给最小默认集合。Child graph 继续关闭 todo、clarification/HITL、memory middleware、summarization 和递归 subagent，因此父模型不能把全部工具偷渡给 child。
+
+### 54.4 本地 usage/cache 指标
+
+每个 `RuntimeBackedAgentAdapter` run 创建 `RunUsageCollector` 并经 RunnableConfig callbacks 传给 LangGraph。collector 只保存 call id、model/provider、状态、latency/TTFT、message/tool/schema 数量及 token usage；不保存 prompt、tool 参数或输出。它兼容 LangChain normalized usage、OpenAI `prompt_tokens_details.cached_tokens` 与 Anthropic `cache_read/cache_creation` 字段。字段缺失时 `cache_status=unknown`，不会误记为 miss。adapter 在 `run.finished` 前发 `run.usage`；ChatRepository 把 JSON 写到独立 `run_metrics` 表，避免依赖 LangSmith 和已有 runs 表迁移。
+
+### 54.5 重试边界
+
+`ChatLiteLLM` 的同步/异步 completion 建连阶段只对 Timeout/APIError/APIConnectionError/RateLimitError 使用 Tenacity exponential retry；默认五次重试（首次之外），min/max/multiplier 均由 `.env` 控制。stream iterator 已开始后的异常不经过该 decorator，因此不会重放部分输出。
+
+`agent` 对 provider context-overflow 文本（中英文 maximum-context/prompt-too-long 标记，含 ExceptionGroup）单独处理：canonical messages 不变，每次重试只对 model-facing input 使用更小、经 dangling-tool repair 的尾部投影，并按 `SLOTFLOW_CONTEXT_OVERFLOW_RETRY_DELAY_SECONDS * attempt` 等待；默认最多五次。认证、权限、普通 BadRequest、取消、已执行工具和 mid-stream failure 不进入整轮重试。该 emergency path 是正常 model-aware summarization 未能提前避免 overflow 时的最后防线。
+### 54.6 真机减量与指标验证
+
+热重载完成后通过本机 `/api/chat` 使用真实 custom `glm-5.2`（Flash）运行最小请求，thread `thread_d8879de7acb6`、run `run_73cb9d60a376` 正常 `run.finished` 且无 `run.error`。SSE 在 finished 前发出 `run.usage`；SQLite `run_metrics` 持久化成功。该真实调用从改造前的 54 tools / 约 30,617 Schema 字符下降为 11 tools / 8,885 Schema 字符；usage 为 input 4,848、output 301、total 5,149，TTFT 2,561ms、latency 6,811ms。中转未返回 cached token 明细，因此正确记录 `cache_status=unknown`、`cached_input_tokens=null`,没有伪造 miss。最终 `make verify` 全绿：backend 420 passed / 1 skipped，frontend Vitest、TypeScript、Knip 和 Next.js build 通过。
+
+### 54.7 后续修复（2026-07-18）：`promoted_tool_names` 并发写入根因
+
+**症状**：前端浏览器报 `At key 'promoted_tool_names': Can receive only one value per step. Use an Annotated key to handle multiple values.`(LangGraph `INVALID_CONCURRENT_GRAPH_UPDATE`)。
+
+**根因**：渐进式工具空间披露落地时,`SlotFlowAgentState.promoted_tool_names` 是一个**无 reducer** 的普通 last-write 通道(`NotRequired[list[str] | None]`)。但模型完全可以在**同一个模型步**里一次发出多个 `*_tools` 加载器调用(并行 tool_calls);ToolNode 会并发执行它们,每个 `load_space_tools` 都返回 `Command(update={"promoted_tool_names": ...})`。同一步对同一 key 的第二次写入没有归并规则,LangGraph 直接拒绝。这不是前端 bug,而是 state schema 缺 reducer——是 §54 工具空间特性自带的并发缺陷,只是要多空间同时激活才触发。
+
+**修复**:给该通道加**保序去重的并集 reducer** `merge_promoted_tool_names`,字段改为 `NotRequired[Annotated[list[str] | None, merge_promoted_tool_names]]`。并集与工具披露的语义天然一致——一个 context epoch 内只增不减,且对重复激活幂等;并发写入被折叠成有序并集,已激活项不会重复。加载器本身无需改动(它返回 `[*current, *added]`,reducer 会去重)。
+
+**验证**:用 fan-out(`Send` 到两个并发节点各写 `promoted_tool_names`)复现,修复前抛 `INVALID_CONCURRENT_GRAPH_UPDATE`,修复后合并为有序并集。回归测试 `test_promoted_tool_names_reducer_is_ordered_union` 与 `test_concurrent_tool_space_promotion_does_not_raise_invalid_update` 固定该行为。
+
+**调试手段沉淀**:本次同时把 LangSmith 链路审查方法写进 `AGENTS.md`(见 "Debugging with LangSmith")——LangGraph 图的每个节点/模型调用/工具调用/interrupt 都是可展开的 span,这类"某节点并发写冲突"能被精确定位到触发它的 span,是排查链路问题的首选。
+
+### 54.8 后续修复（2026-07-18 下午）：grok 中转"工具全部 tool_not_activated"三段根因
+
+用户报告主模型(custom 中转 `grok-4.5`)所有工具调用都返回 `tool_not_activated`——**包括核心工具**——且一次压缩后继续对话丢失全部上下文。用今天实际对话 + LangSmith + 真机 grok/glm 排查,定位到三个独立根因,均已修复并真机验证。
+
+**根因 A（真正让 grok 全盘失效的）：中转流式装配丢失 tool_call 名字。** 在真实 harness 流里,`agent` 节点 `ainvoke` 返回的 AIMessage,其 `additional_kwargs["tool_calls"][j]["function"]["name"]` 是正确的(如 `web_search`),但 LangChain 解析出的 `message.tool_calls[i]["name"]` 却是**空字符串**(每个 chunk 的 `index` 都是 0)。空名字导致 ToolNode 无法分派——任何工具(核心的也一样)都失败。**这不是渐进式工具空间的问题**,gate 只是把它显示成 `tool_not_activated`。孤立 `ainvoke`/`astream` 复现不出(简单 prompt 名字正常),只在真实流里必现。修复:`litellm_provider.py::repair_streamed_tool_call_names` 按 `id`(全缺失且数量一致时退化为按位置)从 `additional_kwargs` 回填空名字;`graph.py` 的 `agent`/`agent_sync` 在拿到 response 后调用它。子代理走同一 graph,自动受益。回归 `tests/test_tool_call_name_repair.py`;真机 grok 建 `ok.md` 成功、`na=0`。
+
+**根因 B：渐进式工具空间把日常工具全 gate 在 loader 后。** 原设计 gate 了所有非核心工具(workspace/artifact/web/sandbox/memory/documents),模型必须先调用 `*_tools` loader 才能用,弱/中转模型很少这么做。改为**默认只 gate `browser,extensions`**(schema 最臃肿、最少用),其余日常工具默认进入 `initial_names`、turn-1 直接可调用;`SLOTFLOW_TOOL_SPACES_GATED` 可调。loader→promote→可调用链本身正确(确定性测试 `test_gated_space_becomes_callable_after_loader_promotes_it` 固定)。`tool_spaces.py::assemble_tool_spaces(gated_spaces=...)` + `builder.py` 读 env + prompt 只列被 gate 的空间。
+
+**根因 C：context epoch 每轮被重置 → 反复摘要 → keep 窗口滑走旧消息。** epoch 的 `source_signature/source_message_count` 在 `make_summarization_node` 用**原始** `state["messages"]` 计算,而 `pre_model` 用 `repair_dangling_tool_calls(messages)` 复算——历史里只要有 dangling tool call,两者视图不同 → 签名必失配 → epoch 每轮重置 → summarization 每轮重触发 → 固定"keep 最近 20 条"窗口滑动,把更早的用户轮次(如"A")挤掉。修复:两处都用 repaired 视图;投影逻辑抽成纯函数 `graph.py::project_with_context_epoch` 并测试(`test_context_epoch_is_reused_across_appended_turns_not_reset` / `..._resets_when_prefix_signature_changes`)。
+
+**旁证:issue3(注释 DeepSeek 仍可用)非代码 bug**——磁盘 `.env` 第 12 行 `DEEPSEEK_API_KEY=` 当时并未真正注释,进程据此加载;真正注释保存后完整 `make kill && make dev` 即消失。
+
+### 54.9 后续修复（2026-07-19）：grok 思考流反向灌回 + 压缩"只加不减"（入站清洗根因）
+
+用户用 LangSmith 复查 `thread_4f22351440e3` 后报告两点:①支持深度思考的模型(grok-4.5 经 ChatLiteLLM 中转)多轮后 Input Tokens 不可逆膨胀(第四轮飙到 12.2K);②`SlotFlowSummarizationMiddleware` 节点确实跑了、也算出了紧凑摘要,但紧随其后的 `agent` 输入不但没变小、反而更大。并指出这次问题在**接收模型回复**层面(出站方向此前已按 langchain-litellm#222 处理过)。真机 grok-4.5 复现,定位到**同一个入站根因**,已修复并真机 + 直测验证。
+
+**根因:grok 的思考流以逐 token 的 `{"type":"thinking",...}` 块列表塞进 `AIMessage.content`(实测单条回复 = `list[47 blocks]`),外加全文进 `additional_kwargs["reasoning_content"]`。** 出站 `_create_message_dicts` 早已把块列表折叠成纯字符串(所以**发给中转的 payload 是干净的**),但 langchain-litellm 把**原始**块列表留在消息对象上——而被 checkpointer 持久化、被 `pre_model` 每轮重新投影的正是这个原始对象。于是它污染 `llm_input_messages`、触发摘要的 token 计数、LangSmith 记录的输入;更关键——`SummarizationMiddleware` 逐字保留最近 N 条消息,这些消息各自还拖着几十个 thinking 块 → 摘要虽加了、"最近保留区"却从没瘦下来(用户看到的"只加不减")。同时 `reasoning_content` 全文按既有出站契约会被回灌给模型(§reasoning 契约测试固定),长思考多轮累积即 backwash。
+
+**修复(纯入站,不动出站契约):`litellm_provider.py::sanitize_reasoning_message`**——在 `agent`/`agent_sync` 拿到 response 后(紧接 `repair_streamed_tool_call_names`)调用:把 `content` 的思考块列表用同一套 `_without_reasoning_metadata_blocks` 折叠成答案字符串,并从持久化对象上丢弃 `reasoning_content`(思考文本供 UI 的 reasoning 框是**从实时流**单独捕获进 `MessageRecord.metadata` 的,checkpointer 里根本不需要;把 CoT 每轮回喂模型纯属浪费——OpenAI 系 reasoner 会重新推理,DeepSeek reasoner 更是禁止回传)。**签名 `thinking_blocks` 刻意保留**(Anthropic/Bedrock 扩展思考的工具循环续接依赖它)。出站 `_create_message_dicts` 与既有 reasoning 契约测试一字未改。
+
+**验证(真机 grok-4.5):**
+- 入站清洗直测:单条真实回复 `content` 从 `list[47 blocks]/3758B` → `str/1455B`,`reasoning_content`(589B)丢弃,答案完整保留。
+- 5 轮真机(trigger=1200、keep=4、带 MemorySaver):**每个 agent 调用 `leaked_thinking_blocks=0`**(修复前 turn≥3 会累积上一轮的成百块);epoch 从 turn3 起被复用(`source_count` 5→7→9 递增=只追加、`epoch_msgs` 恒为 5=压实前缀不再膨胀);多次摘要后最终仍准确复述 turn1 的 `ORION-7/张伟/350 万`(retention 全 True)。
+- 回归 `tests/test_provider_reasoning_contract.py`(新增 3 个 sanitize 测试)+ 全量 `uv run pytest -q -k "not live"` = 434 passed。
+

@@ -312,6 +312,55 @@ def test_custom_provider_uses_openai_transport_without_native_controls(
     assert kwargs["model_kwargs"] == {"_skip_responses_api_bridge": True}
 
 
+def test_model_request_timeout_defaults_to_five_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUSTOM_API_KEY", "key")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+    monkeypatch.delenv("SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS", raising=False)
+
+    kwargs = build_litellm_model_kwargs(
+        model_name="grok-4.5",
+        provider="custom",
+    )
+
+    assert kwargs["request_timeout"] == 300
+
+
+def test_model_request_timeout_can_be_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUSTOM_API_KEY", "key")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+    monkeypatch.setenv("SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS", "480")
+
+    kwargs = build_litellm_model_kwargs(
+        model_name="grok-4.5",
+        provider="custom",
+    )
+
+    assert kwargs["request_timeout"] == 480
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
+def test_model_request_timeout_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("CUSTOM_API_KEY", "key")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "http://relay.local/v1")
+    monkeypatch.setenv("SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(
+        ValueError,
+        match="SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS must be a positive integer",
+    ):
+        build_litellm_model_kwargs(
+            model_name="grok-4.5",
+            provider="custom",
+        )
+
+
 def test_resolve_model_provider_prefers_catalog_provenance() -> None:
     from app.chat.runtime.models import infer_model_provider, resolve_model_provider
 
@@ -479,6 +528,9 @@ def test_load_runtime_config_from_env_reads_middleware_config(monkeypatch: pytes
 
     monkeypatch.setenv("SLOTFLOW_RUNTIME_SUMMARY_MIDDLEWARE", "false")
     monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_MIDDLEWARE", "false")
+    # pytest-dotenv may load the developer's ignored backend/.env. This test asserts dataclass
+    # defaults for every flag it does not set, so isolate the strict-RPM local override.
+    monkeypatch.delenv("SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION", raising=False)
 
     config = load_runtime_config_from_env()
 

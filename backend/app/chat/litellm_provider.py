@@ -6,6 +6,8 @@ import os
 from functools import lru_cache
 from typing import Any
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 # SlotFlow owns environment loading. LiteLLM must neither hydrate backend/.env nor
 # refresh its model map from GitHub; package upgrades update the bundled catalog.
 os.environ["LITELLM_MODE"] = "PRODUCTION"
@@ -18,7 +20,7 @@ from langchain_litellm.chat_models import litellm as _langchain_litellm_module  
 from litellm.types.router import LiteLLM_Params  # noqa: E402
 
 
-CUSTOM_RELAY_USER_AGENT = os.environ.get("SLOTFLOW_RELAY_USER_AGENT") or "SlotFlow/1.0"
+CUSTOM_RELAY_USER_AGENT = os.environ.get("SLOTFLOW_RELAY_USER_AGENT") or "claude-code/2.1.214"
 
 # Reasoning metadata must never travel as assistant *content*: DeepSeek rejects the
 # block types outright and other providers would re-read their own reasoning as
@@ -192,6 +194,82 @@ def _consolidated_thinking_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
     return []
 
 
+def repair_streamed_tool_call_names(message: BaseMessage) -> BaseMessage:
+    """Backfill tool-call names lost by streamed chunk assembly from the raw payload.
+
+    Some OpenAI-compatible relays (observed live: grok-4.5 via a custom relay) stream tool-call
+    deltas such that langchain's parsed ``message.tool_calls[i]["name"]`` comes out EMPTY while the
+    raw ``additional_kwargs["tool_calls"][j]["function"]["name"]`` still carries the real name. An
+    empty name makes the ToolNode unable to dispatch the call — it fails closed and every tool
+    (core ones too) surfaces as ``tool_not_activated``/unknown. Recover the name by matching call
+    ``id`` (with a strict positional fallback only when every name is missing and counts line up),
+    so the model's intended tool actually runs. No-op when names are already present.
+    """
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls:
+        return message
+    raw = message.additional_kwargs.get("tool_calls") if isinstance(message, BaseMessage) else None
+    raw = raw if isinstance(raw, list) else []
+    name_by_id: dict[str, str] = {}
+    names_in_order: list[str] = []
+    for entry in raw:
+        function = entry.get("function") if isinstance(entry, dict) else None
+        raw_name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(raw_name, str) and raw_name:
+            names_in_order.append(raw_name)
+            entry_id = entry.get("id")
+            if isinstance(entry_id, str) and entry_id:
+                name_by_id[entry_id] = raw_name
+    if not names_in_order:
+        return message
+    missing = [tool_call for tool_call in tool_calls if not tool_call.get("name")]
+    allow_positional = len(missing) == len(names_in_order) == len(tool_calls)
+    for position, tool_call in enumerate(tool_calls):
+        if tool_call.get("name"):
+            continue
+        recovered = name_by_id.get(tool_call.get("id"))
+        if not recovered and allow_positional:
+            recovered = names_in_order[position]
+        if recovered:
+            tool_call["name"] = recovered
+    return message
+
+
+def sanitize_reasoning_message(message: BaseMessage) -> BaseMessage:
+    """Collapse streamed reasoning out of the PERSISTED assistant message (inbound boundary).
+
+    Reasoning models streamed through a relay (observed live: grok-4.5 via a custom relay) return
+    their chain-of-thought as a list of hundreds of per-token ``{"type": "thinking", ...}`` blocks in
+    ``content`` plus the full text in ``additional_kwargs["reasoning_content"]``. langchain-litellm
+    keeps both on the AIMessage. The OUTBOUND serializer (``_create_message_dicts``) already strips the
+    block list to a plain string for the wire, so the provider payload is fine — but the raw message is
+    what gets checkpointed and re-projected every turn. Left untouched it inflates ``llm_input_messages``,
+    the token count that fires summarization, LangSmith's recorded input, and — because summarization
+    keeps the recent messages verbatim — the compacted input never actually shrinks (the reported
+    "summary added but nothing was pruned").
+
+    Normalizing here, once, at the point the message enters state fixes all of those at the root:
+
+    * ``content`` block list → the answer string (via the same collapse used outbound), so nothing but
+      answer text is persisted;
+    * ``reasoning_content`` is dropped from the checkpointed carrier — re-feeding chain-of-thought to the
+      model every turn is pure backwash (OpenAI-style reasoners re-reason; DeepSeek reasoner must not
+      receive it), and the UI's reasoning box is captured live from the stream, not from this message.
+
+    Signed ``thinking_blocks`` are deliberately preserved: Anthropic/Bedrock extended-thinking tool loops
+    require the signed block on the continuation request. No-op for plain string content without reasoning.
+    """
+
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        message.content = _without_reasoning_metadata_blocks(content)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        additional_kwargs.pop("reasoning_content", None)
+    return message
+
+
 class ChatLiteLLM(_ChatLiteLLM):
     """ChatLiteLLM with lossless reasoning-state handling at the request boundary.
 
@@ -206,6 +284,50 @@ class ChatLiteLLM(_ChatLiteLLM):
     echoing back what the provider itself produced, with no per-provider
     branches.
     """
+
+    retry_min_wait_seconds: int = 4
+    retry_max_wait_seconds: int = 30
+    retry_multiplier_seconds: int = 1
+
+    def _slotflow_retry_decorator(self):
+        transient = (
+            litellm.Timeout,
+            litellm.APIError,
+            litellm.APIConnectionError,
+            litellm.RateLimitError,
+        )
+        return retry(
+            retry=retry_if_exception_type(transient),
+            stop=stop_after_attempt(self.max_retries + 1),
+            wait=wait_exponential(
+                multiplier=self.retry_multiplier_seconds,
+                min=self.retry_min_wait_seconds,
+                max=self.retry_max_wait_seconds,
+            ),
+            reraise=True,
+        )
+
+    def completion_with_retry(self, run_manager=None, **kwargs: Any) -> Any:
+        """Retry only transient pre-response failures with configurable backoff."""
+
+        del run_manager
+
+        @self._slotflow_retry_decorator()
+        def invoke(**call_kwargs: Any) -> Any:
+            return self.client.completion(**call_kwargs)
+
+        return invoke(**kwargs)
+
+    async def acompletion_with_retry(self, run_manager=None, **kwargs: Any) -> Any:
+        """Async counterpart; stream-iteration failures are intentionally not replayed."""
+
+        del run_manager
+
+        @self._slotflow_retry_decorator()
+        async def invoke(**call_kwargs: Any) -> Any:
+            return await self.client.acompletion(**call_kwargs)
+
+        return await invoke(**kwargs)
 
     def _create_message_dicts(
         self,

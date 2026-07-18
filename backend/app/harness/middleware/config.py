@@ -28,3 +28,5 @@ class SlotFlowMiddlewareConfig:
     todo_enabled: bool = True
     subagent_limit_enabled: bool = True
     subagent_max_concurrent: int = 3
+    context_overflow_max_retries: int = 5
+    context_overflow_retry_delay_seconds: int = 2

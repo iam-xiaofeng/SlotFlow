@@ -16,7 +16,9 @@ edge）。链路严格按 `docs/refactor-plan.md` §2 拓扑运行：
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig, RunnableLambda
@@ -30,6 +32,10 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
+from app.chat.litellm_provider import (
+    repair_streamed_tool_call_names,
+    sanitize_reasoning_message,
+)
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -73,7 +79,7 @@ from app.harness.steps.tool_safety import (
     build_unknown_tool_error_message,
 )
 from app.harness.steps.uploads import uploads_update
-from app.harness.utils import latest_user_message_text
+from app.harness.utils import latest_user_message_text, message_content_text, message_role
 
 if TYPE_CHECKING:
     from langgraph.types import Checkpointer
@@ -101,6 +107,7 @@ class _GraphInputs:
         skills_config_store: Any,
         config_flags: Any,
         max_results_memories: int,
+        initial_tool_names: frozenset[str] | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -113,6 +120,50 @@ class _GraphInputs:
         self.skills_config_store = skills_config_store
         self.config_flags = config_flags
         self.max_results_memories = max_results_memories
+        self.initial_tool_names = initial_tool_names or frozenset(tool.name for tool in tools)
+        self.tool_by_name = {tool.name: tool for tool in tools}
+
+
+def _message_prefix_signature(messages: list[Any]) -> str:
+    digest = hashlib.sha256()
+    for message in messages:
+        digest.update(message_role(message).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        digest.update(message_content_text(message).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        message_id = getattr(message, "id", None)
+        if message_id is not None:
+            digest.update(str(message_id).encode("utf-8", errors="replace"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def project_with_context_epoch(
+    canonical_input: list[Any],
+    epoch: Any,
+) -> tuple[list[Any], bool]:
+    """Project the compacted epoch prefix + appended tail; report whether the epoch was used.
+
+    Returns ``(projected_messages, epoch_used)``. When ``epoch`` is a valid dict whose
+    ``source_signature`` still matches ``canonical_input[:source_count]`` (both sides computed
+    over the SAME repaired view), the compacted ``epoch.messages`` replaces the prefix and the
+    newer messages are appended verbatim — so a compaction happens once and later turns simply
+    append. ``epoch_used`` is False only when a present epoch went stale (caller should clear it).
+    """
+
+    if not isinstance(epoch, dict):
+        return canonical_input, True
+    source_count = epoch.get("source_message_count")
+    epoch_messages = epoch.get("messages")
+    source_signature = epoch.get("source_signature")
+    if (
+        isinstance(source_count, int)
+        and 0 <= source_count <= len(canonical_input)
+        and isinstance(epoch_messages, list)
+        and source_signature == _message_prefix_signature(canonical_input[:source_count])
+    ):
+        return [*epoch_messages, *canonical_input[source_count:]], True
+    return canonical_input, False
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +315,12 @@ def make_pre_model_node(inputs: _GraphInputs):
         # canonical `messages` on EVERY step. `llm_input_messages` is a plain last-write
         # channel that `agent` prefers over `messages`; writing it only on some steps
         # left a checkpointed stale snapshot that hid later tool results and user turns.
-        updates["llm_input_messages"] = repair_dangling_tool_calls(messages)
+        canonical_input = repair_dangling_tool_calls(messages)
+        epoch = state.get("context_epoch")
+        projected_input, epoch_used = project_with_context_epoch(canonical_input, epoch)
+        if isinstance(epoch, dict) and not epoch_used:
+            updates["context_epoch"] = None
+        updates["llm_input_messages"] = projected_input
 
         # Compose the final system prompt for this step: base + memory section.
         system_sections: list[str] = [inputs.system_prompt]
@@ -344,9 +400,54 @@ def make_summarization_node(inputs: _GraphInputs):
         model_input = [
             message for message in summarized if not isinstance(message, RemoveMessage)
         ]
-        return {"messages": summarized, "llm_input_messages": model_input}
+        # Compute the epoch source over the SAME repaired view that `pre_model` re-derives on
+        # every later turn (`repair_dangling_tool_calls(messages)`). Using the RAW messages here
+        # made the signature mismatch whenever history had a dangling tool call, so the epoch was
+        # reset EVERY turn → summarization re-fired every turn → the fixed keep-window slid and
+        # older messages (e.g. the user's earlier turn) were dropped. Aligning the views lets the
+        # epoch actually be reused, so compaction happens once and new turns simply append.
+        canonical_messages = repair_dangling_tool_calls(list(state.get("messages") or []))
+        return {
+            "llm_input_messages": model_input,
+            "context_epoch": {
+                "source_message_count": len(canonical_messages),
+                "source_signature": _message_prefix_signature(canonical_messages),
+                "messages": model_input,
+            },
+        }
 
     return summarize
+
+
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "prompt is too long",
+    "too many tokens",
+    "input content is too long",
+    "??????",
+    "?????",
+    "??????",
+)
+
+
+def is_context_overflow_error(error: BaseException) -> bool:
+    if isinstance(error, BaseExceptionGroup):
+        return any(is_context_overflow_error(item) for item in error.exceptions)
+    text = f"{type(error).__name__}: {error}".casefold()
+    return any(marker.casefold() in text for marker in _CONTEXT_OVERFLOW_MARKERS)
+
+
+def emergency_context_projection(messages: list[Any], *, attempt: int) -> list[Any]:
+    """Shrink only model input after a provider overflow; canonical state stays intact."""
+
+    if not messages:
+        return []
+    divisor = max(2, attempt + 1)
+    keep = max(4, len(messages) // divisor)
+    projected = repair_dangling_tool_calls(messages[-keep:])
+    return projected or [messages[-1]]
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +456,13 @@ def make_summarization_node(inputs: _GraphInputs):
 
 
 def make_agent_node(inputs: _GraphInputs):
-    bound_model = inputs.model.bind_tools(inputs.tools) if inputs.tools else inputs.model
+    def model_for_state(state: SlotFlowAgentState):
+        promoted = set(state.get("promoted_tool_names") or [])
+        active_names = inputs.initial_tool_names | promoted
+        active_tools = [
+            tool for name, tool in inputs.tool_by_name.items() if name in active_names
+        ]
+        return inputs.model.bind_tools(active_tools) if active_tools else inputs.model
 
     async def agent(
         state: SlotFlowAgentState,
@@ -363,11 +470,30 @@ def make_agent_node(inputs: _GraphInputs):
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
         system_text = state.get("system_prompt") or inputs.system_prompt
-        response = await bound_model.ainvoke(
-            [SystemMessage(content=system_text), *messages], config
-        )
-        response.name = "slotflow"
-        return {"messages": [response]}
+        bound_model = model_for_state(state)
+        projected_messages = list(messages)
+        retries = max(1, inputs.config_flags.context_overflow_max_retries)
+        for attempt in range(retries + 1):
+            try:
+                response = await bound_model.ainvoke(
+                    [SystemMessage(content=system_text), *projected_messages],
+                    config,
+                )
+                response.name = "slotflow"
+                repair_streamed_tool_call_names(response)
+                sanitize_reasoning_message(response)
+                return {"messages": [response]}
+            except Exception as exc:
+                if not is_context_overflow_error(exc) or attempt >= retries:
+                    raise
+                projected_messages = emergency_context_projection(
+                    list(messages),
+                    attempt=attempt + 1,
+                )
+                await asyncio.sleep(
+                    inputs.config_flags.context_overflow_retry_delay_seconds * (attempt + 1)
+                )
+        raise RuntimeError("context overflow retry loop exhausted")
 
     def agent_sync(
         state: SlotFlowAgentState,
@@ -375,10 +501,13 @@ def make_agent_node(inputs: _GraphInputs):
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
         system_text = state.get("system_prompt") or inputs.system_prompt
+        bound_model = model_for_state(state)
         response = bound_model.invoke(
             [SystemMessage(content=system_text), *messages], config
         )
         response.name = "slotflow"
+        repair_streamed_tool_call_names(response)
+        sanitize_reasoning_message(response)
         return {"messages": [response]}
 
     return agent, agent_sync
@@ -540,13 +669,48 @@ async def _slotflow_async_tool_safety_wrapper(
         )
 
 
-def make_tools_node(tools: list[BaseTool]) -> ToolNode:
+def make_tools_node(
+    tools: list[BaseTool],
+    *,
+    initial_tool_names: frozenset[str] | None = None,
+) -> ToolNode:
+    initial = initial_tool_names or frozenset(tool.name for tool in tools)
+
+    def active(request: ToolCallRequest) -> bool:
+        state = request.state if isinstance(request.state, dict) else {}
+        promoted = set(state.get("promoted_tool_names") or [])
+        name = request.tool_call.get("name")
+        return isinstance(name, str) and name in (initial | promoted)
+
+    def wrap(request: ToolCallRequest, handler: Callable[[ToolCallRequest], Any]) -> Any:
+        if not active(request):
+            return build_error_tool_message(
+                request.tool_call,
+                error_type="tool_not_activated",
+                message="Activate this tool through its tool-space loader first.",
+                exception_type="ToolNotActivated",
+            )
+        return _slotflow_tool_safety_wrapper(request, handler)
+
+    async def awrap(
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[Any]],
+    ) -> Any:
+        if not active(request):
+            return build_error_tool_message(
+                request.tool_call,
+                error_type="tool_not_activated",
+                message="Activate this tool through its tool-space loader first.",
+                exception_type="ToolNotActivated",
+            )
+        return await _slotflow_async_tool_safety_wrapper(request, handler)
+
     return ToolNode(
         tools,
         name="tools",
         handle_tool_errors=False,
-        wrap_tool_call=_slotflow_tool_safety_wrapper,
-        awrap_tool_call=_slotflow_async_tool_safety_wrapper,
+        wrap_tool_call=wrap,
+        awrap_tool_call=awrap,
     )
 
 
@@ -567,6 +731,7 @@ def build_slotflow_graph(
     skills_root: Any,
     skills_config_store: Any,
     config_flags: Any,
+    initial_tool_names: frozenset[str] | None = None,
     checkpointer: "Checkpointer | None" = None,
 ):
     inputs = _GraphInputs(
@@ -581,6 +746,7 @@ def build_slotflow_graph(
         skills_config_store=skills_config_store,
         config_flags=config_flags,
         max_results_memories=5,
+        initial_tool_names=initial_tool_names,
     )
 
     graph = StateGraph(SlotFlowAgentState, context_schema=RunContext)
@@ -591,7 +757,10 @@ def build_slotflow_graph(
     agent_async, agent_sync = make_agent_node(inputs)
     graph.add_node("agent", RunnableLambda(agent_sync, afunc=agent_async, name="agent"))
     graph.add_node("post_model", make_post_model_node(inputs))
-    graph.add_node("tools", make_tools_node(tools))
+    graph.add_node(
+        "tools",
+        make_tools_node(tools, initial_tool_names=inputs.initial_tool_names),
+    )
     graph.add_node("finalize", make_finalize_node(inputs))
 
     graph.add_edge(START, "prepare")

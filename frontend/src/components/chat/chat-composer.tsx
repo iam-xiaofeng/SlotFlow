@@ -16,10 +16,12 @@ import {
 } from "@/lib/chat-stream";
 
 import {
+  type ComposerContextUsage,
   type ComposerQueuedMessage,
   type ComposerTodo,
   ComposerActions,
   ComposerAttachments,
+  ComposerContextMeter,
   ComposerError,
   ComposerQueue,
   ComposerTextarea,
@@ -33,6 +35,7 @@ type ChatComposerProps = {
   attachments: UploadedFileRecord[];
   todos: ComposerTodo[];
   todoListKey: string | null;
+  contextUsage: ComposerContextUsage | null;
   error: string | null;
   fileInputRef: RefObject<HTMLInputElement | null>;
   isStreaming: boolean;
@@ -62,6 +65,7 @@ export function ChatComposer({
   attachments,
   todos,
   todoListKey,
+  contextUsage,
   error,
   fileInputRef,
   isStreaming,
@@ -188,11 +192,14 @@ export function ChatComposer({
             />
           </div>
           <div className="flex min-h-12 items-center justify-between gap-3 px-4 pb-3 sm:px-5">
-            <ComposerTools
-              disabled={isUploading}
-              isUploading={isUploading}
-              onAttachFiles={onAttachFiles}
-            />
+            <div className="flex items-center gap-2">
+              <ComposerTools
+                disabled={isUploading}
+                isUploading={isUploading}
+                onAttachFiles={onAttachFiles}
+              />
+              <ComposerContextMeter usage={contextUsage} />
+            </div>
             <ComposerActions
               canSend={canSend}
               isStreaming={isStreaming}

@@ -19,7 +19,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from app.harness.sandbox import SlotFlowSandboxConfig
 
-DEFAULT_USER_AGENT = "SlotFlow/0.1 (+https://slotflow.local)"
+DEFAULT_USER_AGENT = "claude-code/2.1.214"
 MAX_REDIRECTS = 5
 SEARCH_PROVIDERS: tuple[tuple[str, str], ...] = (
     ("bing", "https://www.bing.com/search?q={query}"),

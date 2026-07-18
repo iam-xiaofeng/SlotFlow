@@ -5,6 +5,7 @@ Guidance for AI agents (and humans) working in the SlotFlow repository.
 > **✅ 2026-07-04 大扫除完成,等待人工验证后提 PR**(分支 `cleanup/audit-20260703`)。
 > 改动与问题总览:[`docs/cleanup-2026-07-03-report.md`](docs/cleanup-2026-07-03-report.md);
 > API 调用链路:[`docs/api-call-chains.md`](docs/api-call-chains.md);
+> Agent 上下文压缩、渐进式工具披露与 Codex/Pi/DeerFlow 调研（2026-07-17）：[docs/research/agent-context-tool-disclosure-2026-07-17.md](docs/research/agent-context-tool-disclosure-2026-07-17.md);
 > 工程细节:`HARNESS_NOTES.md` §32;断点续传:
 > [`HANDOFF_CROSS_SESSION_20260703.md`](HANDOFF_CROSS_SESSION_20260703.md)。
 > 行为要点:摘要哨兵/输入冻结两个 P0 已修;tool.status 现挂消息子流 tool_calls 投影
@@ -201,8 +202,13 @@ frontend/src/
   run. `custom` remains the sole SlotFlow-specific transport configuration:
   `CUSTOM_BASE_URL` + `CUSTOM_API_KEY`, LiteLLM endpoint discovery, optional comma-separated
   `CUSTOM_MODELS`, and a neutral `SLOTFLOW_RELAY_USER_AGENT`. LiteLLM catalog work runs in
-  `asyncio.to_thread`, so `/api/chat/models` does not block FastAPI's event loop. Updating the
-  pinned LiteLLM packages updates native provider/model metadata; do not add hand-maintained
+  `asyncio.to_thread`, so `/api/chat/models` does not block FastAPI's event loop. The model transport
+  timeout is provider-agnostic: `SLOTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS` is read when
+  `runtime/models.py` builds each `ChatLiteLLM` instance and defaults to 300 seconds. Do not restore
+  the old hard-coded 30-second timeout: reasoning models and relays may legitimately exceed it before
+  the first stream chunk or between chunks, which LiteLLM surfaces as `MidStreamFallbackError`
+  wrapping a socket read timeout. Updating the pinned LiteLLM packages updates native provider/model
+  metadata; do not add hand-maintained
   Gemini/Bedrock/Mistral/etc. lists or credential maps.
 - **Reasoning streaming**: every provider is constructed through the minimal
   `chat/litellm_provider.py::ChatLiteLLM` subclass of `langchain_litellm.ChatLiteLLM`.
@@ -231,7 +237,14 @@ frontend/src/
   channels are preferred; `agent_adapter/projections.py` retains only canonical reasoning/thinking
   blocks and LiteLLM `reasoning_content`. Keep `tests/test_provider_reasoning_contract.py` (including
   the final tool-follow-up payload), `tests/test_model_catalog.py`, and the runtime Chat
-  Completions-routing tests green.
+  Completions-routing tests green. **Streamed tool-call name recovery**: some OpenAI-compatible
+  relays (observed live: grok-4.5) stream tool-call deltas so that LangChain's parsed
+  `message.tool_calls[i]["name"]` comes out empty while the raw
+  `additional_kwargs["tool_calls"][j]["function"]["name"]` still holds it — an empty name makes the
+  ToolNode unable to dispatch, so EVERY tool (core ones too) fails closed as
+  `tool_not_activated`/unknown. `litellm_provider.py::repair_streamed_tool_call_names` backfills the
+  name (by call `id`, strict positional fallback) and the `agent`/`agent_sync` nodes call it on every
+  response; subagents inherit it via the shared graph. Pinned by `tests/test_tool_call_name_repair.py`.
 - **Streaming merge contract**: `message.delta` is the live user-visible stream; final
   `state.snapshot` is a reconciliation source, not permission to erase already-streamed text.
   Both `chat/routes.py::select_assistant_content` and
@@ -240,6 +253,18 @@ frontend/src/
   the same principle via `select_assistant_reasoning_content` / `mergeReasoningContent`. Snapshot
   assistant messages with tool calls are intermediate ReAct steps, not final user-visible answers;
   normalization marks them with `has_tool_calls`, and backend/frontend content selectors skip them.
+  `chat/sse.py::make_error_event` recursively unwraps LangGraph/AnyIO `ExceptionGroup` failures so
+  `run.error` and the persisted run expose the informative leaf exception instead of the generic
+  `unhandled errors in a TaskGroup` wrapper; cancellation semantics and tracebacks stay server-side.
+- **Request-budget and development reload boundaries**: `title_generation.py` never creates a
+  model when `SLOTFLOW_TITLE_MODEL_ENABLED=false`; it derives a deterministic title from the first
+  user message, and `.env_example` keeps this no-extra-request mode as the default. Do not route this
+  background concern to DeepSeek or another provider. Proactive memory extraction is also one extra
+  post-turn call and may be disabled with `SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION=false` for strict-RPM
+  relays without changing the user-selected model used by the main agent/subagents. `make dev` limits
+  Uvicorn reload watching to `backend/app`, so files written under `.slotflow/workspace` cannot restart
+  an active stream. The adapter suppresses only LangGraph's exact Pregel v3 experimental warning at
+  the `astream_events` boundary; unrelated warnings remain visible.- **Context epochs, local usage metrics, and progressive tool spaces**: every runtime run attaches a local `RunUsageCollector`; `run.usage` is persisted in SQLite `run_metrics` without prompt/tool content. Missing provider cache fields are `unknown`, never a fabricated miss. Context windows resolve from `SLOTFLOW_MODEL_CONTEXT_WINDOWS_JSON`, then LiteLLM's bundled metadata, then a conservative local default; input budget reserves `SLOTFLOW_CONTEXT_RESERVE_TOKENS`. The resolved window rides `run.prepared` (`context_window_tokens`/`context_input_budget_tokens`/`context_window_source`) so the UI knows the ceiling before any tokens are counted, and `run.usage` adds `context_tokens` (the most recent successful call's prompt size = current window occupancy, not the per-run token sum) plus the same window fields; the composer renders a live `ComposerContextMeter` (used / max tokens) from these two events. Summarization now stores a model-facing `context_epoch` while canonical `messages` remain intact in the checkpointer. Within an epoch the frozen compacted prefix is reused and new messages append; `context_archive_search/read` can inspect only the current graph state's canonical history. The epoch's `source_signature`/`source_message_count` are computed over the SAME `repair_dangling_tool_calls(messages)` view that `pre_model` re-derives each turn (`harness/graph.py::project_with_context_epoch`); computing it over the raw messages instead made the signature mismatch whenever history held a dangling tool call, so the epoch reset every turn, summarization re-fired every turn, and the fixed keep-window slid until earlier user turns were dropped (the 2026-07-18 "compression forgets earlier messages" fix). **Progressive tool disclosure is now partial**: only the heaviest/rarest spaces are gated behind loaders — `SLOTFLOW_TOOL_SPACES_GATED` (default `browser,extensions`) — while everyday spaces (workspace/file, network, sandbox, documents, memory) are bound and directly callable on turn 1. Gating ALL spaces (the original design) made the model unable to reach any everyday tool without a loader round-trip it rarely performed, so every direct call failed `tool_not_activated`; the loader→promote→call path itself is correct (`test_gated_space_becomes_callable_after_loader_promotes_it` pins it). Gated tools still fail closed until their `*_tools` loader promotes them. The `promoted_tool_names` state channel carries an **order-preserving union reducer** (`harness/state.py::merge_promoted_tool_names`) because the model can emit several `*_tools` loader calls in one step — ToolNode runs them concurrently and each returns a `Command(update={"promoted_tool_names": ...})`; without a reducer LangGraph rejects the second write with `INVALID_CONCURRENT_GRAPH_UPDATE` ("Can receive only one value per step"). Union is additive and idempotent, matching the tool-space model. Child agents have no recursive delegation/todo/HITL and receive at most three explicit tool spaces, with `all/*` rejected. Context-overflow BadRequest errors progressively shrink only model input before configurable retries; transient pre-response transport/rate failures use configurable exponential retry, while mid-stream/tool side effects are never replayed.
 - **Agent Reach host bridge**: Agent Reach is installed/refreshed by `bootstrap.sh` with `uv tool`
   and initialized from `~/.agent-reach`; it is deliberately **not** installed or mounted into the
   Docker sandbox. `harness/tools/agent_reach.py` is the only model-facing boundary. It exposes five
@@ -266,7 +291,10 @@ frontend/src/
   untrusted. `SlotFlowMcpServerConfig.stateful=True` makes `MultiServerMcpToolProvider` keep one MCP
   `ClientSession` open across navigate/snapshot/click calls. `RuntimeBackedAgentAdapter` creates that
   provider/session per run and closes it in `finally`; concurrent runs never share a page/profile.
-  Stateless MCP servers keep the original one-session-per-call adapter behavior. The preset can be
+  MCP discovery is isolated per server: an unavailable optional server is logged and omitted without
+  closing healthy stateful sessions or aborting the chat run; cancellation still closes every opened
+  stack and propagates. Stateless MCP servers keep the original one-session-per-call adapter behavior.
+  The preset can be
   toggled but cannot be deleted or shadowed by a user HTTP server. `bootstrap.sh` installs the locked
   package, runs official `playwright install-deps chromium` on apt hosts, and downloads Chromium;
   non-apt hosts receive a precise shared-library warning. No separate maintenance command exists.
@@ -566,7 +594,10 @@ frontend/src/
   `ScrollArea` did not reliably wheel-scroll inside the centered dialog. The chat composer should
   not show non-functional placeholder affordances: the lower-left `+` is a direct attachment button,
   there is no voice-input button, and the empty-state prompt chips are removed until they have real
-  behavior. The Skills directory intentionally has no hardcoded recommended-Skills page or cards;
+  behavior. Composer paste routes by clipboard item kind: text pastes normally into the textarea,
+  while any `kind === "file"` item (images or other files) is intercepted (`extractClipboardFiles`)
+  and sent through the same upload path as the `+` button — text stays text, everything else uploads.
+  The Skills directory intentionally has no hardcoded recommended-Skills page or cards;
   it shows installed Skills only, with install/upload actions in the header.
 
 ## Roadmap (next steps)
@@ -611,6 +642,40 @@ cd backend  && uv run ruff check app tests
 cd frontend && pnpm typecheck && pnpm build
 ```
 The default branch is protected: land changes via PR (the required check is named `Verify`).
+
+## Debugging with LangSmith (链路审查)
+
+SlotFlow 的每一次运行都是一张 LangGraph `StateGraph`(节点见上文拓扑),LangSmith 可以把
+整张图的每个节点、每次模型调用、每个工具调用、`interrupt()`/resume 都作为可点开的 trace
+记录下来,是排查"某条链路到底发生了什么"最直接的手段(远胜于在节点里加 print)。
+
+**开启方式(环境变量,写进 `backend/.env` 或导出到 shell,LangChain/LangGraph 会自动上报;
+仓库不落库这些密钥):**
+
+```
+LANGSMITH_TRACING=true          # 或旧名 LANGCHAIN_TRACING_V2=true
+LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_PROJECT=slotflow-dev  # 按环境/分支区分,便于筛选
+# LANGSMITH_ENDPOINT=https://api.smith.langchain.com  # 自建/区域端点时才需要
+```
+
+**怎么用它审查各链路:**
+
+- 一次 chat 请求 = 一条 root trace;按 `thread_id` / run 时间定位后展开,能逐节点看到
+  `prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model
+  → route → tools → …` 的输入/输出 state、耗时与报错;并发/工具报错(例如本次
+  `INVALID_CONCURRENT_GRAPH_UPDATE`)会精确落在触发它的节点/工具 span 上。
+- `agent` 节点 span 上能看到最终 `bind_tools` 的工具集、system_prompt、`llm_input_messages`
+  投影,用来核对渐进式工具空间披露(`promoted_tool_names`)与 `context_epoch` 是否符合预期。
+- 每个 `*_tools` 加载器 / ToolNode 调用都是独立 span,可确认工具是否被 `tool_not_activated`
+  失败关闭、以及并发加载器是否被 union reducer 正确合并。
+- 排查用量/缓存请以 `run.usage`(`RunUsageCollector`,持久化在 SQLite `run_metrics`)为准;
+  LangSmith 的 token/时延是交叉验证。
+
+**重要:trace 隔离约定不要破坏。** triage(`clarify_gate`)与 proactive memory extractor 的
+模型调用刻意使用 `config={"callbacks": []}`,以免它们的 token 污染用户流;这同样会让它们**不**
+出现在主 run 的 LangSmith trace 里——这是有意的,排查这两条子链路时单独跑或临时放开 callbacks,
+不要为了"看得见"就把它们并回主流(参见 `HARNESS_NOTES.md` 的 provider 规则)。
 
 ## Commit style
 

@@ -118,6 +118,10 @@ class ChatRepository(Protocol):
         error: str | None = None,
     ) -> RunRecord: ...
 
+    def update_run_metrics(self, run_id: str, metrics: dict) -> None: ...
+
+    def get_run_metrics(self, run_id: str) -> dict: ...
+
 
 class SQLiteChatRepository:
     """用 SQLite 保存 thread / message / run 的仓库。
@@ -422,6 +426,32 @@ class SQLiteChatRepository:
             self._touch_thread(str(run_row["thread_id"]))
             return self._row_to_run(self._fetch_run_row(run_id))
 
+    def update_run_metrics(self, run_id: str, metrics: dict) -> None:
+        """Persist provider-neutral usage/cache telemetry separately from run state."""
+
+        with self._lock, self._connection:
+            self._fetch_run_row(run_id)
+            now = self._datetime_to_text(utc_now())
+            self._connection.execute(
+                """
+                INSERT INTO run_metrics (run_id, metrics_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    metrics_json = excluded.metrics_json,
+                    updated_at = excluded.updated_at
+                """,
+                (run_id, self._metadata_to_text(metrics), now, now),
+            )
+
+    def get_run_metrics(self, run_id: str) -> dict:
+        with self._lock:
+            self._fetch_run_row(run_id)
+            row = self._connection.execute(
+                "SELECT metrics_json FROM run_metrics WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            return json.loads(str(row["metrics_json"])) if row is not None else {}
+
     def _initialize_schema(self) -> None:
         """创建 chat 仓库需要的 SQLite 表结构。"""
 
@@ -466,6 +496,14 @@ class SQLiteChatRepository:
 
                 CREATE INDEX IF NOT EXISTS idx_runs_thread_sequence
                     ON runs(thread_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS run_metrics (
+                    run_id TEXT PRIMARY KEY,
+                    metrics_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
 
                 CREATE INDEX IF NOT EXISTS idx_threads_updated_at
                     ON threads(updated_at DESC);

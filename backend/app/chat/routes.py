@@ -251,6 +251,13 @@ async def stream_thread_run(
                     )
                     clarification_saved = True
 
+                if event.event == "run.usage":
+                    await run_in_threadpool(
+                        repo.update_run_metrics,
+                        run.id,
+                        dict(event.data),
+                    )
+
                 if event.event == "run.error":
                     await run_in_threadpool(
                         repo.update_run_status,

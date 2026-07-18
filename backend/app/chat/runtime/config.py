@@ -236,6 +236,14 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_SUBAGENT_MAX_CONCURRENT",
             default=defaults.subagent_max_concurrent,
         ),
+        context_overflow_max_retries=load_positive_int_from_env(
+            "SLOTFLOW_CONTEXT_OVERFLOW_MAX_RETRIES",
+            default=defaults.context_overflow_max_retries,
+        ),
+        context_overflow_retry_delay_seconds=load_positive_int_from_env(
+            "SLOTFLOW_CONTEXT_OVERFLOW_RETRY_DELAY_SECONDS",
+            default=defaults.context_overflow_retry_delay_seconds,
+        ),
     )
 
 

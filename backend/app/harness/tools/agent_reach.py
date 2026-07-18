@@ -200,7 +200,7 @@ def build_agent_reach_tools(
                 "--max-filesize",
                 str(config.max_output_bytes),
                 "--header",
-                "User-Agent: SlotFlow-Agent-Reach/1.0",
+                "User-Agent: claude-code/2.1.214",
                 reader_url,
             ],
         )

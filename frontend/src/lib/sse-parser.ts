@@ -1,5 +1,6 @@
 type ChatStreamEventName =
   | "run.prepared"
+  | "run.usage"
   | "context.compressing"
   | "message.delta"
   | "tool.delta"
