@@ -236,6 +236,40 @@ def repair_streamed_tool_call_names(message: BaseMessage) -> BaseMessage:
     return message
 
 
+def sanitize_reasoning_message(message: BaseMessage) -> BaseMessage:
+    """Collapse streamed reasoning out of the PERSISTED assistant message (inbound boundary).
+
+    Reasoning models streamed through a relay (observed live: grok-4.5 via a custom relay) return
+    their chain-of-thought as a list of hundreds of per-token ``{"type": "thinking", ...}`` blocks in
+    ``content`` plus the full text in ``additional_kwargs["reasoning_content"]``. langchain-litellm
+    keeps both on the AIMessage. The OUTBOUND serializer (``_create_message_dicts``) already strips the
+    block list to a plain string for the wire, so the provider payload is fine — but the raw message is
+    what gets checkpointed and re-projected every turn. Left untouched it inflates ``llm_input_messages``,
+    the token count that fires summarization, LangSmith's recorded input, and — because summarization
+    keeps the recent messages verbatim — the compacted input never actually shrinks (the reported
+    "summary added but nothing was pruned").
+
+    Normalizing here, once, at the point the message enters state fixes all of those at the root:
+
+    * ``content`` block list → the answer string (via the same collapse used outbound), so nothing but
+      answer text is persisted;
+    * ``reasoning_content`` is dropped from the checkpointed carrier — re-feeding chain-of-thought to the
+      model every turn is pure backwash (OpenAI-style reasoners re-reason; DeepSeek reasoner must not
+      receive it), and the UI's reasoning box is captured live from the stream, not from this message.
+
+    Signed ``thinking_blocks`` are deliberately preserved: Anthropic/Bedrock extended-thinking tool loops
+    require the signed block on the continuation request. No-op for plain string content without reasoning.
+    """
+
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        message.content = _without_reasoning_metadata_blocks(content)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        additional_kwargs.pop("reasoning_content", None)
+    return message
+
+
 class ChatLiteLLM(_ChatLiteLLM):
     """ChatLiteLLM with lossless reasoning-state handling at the request boundary.
 

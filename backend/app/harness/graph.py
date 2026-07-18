@@ -32,7 +32,10 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
-from app.chat.litellm_provider import repair_streamed_tool_call_names
+from app.chat.litellm_provider import (
+    repair_streamed_tool_call_names,
+    sanitize_reasoning_message,
+)
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -478,6 +481,7 @@ def make_agent_node(inputs: _GraphInputs):
                 )
                 response.name = "slotflow"
                 repair_streamed_tool_call_names(response)
+                sanitize_reasoning_message(response)
                 return {"messages": [response]}
             except Exception as exc:
                 if not is_context_overflow_error(exc) or attempt >= retries:
@@ -503,6 +507,7 @@ def make_agent_node(inputs: _GraphInputs):
         )
         response.name = "slotflow"
         repair_streamed_tool_call_names(response)
+        sanitize_reasoning_message(response)
         return {"messages": [response]}
 
     return agent, agent_sync

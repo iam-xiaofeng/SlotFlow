@@ -11,8 +11,54 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.chat.runtime.models import ChatLiteLLM
 
 from app.chat.agent_adapter import projection_item_to_agent_event
+from app.chat.litellm_provider import sanitize_reasoning_message
 from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
+
+
+def test_sanitize_reasoning_message_collapses_persisted_content() -> None:
+    """Inbound boundary: a streamed reasoning block-list collapses to the answer string and the
+    verbose ``reasoning_content`` carrier is dropped, so nothing but answer text is checkpointed."""
+
+    message = AIMessage(
+        content=["", {"type": "thinking", "thinking": "step 1"}, {"type": "thinking", "thinking": "step 2"}, "final answer"],
+        additional_kwargs={"reasoning_content": "step 1step 2"},
+    )
+
+    sanitize_reasoning_message(message)
+
+    assert message.content == "final answer"
+    assert "reasoning_content" not in message.additional_kwargs
+
+
+def test_sanitize_reasoning_message_preserves_signed_thinking_blocks() -> None:
+    """Anthropic/Bedrock tool loops need the signed block on the continuation request, so the
+    inbound sanitizer must leave ``thinking_blocks`` untouched while still dropping the block-list
+    bloat from content."""
+
+    message = AIMessage(
+        content=[{"type": "thinking", "thinking": "why"}, "done"],
+        additional_kwargs={
+            "reasoning_content": "why",
+            "thinking_blocks": [{"type": "thinking", "thinking": "why", "signature": "sig-1"}],
+        },
+        tool_calls=[{"name": "workspace_read", "args": {}, "id": "call_1"}],
+    )
+
+    sanitize_reasoning_message(message)
+
+    assert message.content == "done"
+    assert "reasoning_content" not in message.additional_kwargs
+    assert message.additional_kwargs["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "why", "signature": "sig-1"}
+    ]
+    assert message.tool_calls[0]["id"] == "call_1"
+
+
+def test_sanitize_reasoning_message_is_noop_for_plain_string() -> None:
+    message = AIMessage(content="just text")
+    sanitize_reasoning_message(message)
+    assert message.content == "just text"
 
 
 def _bundle():

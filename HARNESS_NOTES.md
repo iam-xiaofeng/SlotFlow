@@ -3277,3 +3277,17 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 **根因 C：context epoch 每轮被重置 → 反复摘要 → keep 窗口滑走旧消息。** epoch 的 `source_signature/source_message_count` 在 `make_summarization_node` 用**原始** `state["messages"]` 计算,而 `pre_model` 用 `repair_dangling_tool_calls(messages)` 复算——历史里只要有 dangling tool call,两者视图不同 → 签名必失配 → epoch 每轮重置 → summarization 每轮重触发 → 固定"keep 最近 20 条"窗口滑动,把更早的用户轮次(如"A")挤掉。修复:两处都用 repaired 视图;投影逻辑抽成纯函数 `graph.py::project_with_context_epoch` 并测试(`test_context_epoch_is_reused_across_appended_turns_not_reset` / `..._resets_when_prefix_signature_changes`)。
 
 **旁证:issue3(注释 DeepSeek 仍可用)非代码 bug**——磁盘 `.env` 第 12 行 `DEEPSEEK_API_KEY=` 当时并未真正注释,进程据此加载;真正注释保存后完整 `make kill && make dev` 即消失。
+
+### 54.9 后续修复（2026-07-19）：grok 思考流反向灌回 + 压缩"只加不减"（入站清洗根因）
+
+用户用 LangSmith 复查 `thread_4f22351440e3` 后报告两点:①支持深度思考的模型(grok-4.5 经 ChatLiteLLM 中转)多轮后 Input Tokens 不可逆膨胀(第四轮飙到 12.2K);②`SlotFlowSummarizationMiddleware` 节点确实跑了、也算出了紧凑摘要,但紧随其后的 `agent` 输入不但没变小、反而更大。并指出这次问题在**接收模型回复**层面(出站方向此前已按 langchain-litellm#222 处理过)。真机 grok-4.5 复现,定位到**同一个入站根因**,已修复并真机 + 直测验证。
+
+**根因:grok 的思考流以逐 token 的 `{"type":"thinking",...}` 块列表塞进 `AIMessage.content`(实测单条回复 = `list[47 blocks]`),外加全文进 `additional_kwargs["reasoning_content"]`。** 出站 `_create_message_dicts` 早已把块列表折叠成纯字符串(所以**发给中转的 payload 是干净的**),但 langchain-litellm 把**原始**块列表留在消息对象上——而被 checkpointer 持久化、被 `pre_model` 每轮重新投影的正是这个原始对象。于是它污染 `llm_input_messages`、触发摘要的 token 计数、LangSmith 记录的输入;更关键——`SummarizationMiddleware` 逐字保留最近 N 条消息,这些消息各自还拖着几十个 thinking 块 → 摘要虽加了、"最近保留区"却从没瘦下来(用户看到的"只加不减")。同时 `reasoning_content` 全文按既有出站契约会被回灌给模型(§reasoning 契约测试固定),长思考多轮累积即 backwash。
+
+**修复(纯入站,不动出站契约):`litellm_provider.py::sanitize_reasoning_message`**——在 `agent`/`agent_sync` 拿到 response 后(紧接 `repair_streamed_tool_call_names`)调用:把 `content` 的思考块列表用同一套 `_without_reasoning_metadata_blocks` 折叠成答案字符串,并从持久化对象上丢弃 `reasoning_content`(思考文本供 UI 的 reasoning 框是**从实时流**单独捕获进 `MessageRecord.metadata` 的,checkpointer 里根本不需要;把 CoT 每轮回喂模型纯属浪费——OpenAI 系 reasoner 会重新推理,DeepSeek reasoner 更是禁止回传)。**签名 `thinking_blocks` 刻意保留**(Anthropic/Bedrock 扩展思考的工具循环续接依赖它)。出站 `_create_message_dicts` 与既有 reasoning 契约测试一字未改。
+
+**验证(真机 grok-4.5):**
+- 入站清洗直测:单条真实回复 `content` 从 `list[47 blocks]/3758B` → `str/1455B`,`reasoning_content`(589B)丢弃,答案完整保留。
+- 5 轮真机(trigger=1200、keep=4、带 MemorySaver):**每个 agent 调用 `leaked_thinking_blocks=0`**(修复前 turn≥3 会累积上一轮的成百块);epoch 从 turn3 起被复用(`source_count` 5→7→9 递增=只追加、`epoch_msgs` 恒为 5=压实前缀不再膨胀);多次摘要后最终仍准确复述 turn1 的 `ORION-7/张伟/350 万`(retention 全 True)。
+- 回归 `tests/test_provider_reasoning_contract.py`(新增 3 个 sanitize 测试)+ 全量 `uv run pytest -q -k "not live"` = 434 passed。
+
