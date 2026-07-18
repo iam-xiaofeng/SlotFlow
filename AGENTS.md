@@ -633,6 +633,40 @@ cd frontend && pnpm typecheck && pnpm build
 ```
 The default branch is protected: land changes via PR (the required check is named `Verify`).
 
+## Debugging with LangSmith (链路审查)
+
+SlotFlow 的每一次运行都是一张 LangGraph `StateGraph`(节点见上文拓扑),LangSmith 可以把
+整张图的每个节点、每次模型调用、每个工具调用、`interrupt()`/resume 都作为可点开的 trace
+记录下来,是排查"某条链路到底发生了什么"最直接的手段(远胜于在节点里加 print)。
+
+**开启方式(环境变量,写进 `backend/.env` 或导出到 shell,LangChain/LangGraph 会自动上报;
+仓库不落库这些密钥):**
+
+```
+LANGSMITH_TRACING=true          # 或旧名 LANGCHAIN_TRACING_V2=true
+LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_PROJECT=slotflow-dev  # 按环境/分支区分,便于筛选
+# LANGSMITH_ENDPOINT=https://api.smith.langchain.com  # 自建/区域端点时才需要
+```
+
+**怎么用它审查各链路:**
+
+- 一次 chat 请求 = 一条 root trace;按 `thread_id` / run 时间定位后展开,能逐节点看到
+  `prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model
+  → route → tools → …` 的输入/输出 state、耗时与报错;并发/工具报错(例如本次
+  `INVALID_CONCURRENT_GRAPH_UPDATE`)会精确落在触发它的节点/工具 span 上。
+- `agent` 节点 span 上能看到最终 `bind_tools` 的工具集、system_prompt、`llm_input_messages`
+  投影,用来核对渐进式工具空间披露(`promoted_tool_names`)与 `context_epoch` 是否符合预期。
+- 每个 `*_tools` 加载器 / ToolNode 调用都是独立 span,可确认工具是否被 `tool_not_activated`
+  失败关闭、以及并发加载器是否被 union reducer 正确合并。
+- 排查用量/缓存请以 `run.usage`(`RunUsageCollector`,持久化在 SQLite `run_metrics`)为准;
+  LangSmith 的 token/时延是交叉验证。
+
+**重要:trace 隔离约定不要破坏。** triage(`clarify_gate`)与 proactive memory extractor 的
+模型调用刻意使用 `config={"callbacks": []}`,以免它们的 token 污染用户流;这同样会让它们**不**
+出现在主 run 的 LangSmith trace 里——这是有意的,排查这两条子链路时单独跑或临时放开 callbacks,
+不要为了"看得见"就把它们并回主流(参见 `HARNESS_NOTES.md` 的 provider 规则)。
+
 ## Commit style
 
 Chinese, conventional-ish prefixes (重构 / 功能 / 修复 / 测试 / 文档 / ci), one logical
