@@ -15,3 +15,6 @@ backend/.slotflow/
 
 # local throwaway harness probes / live-API scratch scripts (never upload)
 scratch/
+
+# personal interview-prep material — local only, never upload
+面试准备/
