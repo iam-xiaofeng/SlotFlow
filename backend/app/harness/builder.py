@@ -135,8 +135,8 @@ def build_system_prompt(
             "<slotflow-long-term-memory-status>",
             f"enabled={harness_config.memory_store is not None}",
             "When enabled, long-term memory retrieval/injection/save is handled by the prepare/pre_model/finalize graph nodes.",
-            "At the start of a task, decide whether existing long-term memory could matter. The graph already retrieves likely relevant memories, but if the task depends on user preferences, prior project context, profile facts, or past decisions and the injected memories are missing/insufficient, call memory_list before working.",
-            "After completing a task, decide whether anything durable should be saved or corrected. Use memory_save for stable preferences/profile/project context/facts worth reusing; use memory_update or memory_delete when an existing memory is wrong or obsolete. Do not save one-off transient task details.",
+            "This is fully automatic and needs no tool calls from you: relevant memories are retrieved and injected into your context each turn, and durable facts from the conversation are saved for you.",
+            "You have NO manual memory tools — do not attempt to call memory_save/memory_list/memory_update/memory_delete. Rely on the injected long-term-memory context; if it is missing or insufficient for the task, say so plainly instead of inventing memories.",
             "</slotflow-long-term-memory-status>",
         ]
     )

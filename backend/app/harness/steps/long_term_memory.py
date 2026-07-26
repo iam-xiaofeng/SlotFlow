@@ -84,17 +84,15 @@ def build_memory_prompt(
     *,
     tools_enabled: bool = True,
 ) -> str:
-    tool_note = (
-        "用 memory_save 主动保存你了解到的用户持久偏好 / 资料 / 当前项目情况"
-        "（即使用户没有明说“记住”）；可用 memory_list、memory_update、memory_delete 管理。"
-        if tools_enabled
-        else "当前模型未启用记忆管理工具。"
-    )
+    # 记忆工具（memory_save/list/update/delete）当前未接入 registry，模型手里根本没有它们；
+    # 长期记忆完全由 graph 节点（prepare 检索 / pre_model 注入 / finalize 抽取保存）自动完成。
+    # 所以提示里绝不能再教模型"调用 memory_save"——那会让它去调一个未注册工具、白白报错并污染上下文。
+    # tools_enabled 形参保留仅为兼容旧调用点。
+    del tools_enabled
     lines = [
         "<slotflow-long-term-memory>",
-        f"SlotFlow 本地长期记忆已启用。{tool_note}",
-        "只要判断某条信息有长期价值就调用 memory_save，不要依赖自动兜底；也不要声称你没有"
-        "长期记忆功能。如果没有相关记忆，只说明本轮没有检索到相关记忆。",
+        "SlotFlow 本地长期记忆已启用，并由系统自动召回与保存——你无需、也无法手动调用任何记忆工具。",
+        "如果本轮检索到的相关记忆缺失或不足，直接说明本轮没有检索到即可，不要臆造，也不要声称你没有长期记忆功能。",
     ]
     if memories:
         lines.append(

@@ -14,7 +14,7 @@ from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.chat.models import ChatStreamRequest
@@ -236,3 +236,54 @@ async def test_llm_input_messages_projection_recomputed_after_summarization_turn
     assert agent_batches, "应存在 agent 节点的模型调用（其输入以 SystemMessage 开头）"
     last_batch_text = "\n".join(str(m.content) for m in agent_batches[-1])
     assert "第二轮：这句必须能被模型看见" in last_batch_text
+
+
+# ---------------------------------------------------------------------------
+# 缓存稳定契约：召回的长期记忆离开 system 前缀，改走尾部 SystemMessage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recalled_memory_rides_trailing_suffix_not_system_prefix(tmp_path) -> None:
+    """长期记忆不得进入 system 前缀（会随 query 每轮改动、打穿 tools→system→messages
+    前缀缓存），必须作为最后一条 SystemMessage 追加在所有会话消息之后（append-only）。"""
+
+    from app.harness.memory import SlotFlowMemoryStore
+
+    store = SlotFlowMemoryStore(tmp_path / "memory.sqlite3")
+    request = ChatStreamRequest(message="占位", mode="pro")
+    bundle = build_run_config(
+        thread_id="thread_mem_suffix", run_id="run_mem_suffix", request=request
+    )
+    store.add_memory(thread_id=bundle.context.thread_id, content="用户最喜欢的颜色是蓝色")
+
+    model = _RecordingFakeChatModel(responses=["蓝色。", "备用", "备用2"])
+    graph = build_slotflow_harness_graph(
+        model=model,
+        run_context=bundle.context,
+        harness_config=SlotFlowHarnessConfig(
+            system_prompt="你是测试缓存契约的助手。",
+            memory_store=store,
+            middleware_config=SlotFlowMiddlewareConfig(
+                clarify_gate_enabled=False,
+                proactive_memory_extraction_enabled=False,
+            ),
+        ),
+    )
+    await graph.ainvoke(
+        {"messages": [{"role": "user", "content": "我最喜欢的颜色是什么？"}]},
+        config=bundle.config,
+        context=bundle.context,
+    )
+
+    agent_batches = [b for b in model.received if b and isinstance(b[0], SystemMessage)]
+    assert agent_batches, "应存在 agent 节点的模型调用"
+    batch = agent_batches[-1]
+    marker = "<slotflow-long-term-memory>"
+    # 前缀（第一条 system）保持稳定：不含记忆段。
+    assert marker not in str(batch[0].content)
+    # 记忆作为最后一条 user 角色的 <system-reminder> 追加在尾部，且带上具体记忆内容。
+    assert isinstance(batch[-1], HumanMessage)
+    assert "<system-reminder>" in str(batch[-1].content)
+    assert marker in str(batch[-1].content)
+    assert "蓝色" in str(batch[-1].content)

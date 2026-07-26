@@ -10,9 +10,14 @@
 - `retrieved_memories`：`prepare` 检索到的长期记忆，供 `pre_model` 注入与 `finalize` 引用。
 - `artifacts_baseline`：`prepare` 的产物基线快照，供 `finalize` 计算新增产物。
 - `todo_enforcement`：`post_model` 的 todo 约束控制通道（`pending` 指令文本 +
-  `attempted` 防循环标记）。控制文本只经 `pre_model` 并入当步 `llm_input_messages`，
-  绝不进入持久的 `messages` 会话历史（messages 投影会把 state 消息流给用户，
-  checkpointer 会永久回放——2026-07-15 真机泄漏的根因）。
+  `attempted` 防循环标记）。
+- `model_input_suffix`：`pre_model` 组装的"尾部注入"字符串——召回的长期记忆 + 当步
+  todo 控制文本。`agent` 把它包成**用户角色的 `<system-reminder>` 消息**、拼在所有会话消息
+  之后。三点好处：(1) 让易变内容离开 `system` 前缀，`tools→system→messages` 这段前缀保持
+  逐字节稳定，provider 的前缀缓存才可能命中；(2) 消息序列**始终以 user/tool 结尾**，兼容对
+  消息顺序更严格的中转 provider；(3) 和 `system_prompt` 一样只走普通字符串通道，绝不进入持久的
+  `messages` 会话历史（messages 投影会把 state 消息流给用户、checkpointer 会永久回放——
+  2026-07-15 真机泄漏的根因）。
 """
 
 from __future__ import annotations
@@ -57,3 +62,4 @@ class SlotFlowAgentState(AgentState):
     todo_enforcement: NotRequired[dict[str, Any] | None]
     context_epoch: NotRequired[dict[str, Any] | None]
     promoted_tool_names: NotRequired[Annotated[list[str] | None, merge_promoted_tool_names]]
+    model_input_suffix: NotRequired[str | None]

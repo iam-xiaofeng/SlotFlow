@@ -3291,3 +3291,80 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 - 5 轮真机(trigger=1200、keep=4、带 MemorySaver):**每个 agent 调用 `leaked_thinking_blocks=0`**(修复前 turn≥3 会累积上一轮的成百块);epoch 从 turn3 起被复用(`source_count` 5→7→9 递增=只追加、`epoch_msgs` 恒为 5=压实前缀不再膨胀);多次摘要后最终仍准确复述 turn1 的 `ORION-7/张伟/350 万`(retention 全 True)。
 - 回归 `tests/test_provider_reasoning_contract.py`(新增 3 个 sanitize 测试)+ 全量 `uv run pytest -q -k "not live"` = 434 passed。
 
+---
+
+## 55. 迭代 47（2026-07-26）：上下文工程三改（cache 稳定 + 工具结果卸载）+ 为什么不退回 create_agent
+
+> 对照当前代码核实。离线 `uv run pytest -q -k "not live"` **443 passed**（新增 7 用例）。三改都是
+> 「让有限上下文窗口塞对信息」的工程，核心衡量指标是 **prompt 前缀缓存命中率**（agent
+> input:output≈100:1，缓存 vs 未缓存差 ~10×）。
+
+### 55.0 TL;DR
+- **A（改代码）**：召回的长期记忆 + 每步 todo 控制块**移出 `system_prompt` 前缀**，改由 `agent` 作为
+  **最后一条 user 角色 `<system-reminder>` 消息**追加在所有会话消息之后。前缀稳→缓存能命中。
+- **B（无需改代码，记录结论）**：工具 schema 缓存本分支已是稳态——`DEFAULT_GATED_SPACES={browser,
+  extensions}`，没 promote 时 `tools` 数组每步逐字节相同。
+- **C（改代码）**：单条工具结果超阈值（默认 16000 字符）→ 全文写工作区隐藏文件、上下文只留「引用+
+  预览」，模型按需 `workspace_read/workspace_grep` 分块回读（Manus「file system as context」）。
+
+### 55.1 A：易变上下文移出 system 前缀（根因：前缀每轮变→打穿 prompt cache）
+- **问题**：`pre_model` 原先把召回记忆（`append_memory_system_message`）+ 每步 todo 控制块拼进
+  `system_prompt`。provider 可缓存前缀顺序是 `tools → system → messages`；记忆随 query 每轮变、todo
+  每步变 → system 段每步变 → 从 system 往后（含全部 messages）前缀哈希全废，缓存永不命中。
+- **改法**（`graph.py::make_pre_model_node`/`make_agent_node`，`state.py` 新增 `model_input_suffix` 通道）：
+  `system_prompt` 只留稳定基座（base + skills preflight）；记忆 + todo 组进新的 `model_input_suffix`
+  字符串通道；`agent` 用 `_model_input_suffix_message()` 包成 `HumanMessage("<system-reminder>…")` 拼在
+  `[System(base), *messages]` **之后**。
+- **三个必须守的点**：
+  1. **append-only**：放到所有 messages **之后**，前缀（tools+system+历史）逐字节稳定，只扰动尾部——顺带
+     蹭到「最近注意力」（Manus recitation）。
+  2. **user 角色而非 system**：让送模型的消息序列**始终以 user/tool 结尾**，兼容对顺序更严的中转 provider
+     （部分会拒绝「最后一条是 system」）；外层 `<system-reminder>` 让模型仍按带外提示理解。
+  3. **不进 `messages` 通道**：`model_input_suffix` 是普通字符串通道（同 `system_prompt`），`agent` 调用时
+     即时构造那条消息、绝不写回 `messages` → 既不流式泄漏、也不被 checkpointer 回放（**沿用 §48/2026-07-15
+     泄漏边界**）；也**不进 `llm_input_messages`**，故下游 summarization/epoch 不折进摘要（epoch 干净）。
+- **验证**：`test_recalled_memory_rides_trailing_suffix_not_system_prefix`——真图跑一轮，断言记忆**不在**首条
+  system、**在**尾部 user `<system-reminder>`（顺带证明检索命中）。
+
+### 55.2 B：渐进披露与工具缓存（已是务实版，勿误改）
+- `model_for_state` 每步 `bind_tools(initial ∪ promoted)`；`initial_names` 含全部日常工具（只 gate
+  browser/extensions），`tool_by_name` 是插入序稳定 dict → **没 promote 时每步 `tools` 数组逐字节相同、
+  前缀缓存稳**。只有 browser/extensions 被 loader 激活时打断一次（只增不减、至多一两次/会话）。
+- 想彻底不动 `tools` 只剩「Mask, Don't Remove」（约束解码遮蔽），需 provider 支持，留作可选激进版。
+  **结论：本分支无需改代码；别为「做点什么」去动它。**
+
+### 55.3 C：超长工具结果卸载（`steps/tool_output_offload.py`）
+- **机制**：`make_tools_node` 的 `wrap`/`awrap` 在安全包装后调 `maybe_offload_tool_message`。一条 `ToolMessage`
+  文本超 `tool_output_offload_max_chars`（默认 16000；env `SLOTFLOW_TOOL_OUTPUT_OFFLOAD_MAX_CHARS`，开关
+  `SLOTFLOW_TOOL_OUTPUT_OFFLOAD`）→ 全文写 `<workspace_root>/.slotflow_offload/<tool>-<callid>.txt`，
+  `ToolMessage` 换成 `{path, chars, lines, preview 首尾, how_to_read}`。模型用**默认激活的**
+  `workspace_read('<path>')` 取全文 / `workspace_grep('<kw>','<path>')` 定位。
+- **防御**（都在 `tests/test_tool_output_offload.py`）：跳过 `workspace_read` 等读文件工具（避免写回工作区的
+  循环）；多模态/含非文本块 content 原样放过；写盘失败/只读/超 `max_write_bytes` → 回退「内联截断+预览、
+  path=None」，**绝不抛异常**；`awrap` 的卸载走 `asyncio.to_thread` 不阻塞事件循环。
+- **为什么不用外部 DB/句柄表**：SlotFlow 早有工作区文件系统 + `workspace_read/grep`（默认激活）+
+  `context_archive`，缺的只是「写时把大输出落盘 + 留句柄」这一层。复用文件系统 = 最贴 Manus 模型、零新增工具。
+
+### 55.4 为什么不退回 create_agent（诚实版：可维护性取舍，不是能力取舍）
+- **核心判据（最重要的一条）**：分不分图，看 **subagent 之间要不要共享、互相看得见 state**——子任务是黑盒、只回结果、
+  彼此不看中间状态 → subagent 当工具、create_agent 够；几个 subagent 要共享同一块 state / 看彼此中间产物 / 并行汇总
+  → graph 编排（共享状态 + 并行合并 + per-node checkpoint/中断是图独有的机制）。**只要 subagent 还是工具，SlotFlow
+  就是"一个环"，纯 create_agent 就够；图是可读性偏好 + 多 agent 保险，不是必需。**
+- **先纠正一个常见（我自己也犯过的）错误框架**：别说「这些流程 create_agent 做不到」。**create_agent
+  本身就编译成一张 LangGraph 图**，每个中间件钩子都是图里一个节点；凡手写图能表达的控制流，中间件基本也能
+  （`before/after_model` + `wrap_model_call/tool_call` + `jump_to` model/tools/end）。旁证：**SlotFlow 重构前
+  这些全是中间件**（澄清门 = `abefore_model` 里 `interrupt()`；todo 自环 = after_model `jump_to="model"`；
+  压缩 = wrap 一层投影）。所以三处并非「做不到」。
+- **真实差别 = 显式 vs 隐式的控制流表达**：中间件把流程藏在「钩子类型 + 列表顺序 + 各处 jump_to」里，且不同
+  钩子合成规则不同（`wrap_*` 洋葱嵌套、before/after 各自方向）——确定但要心算；图把每条路径写成可读、可 diff、
+  可按节点名看 trace 的边。定制点少时中间件更短更清楚；到十来个、且多处带控制流跳转/子调用要单独过滤流时，
+  「隐式 + 心算」开始让人出错——**迁移的本质是赌「控制流已复杂到：画出来比塞进钩子桶更好维护」，是复杂度阈值
+  上的判断，不是能力必需。**
+- **唯一算「结构性」的边（仍是更自然、非唯一可行）**：图能有任意的、有名字的独立节点并路由到任意节点；像
+  `prepare`/`triage_gate`/`finalize` 这种「每轮一次、与模型调用无直接关系」的工位做成独立节点，比硬塞进
+  before_agent/before_model 顺眼。
+- **判据（软化版）**：复杂度**长在流程控制**（分支/门/回环/HITL/子流过滤）→ 显式图更好维护；只是**工具多/推理长**
+  的标准循环 → create_agent 够。SlotFlow 属前者，故**保留**；但这是维护性判断，不是「非图不可」。
+- **该不该退回**：既是可维护性取舍、且已有可跑的图 → **现在退回不划算**（重写+重测只换来少点样板）；从零起步
+  用 create_agent 当默认也合理。DeerFlow 反向不矛盾（它复杂在多 agent 协调、单 agent 标准 ReAct）。
+
