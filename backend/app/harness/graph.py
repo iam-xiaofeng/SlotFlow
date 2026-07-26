@@ -33,6 +33,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
 from app.chat.litellm_provider import (
+    is_retryable_infra_error,
     repair_streamed_tool_call_names,
     sanitize_reasoning_message,
 )
@@ -667,12 +668,18 @@ def _slotflow_tool_safety_wrapper(
         return build_unknown_tool_error_message(request.tool_call)
     try:
         return handler(request)
-    except GraphBubbleUp:
-        # interrupt() inside a tool (e.g. ask_clarification) raises GraphBubbleUp to pause
-        # the graph for HITL. It MUST propagate — never convert it to a tool_execution_error,
-        # or the graph never pauses and HITL silently dies. Same rule as triage_gate.
+    except (GraphBubbleUp, asyncio.CancelledError):
+        # 两类"控制流,不是错误",绝不能转成 tool_execution_error:
+        #  - GraphBubbleUp:工具里的 interrupt()(如 ask_clarification)靠它暂停图做 HITL——吞了图就不暂停、HITL 静默死;
+        #  - CancelledError:用户点停止后一路从下往上拆连接(SSE 断 → CancelledError 传播 → 取消模型请求)——吞了停止按钮就失效。
+        # CancelledError 是 BaseException、本就能穿过下面的 except Exception;这里显式并列,把"靠语言特性"写成"写明白",
+        # 也防日后有人把 except Exception 放宽成 except BaseException 时意外吞掉取消。
         raise
     except Exception as exc:  # noqa: BLE001
+        if is_retryable_infra_error(exc):
+            # 限流/超时/连接/5xx 是瞬时基础设施抖动(通常来自 task_tool 子代理内部的模型调用):
+            # 重抛让整轮干净失败、state 不留假失败,别把它当成永久的"工具失败"污染历史。
+            raise
         return build_error_tool_message(
             request.tool_call,
             error_type="tool_execution_error",
@@ -689,10 +696,14 @@ async def _slotflow_async_tool_safety_wrapper(
         return build_unknown_tool_error_message(request.tool_call)
     try:
         return await handler(request)
-    except GraphBubbleUp:
-        # See _slotflow_tool_safety_wrapper: interrupt() must propagate, not be swallowed.
+    except (GraphBubbleUp, asyncio.CancelledError):
+        # 见 _slotflow_tool_safety_wrapper:GraphBubbleUp(HITL)与 CancelledError(用户停止)都是控制流,
+        # 必须重抛、绝不能吞成 tool_execution_error,否则图不暂停 / 停止按钮静默失效。
         raise
     except Exception as exc:  # noqa: BLE001
+        if is_retryable_infra_error(exc):
+            # 见 _slotflow_tool_safety_wrapper:限流/超时/连接/5xx 瞬时错误重抛、不转永久工具失败。
+            raise
         return build_error_tool_message(
             request.tool_call,
             error_type="tool_execution_error",

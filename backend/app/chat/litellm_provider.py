@@ -59,6 +59,16 @@ def _convert_delta_to_message_chunk_preserving_thinking_blocks(
         blocks = _thinking_blocks_from_provider_payload(delta)
         if blocks:
             chunk.additional_kwargs["thinking_blocks"] = blocks
+        # 故事1「入站清洗」的非流式孪生:推理模型(实测 grok-4.5)把每个思考 delta 也塞进 content 成一个
+        # thinking 块,与答案的裸字符串 chunk 交错。思考量一大(带 system 提示时尤甚),langchain 的
+        # chunk 合并(``ainvoke`` 内部 / 落库对象 / checkpointer 回放)就把答案压没——content 塌成空串或
+        # 混合 list,``sanitize_reasoning_message`` 也无从恢复(正文已在合并阶段丢了)。真机实测:流式逐 token
+        # 正文 3/3 正常,但同一问 ``invoke`` 合并 0/3、终答为空。在转换阶段就把思考块从 content 剔除,content
+        # 只留纯答案 → 合并变成干净的字符串拼接,``ainvoke``/落库不再丢正文;思考已完整保留在
+        # ``additional_kwargs`` 的 ``reasoning_content`` / ``thinking_blocks``,前端思考框走那条 fallback,
+        # 流式逐 token 正文不受影响(只删思考块、不动答案)。
+        if isinstance(chunk.content, list):
+            chunk.content = _without_reasoning_metadata_blocks(chunk.content)
     return chunk
 
 
@@ -250,6 +260,29 @@ def _provider_requires_reasoning_roundtrip(provider: str | None) -> bool:
     if not provider:
         return False
     return provider.split("/", 1)[0].strip().lower() in _REASONING_ROUNDTRIP_PROVIDERS
+
+
+# 可重试的基础设施抖动:限流 / 超时 / 连接 / 5xx。撞上它们不该被 tool_safety 转成模型可见的
+# tool_execution_error——尤其 task_tool 子代理内部再调模型时的限流,会让父 agent 把"限流"误当成
+# "子任务本身失败"(改写任务重试纯浪费,或放弃并编一个结论),而且那条假失败会永久留在历史里、后
+# 续每轮回读一次。改为向上重抛:让整轮像 agent 节点里的瞬时错误一样干净失败、state 不落假 ToolMessage,
+# 用户重发即可。只认 litellm 抛的这几类真·瞬时错误(不含 BadRequestError/400 这类永久错),因此普通
+# 工具(如 web_fetch 自己把 429 放进结果 dict、并不抛 litellm 异常)不受影响,精准只覆盖"工具内部再调模型"。
+_RETRYABLE_INFRA_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    litellm.Timeout,
+    litellm.RateLimitError,
+    litellm.APIConnectionError,
+    litellm.ServiceUnavailableError,
+    litellm.InternalServerError,
+)
+
+
+def is_retryable_infra_error(error: BaseException) -> bool:
+    """瞬时基础设施错误(限流/超时/连接/5xx)判定,供 tool_safety 分类:命中→重抛而非转 ToolMessage。"""
+
+    if isinstance(error, BaseExceptionGroup):
+        return any(is_retryable_infra_error(exc) for exc in error.exceptions)
+    return isinstance(error, _RETRYABLE_INFRA_EXCEPTIONS)
 
 
 def sanitize_reasoning_message(

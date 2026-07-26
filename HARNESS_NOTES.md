@@ -3368,3 +3368,92 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 - **该不该退回**：既是可维护性取舍、且已有可跑的图 → **现在退回不划算**（重写+重测只换来少点样板）；从零起步
   用 create_agent 当默认也合理。DeerFlow 反向不矛盾（它复杂在多 agent 协调、单 agent 标准 ReAct）。
 
+## 56. 迭代 48（2026-07-26）：停止(取消)与 429 的错误分类加固
+
+### 56.0 TL;DR
+两类事、一个判据。**停止 ≠ 给模型发信号**——模型收不到「停止」，停止是前端断 SSE → Starlette 抛
+`asyncio.CancelledError` → 一路向下拆连接（httpx 请求取消 → provider 停生成）；任何一环把它吞掉，停止按钮就
+静默失效。**429/限流恰恰相反——它是异常**，危险处在 `task_tool` 内部：子代理撞限流 → 异常在工具里 →
+`tool_safety` 把它当普通失败转成 `tool_execution_error` → 模型误以为「任务本身失败」、还永久污染历史。
+本迭代把这两条从「靠运气对」变成「写明白 + 主动分类」。
+
+### 56.1 逐条核对（动手前先证明我们本来有什么、缺什么）
+- **裸 `except:` / `except BaseException` 吞取消**：全仓仅 2 处命中——`mcp/loader.py:105` 是
+  `except BaseException: aclose(); raise`（清理后**重抛**，正确）；另一处在技能模板 `.md`（非代码）。✅ 无隐患。
+- **`CancelledError` 能否穿透 tool_safety**：`graph.py` 两个 wrapper 用 `except Exception`——`CancelledError`
+  是 `BaseException` 不是 `Exception`，**天然放行**。✅ 成立，但「靠语言特性」，没写明。
+- **SDK `max_retries` 没被关**：`models.py` `DEFAULT_MODEL_MAX_RETRIES=5` 走 `load_positive_int_from_env`
+  （**恒 ≥1、关不掉**）+ 完整退避 + `litellm_provider` `stop_after_attempt`。✅（对照故事 4 的 `0→2` 教训）。
+- **停在 tools 节点的孤儿 tool_call 兜底**：`repair_dangling_tool_calls`（`steps/dangling_tool_call.py`）由
+  `pre_model` 每步先修，防下一轮 400。✅
+- **干净断开标记 run 取消**：`routes.py:302 except CancelledError: update_run_status('cancelled'); raise`。✅
+- **retryable / permanent 分类**：`tool_safety` 一律转 `tool_execution_error`，**无分类**。❌ 缺——最高 ROI。
+- **子进程可取消 + docker kill**：`sandbox_exec` 走 `asyncio.to_thread(subprocess.run)`（阻塞、不可取消）、
+  `agent_reach` 同理。停止后容器/宿主子进程继续跑到超时。❌ 缺（见 56.3 为什么这次不动）。
+- **非干净断开（拔网/飞行模式）**：Starlette 靠 `http.disconnect`，拔网不触发 → 整轮跑完落库。⚠️ 框架固有，基本无解。
+
+### 56.2 做了什么（只做真正有用、且改动小的两条）
+1. **`tool_safety` 显式重抛 `CancelledError`**：两个 wrapper 从 `except GraphBubbleUp: raise` 改为
+   `except (GraphBubbleUp, asyncio.CancelledError): raise`。不改行为（本就穿过 `except Exception`），把「靠语言
+   特性」变成「写明白」，并防日后有人把 `except Exception` 放宽成 `except BaseException` 时意外吞掉取消。
+   与 GraphBubbleUp 并列写清「两者都是控制流、不是错误」。
+2. **`tool_safety` 分类可重试/永久错误**（收益最大）：新增 `litellm_provider.is_retryable_infra_error`
+   （`_RETRYABLE_INFRA_EXCEPTIONS = {Timeout, RateLimitError, APIConnectionError, ServiceUnavailableError,
+   InternalServerError}`，含 `BaseExceptionGroup` 递归）。wrapper 的 `except Exception` 里先判定：命中 →
+   **重抛**（让整轮像 agent 节点的瞬时错误一样干净失败、state 不落假 ToolMessage，用户重发即可）；未命中
+   （参数错/文件不存在/exit≠0/一般异常）→ 维持转 `tool_execution_error` 给模型自我纠正。
+   - **为什么精准无误伤**：`litellm.RateLimitError` 等**只**由「工具内部再调模型」的路径抛出（典型 `task_tool`
+     子代理）；`web_fetch` 撞站点 429 是把 `status_code` 放进结果 dict、**并不抛** `litellm.*` 异常。所以分类
+     刚好只覆盖模型调用类瞬时错误，不动普通工具。
+   - **为什么重抛而非工具层退避**：子代理自己的模型调用已带 `max_retries=5` 退避；能逃出来说明退避已耗尽，
+     再原地重试无益，干净失败 + 保持 state 干净才是对的（对齐上面「agent 节点里的 429 是安全失败」）。
+
+### 56.3 为什么这次不动 ④（子进程取消）
+真问题（停止后 `docker exec` 里的 `pip/npm` 跑到 120s 超时、共享容器还可能干扰别的会话），但修法是把
+`subprocess.run` 换成 `asyncio.create_subprocess_exec` + 记容器/pid + `finally: docker kill`——**改的是
+demo 关键路径 `sandbox_exec` 的执行模型，测试面大、回归风险高**。以「作品要看得过去、别 churn 关键路径」为准，
+本轮**记为已知限制 + 修法草案**，不实现。验证脚本备忘：写个 `sleep 30` 的 sandbox 调用→按停止→看容器里进程
+是否还在（顺带验证 ① 没被吞：若后端日志显示整轮跑完，就是取消被吞）。
+
+### 56.4 验证
+- 新增 4 条单测（`tests/test_harness_tools.py`）：retryable(`RateLimitError`/`Timeout`)→重抛、`CancelledError`→
+  重抛、永久错误(`ValueError`/`FileNotFoundError`)→仍转 `tool_execution_error`；同步/异步两路都覆盖。
+- 离线全量 **443 passed**、`ruff` 干净；既有 GraphBubbleUp(HITL) 集成测试不回归。
+
+## 57. 迭代 48 续（2026-07-26）：grok 思考流的**非流式(合并)孪生**（承接 §54.9）
+
+### 57.0 起因
+跑 `evals --live --model grok-4.5` 第一条 `no-tool-chat` 就 FAIL——`answer_contains` 报**终答为空**。
+§54.9 修的是**流式**方向（`sanitize_reasoning_message` 清洗落库对象、#223 合并逐 token 思考块）；这条是它的
+**非流式(`ainvoke`)孪生**：一直没被单独验证过。
+
+### 57.1 真机探针链（每步都花钱，故按最小增量推进）
+1. 裸 `model.invoke([Human])` + sanitize → **3/3 有正文**（低思考量时 sanitize 能从合并后的 list 里把答案
+   字符串捞回，所以"以为早修好了"）。
+2. `graph.ainvoke`（真图，带 system + 工具）→ **1/3**；`[System, Human]` 无工具无 suffix → **0/3**；
+   `[Human]` 无 system → 3/3。**→ 差异变量 = system 提示**（不是我这轮加的 suffix，也不是工具；suffix 那版
+   反而略好，**排除是本轮上下文工程改动的回归**）。
+3. `[System, Human]` **流式** `m.stream` 分通道计量 → **content 39/39/36(3/3 非空)** vs reasoning 250~486。
+   **→ 决定性:带 system 时 grok 思考量翻几倍,思考块(内容块)与答案(裸字符串)在 content 里大量交错,
+   langchain 的 chunk 合并把答案压没(`ainvoke` 0/3);而流式逐 token 投影从不合并,正文照常出。**
+   所以**产品(SSE 流式)一直是好的**,坏的只有 `ainvoke`/合并/落库对象这一路。
+
+### 57.2 根因与修复
+**根因**：`_convert_delta_to_message_chunk_preserving_thinking_blocks` 此前只把 `thinking_blocks` **补进**
+`additional_kwargs`，却把思考块**留在 `chunk.content` 里**。低思考量时合并后是 `[…thinking, "答案"]`，sanitize
+还能捞回；高思考量时合并直接把答案压成空/混合 list，sanitize 已无正文可捞。
+
+**修复(litellm_provider.py，同一函数加 3 行)**：转换阶段就用既有 `_without_reasoning_metadata_blocks` 把思考块
+从 `content` 剔除——`content` 只留纯答案 → 合并变成干净字符串拼接、`ainvoke`/落库不再丢正文；思考已完整在
+`additional_kwargs.reasoning_content` / `thinking_blocks`，**前端思考框走 v3 `message.reasoning` 通道（源自
+`reasoning_content`，非 content 块）**，故不受影响。是 §54.9 那套「入站清洗」向**流式 chunk 转换**这一层的延伸。
+
+### 57.3 验证(真机 grok-4.5，用真实 SSE 适配器 `LangGraphEventAgentAdapter` 逐通道核对)
+- **流式(产品)**：content 54/45（答案照出）、reasoning 126/126（**思考框不回归**）。
+- **非流式(`ainvoke`/评测)**：终答 len 36/48（**从 0 → 非空,合并 bug 修好**）。
+- 2 条确定性单测（`tests/test_provider_reasoning_contract.py`）钉死：thinking 块从 content 剔除+答案保留、
+  纯思考 chunk 塌成空串;`reasoning` 契约 22/22 不破;离线全量 **449 passed**。
+- **边界（诚实标注）**：若某模型在特定 system 下**根本把答案留在 reasoning、content 交空**，这是模型输出层的事,
+  清洗无法凭空造正文——属选模型/调 thinking 的范畴，与本修复无关。
+
+

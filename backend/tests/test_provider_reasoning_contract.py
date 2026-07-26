@@ -615,3 +615,40 @@ def test_full_assistant_turn_segments_in_order() -> None:
         ("content", "therefore"),
         ("content", "the answer is X"),
     ]
+
+
+def test_stream_converter_strips_thinking_blocks_from_content(monkeypatch) -> None:
+    """故事1「入站清洗」的非流式孪生:推理模型(实测 grok-4.5)把每个思考 delta 塞进 ``content`` 成一个
+    thinking 块,与答案的裸字符串 chunk 交错;思考量一大,langchain 的 chunk 合并(``ainvoke`` 内部 /
+    落库对象)会把答案压没、终答为空。转换阶段就把思考块从 ``content`` 剔除 → 合并变干净字符串拼接、
+    正文不丢;思考完整保留在 ``additional_kwargs``(前端思考框走 reasoning_content 通道,不受影响)。"""
+
+    import app.chat.litellm_provider as lp
+    from langchain_core.messages import AIMessageChunk
+
+    def fake_upstream(delta, default_class):
+        chunk = AIMessageChunk(content=[{"type": "thinking", "thinking": "T"}, "答案"])
+        chunk.additional_kwargs["reasoning_content"] = "T"
+        return chunk
+
+    monkeypatch.setattr(lp, "_upstream_convert_delta_to_message_chunk", fake_upstream)
+    chunk = lp._convert_delta_to_message_chunk_preserving_thinking_blocks({}, None)
+
+    assert chunk.content == "答案"  # 思考块被剔除、答案保留
+    assert chunk.additional_kwargs["reasoning_content"] == "T"  # 思考未丢,只是移出 content
+
+
+def test_stream_converter_thinking_only_chunk_becomes_empty_string(monkeypatch) -> None:
+    """纯思考 chunk 的 ``content`` 塌成空串(而非残留 thinking 块列表):这样连续多个思考 chunk 合并时
+    不会把 content 累积成一堆块、把随后的答案裸字符串挤没——正是非流式空答案的根因。"""
+
+    import app.chat.litellm_provider as lp
+    from langchain_core.messages import AIMessageChunk
+
+    def fake_upstream(delta, default_class):
+        return AIMessageChunk(content=[{"type": "thinking", "thinking": "只在思考"}])
+
+    monkeypatch.setattr(lp, "_upstream_convert_delta_to_message_chunk", fake_upstream)
+    chunk = lp._convert_delta_to_message_chunk_preserving_thinking_blocks({}, None)
+
+    assert chunk.content == ""
