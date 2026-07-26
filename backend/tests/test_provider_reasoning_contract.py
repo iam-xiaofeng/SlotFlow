@@ -61,6 +61,36 @@ def test_sanitize_reasoning_message_is_noop_for_plain_string() -> None:
     assert message.content == "just text"
 
 
+def test_sanitize_reasoning_message_keeps_reasoning_content_for_deepseek() -> None:
+    """DeepSeek thinking mode requires ``reasoning_content`` echoed back every turn, so for the native
+    ``deepseek`` provider the carrier is preserved (the content block-list still collapses to a string)."""
+
+    message = AIMessage(
+        content=[{"type": "thinking", "thinking": "step 1"}, "final answer"],
+        additional_kwargs={"reasoning_content": "step 1"},
+    )
+
+    sanitize_reasoning_message(message, provider="deepseek")
+
+    assert message.content == "final answer"
+    assert message.additional_kwargs["reasoning_content"] == "step 1"
+
+
+def test_sanitize_reasoning_message_drops_reasoning_content_for_custom_relay() -> None:
+    """grok/glm ride a custom OpenAI-compatible relay (provider ``custom``): the CoT is not required
+    back, so the carrier is dropped for context economy — same as the default (no provider)."""
+
+    message = AIMessage(
+        content=[{"type": "thinking", "thinking": "step"}, "answer"],
+        additional_kwargs={"reasoning_content": "step"},
+    )
+
+    sanitize_reasoning_message(message, provider="custom")
+
+    assert message.content == "answer"
+    assert "reasoning_content" not in message.additional_kwargs
+
+
 def _bundle():
     return build_run_config(
         thread_id="thread_contract",

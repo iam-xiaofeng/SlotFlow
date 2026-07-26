@@ -236,7 +236,25 @@ def repair_streamed_tool_call_names(message: BaseMessage) -> BaseMessage:
     return message
 
 
-def sanitize_reasoning_message(message: BaseMessage) -> BaseMessage:
+# Providers whose API contract REQUIRES the assistant's ``reasoning_content`` to be echoed back on
+# every turn. Native DeepSeek "thinking mode" is the current example: LiteLLM's DeepSeek transform
+# (``_fill_reasoning_content``) expects it on each prior assistant message and otherwise feeds the model
+# a blank reasoning chain. For every other provider (OpenAI / grok / glm / …) re-feeding the CoT is pure
+# backwash, so the carrier is dropped for context economy. Keyed off the provider, not the model id.
+_REASONING_ROUNDTRIP_PROVIDERS = frozenset({"deepseek"})
+
+
+def _provider_requires_reasoning_roundtrip(provider: str | None) -> bool:
+    """True if this provider needs ``reasoning_content`` kept on persisted assistant messages."""
+
+    if not provider:
+        return False
+    return provider.split("/", 1)[0].strip().lower() in _REASONING_ROUNDTRIP_PROVIDERS
+
+
+def sanitize_reasoning_message(
+    message: BaseMessage, *, provider: str | None = None
+) -> BaseMessage:
     """Collapse streamed reasoning out of the PERSISTED assistant message (inbound boundary).
 
     Reasoning models streamed through a relay (observed live: grok-4.5 via a custom relay) return
@@ -252,10 +270,15 @@ def sanitize_reasoning_message(message: BaseMessage) -> BaseMessage:
     Normalizing here, once, at the point the message enters state fixes all of those at the root:
 
     * ``content`` block list → the answer string (via the same collapse used outbound), so nothing but
-      answer text is persisted;
-    * ``reasoning_content`` is dropped from the checkpointed carrier — re-feeding chain-of-thought to the
-      model every turn is pure backwash (OpenAI-style reasoners re-reason; DeepSeek reasoner must not
-      receive it), and the UI's reasoning box is captured live from the stream, not from this message.
+      answer text is persisted. **Always applied** — the block list is wire-illegal for OpenAI-style Chat
+      Completions (``unknown variant 'reasoning'`` → 400) and is the main bloat source.
+    * ``reasoning_content`` (the single top-level carrier) is dropped **unless the provider requires it
+      back**. For OpenAI-style reasoners (grok/glm/openai) re-feeding the CoT is pure backwash — they
+      re-reason — and the UI's reasoning box is captured live from the stream, not from this message. The
+      exception is **native DeepSeek thinking mode** (``provider == "deepseek"``), whose API rejects a
+      missing ``reasoning_content`` on prior assistant turns; for it the carrier is preserved so
+      multi-turn thinking keeps working. (``provider`` comes from ``run_context.model_provider``; custom
+      OpenAI-compatible relays are ``"custom"`` and are dropped as usual.)
 
     Signed ``thinking_blocks`` are deliberately preserved: Anthropic/Bedrock extended-thinking tool loops
     require the signed block on the continuation request. No-op for plain string content without reasoning.
@@ -265,7 +288,7 @@ def sanitize_reasoning_message(message: BaseMessage) -> BaseMessage:
     if isinstance(content, list):
         message.content = _without_reasoning_metadata_blocks(content)
     additional_kwargs = getattr(message, "additional_kwargs", None)
-    if isinstance(additional_kwargs, dict):
+    if isinstance(additional_kwargs, dict) and not _provider_requires_reasoning_roundtrip(provider):
         additional_kwargs.pop("reasoning_content", None)
     return message
 
