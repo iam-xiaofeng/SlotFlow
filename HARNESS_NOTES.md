@@ -3453,6 +3453,9 @@ demo 关键路径 `sandbox_exec` 的执行模型，测试面大、回归风险�
 - **非流式(`ainvoke`/评测)**：终答 len 36/48（**从 0 → 非空,合并 bug 修好**）。
 - 2 条确定性单测（`tests/test_provider_reasoning_contract.py`）钉死：thinking 块从 content 剔除+答案保留、
   纯思考 chunk 塌成空串;`reasoning` 契约 22/22 不破;离线全量 **449 passed**。
+- **真机 live 评测(10 条,grok-4.5,`--judge --langsmith`)**:`no-tool-chat` 从修复前空答案 → **PASS**(本修复的
+  端到端验证);`memory-after-compaction` **PASS**(强制压缩后仍答对暗号「42 号蓝盒子」= Issue-2 有效);完整
+  scorecard(6/10、含逐条归因与识别出的评测改进项)见 `backend/evals/README.md`。
 - **边界（诚实标注）**：若某模型在特定 system 下**根本把答案留在 reasoning、content 交空**，这是模型输出层的事,
   清洗无法凭空造正文——属选模型/调 thinking 的范畴，与本修复无关。
 
