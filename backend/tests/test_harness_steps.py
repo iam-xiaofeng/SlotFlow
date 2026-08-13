@@ -512,24 +512,71 @@ def test_repair_dangling_tool_calls_reads_raw_openai_tool_call_shape() -> None:
 
 def test_artifact_finalize_records_new_artifacts(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    artifacts_root = root / "artifacts"
+    artifacts_root = root / "thread_a" / "artifacts"
     artifacts_root.mkdir(parents=True)
     (artifacts_root / "old.md").write_text("old", encoding="utf-8")
     sandbox = SlotFlowSandboxConfig(workspace_root=root)
-    baseline = artifact_baseline(sandbox)
-    assert baseline == {"artifacts/old.md"}
+    baseline = artifact_baseline(sandbox, thread_id="thread_a")
+    assert baseline == {"thread_a/artifacts/old.md"}
 
     (artifacts_root / "report.md").write_text("new", encoding="utf-8")
     update = artifact_finalize_update(
         state={"slotflow": {"existing": "kept"}},
         baseline_paths=baseline,
         sandbox_config=sandbox,
+        thread_id="thread_a",
     )
     artifacts = update["slotflow"]["artifacts"]
     assert update["slotflow"]["existing"] == "kept"
     assert artifacts["source"] == "slotflow_artifact_discovery"
-    assert [entry["path"] for entry in artifacts["new_entries"]] == ["artifacts/report.md"]
-    assert {entry["path"] for entry in artifacts["entries"]} == {"artifacts/old.md", "artifacts/report.md"}
+    assert [entry["path"] for entry in artifacts["new_entries"]] == [
+        "thread_a/artifacts/report.md"
+    ]
+    assert {entry["path"] for entry in artifacts["entries"]} == {
+        "thread_a/artifacts/old.md",
+        "thread_a/artifacts/report.md",
+    }
+
+
+def test_artifact_discovery_ignores_other_conversations(tmp_path: Path) -> None:
+    """并发跑两个对话时,B 新写的产物不能算进 A 的 new_entries。
+
+    旧实现扫的是所有对话共用的 ``artifacts/``,A 的"本轮新增"里会混进 B 的文件,
+    前端就会弹出一个跟当前提问无关的产物。
+    """
+
+    root = tmp_path / "workspace"
+    (root / "thread_a" / "artifacts").mkdir(parents=True)
+    (root / "thread_b" / "artifacts").mkdir(parents=True)
+    sandbox = SlotFlowSandboxConfig(workspace_root=root)
+
+    baseline = artifact_baseline(sandbox, thread_id="thread_a")
+
+    # 对话 B 在 A 这一轮进行期间写了自己的产物
+    (root / "thread_b" / "artifacts" / "b.md").write_text("b", encoding="utf-8")
+    (root / "thread_a" / "artifacts" / "a.md").write_text("a", encoding="utf-8")
+
+    update = artifact_finalize_update(
+        state={"slotflow": {}},
+        baseline_paths=baseline,
+        sandbox_config=sandbox,
+        thread_id="thread_a",
+    )
+    new_paths = [entry["path"] for entry in update["slotflow"]["artifacts"]["new_entries"]]
+    assert new_paths == ["thread_a/artifacts/a.md"]
+
+
+def test_artifact_discovery_still_sees_legacy_layout(tmp_path: Path) -> None:
+    """迁移前写在 ``artifacts/<thread>/`` 的存量产物仍要报给同一个对话。"""
+
+    root = tmp_path / "workspace"
+    (root / "artifacts" / "thread_a").mkdir(parents=True)
+    (root / "artifacts" / "thread_a" / "legacy.md").write_text("x", encoding="utf-8")
+    sandbox = SlotFlowSandboxConfig(workspace_root=root)
+
+    entries = list_artifact_entries(sandbox, thread_id="thread_a")
+
+    assert [entry["path"] for entry in entries] == ["artifacts/thread_a/legacy.md"]
 
 
 def test_list_artifact_entries_empty_when_no_artifacts(tmp_path: Path) -> None:

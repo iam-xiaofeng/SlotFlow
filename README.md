@@ -593,6 +593,25 @@ pnpm build
 Live provider tests are not part of the default offline suite. Use them only when you
 have the required API keys and intentionally want a live smoke test.
 
+### Agent Evaluation
+
+A 10-sample agent evaluation harness lives in `backend/evals/`, running the real
+`build_slotflow_harness_graph` call path in three tiers — offline stub, FakeModel smoke,
+and live real-model — with six evaluators (tool-trajectory, precision, tool-errors,
+answer-substring, an anti-reasoning-bloat contract, and an optional LLM-as-judge):
+
+```bash
+cd backend
+.venv/bin/python -m evals.run_eval                              # offline (deterministic, free)
+.venv/bin/python -m evals.run_eval --smoke                      # real graph + FakeModel (free)
+.venv/bin/python -m evals.run_eval --live --model grok-4.5 --judge --langsmith
+```
+
+A live grok-4.5 run scored 6/10 samples; the four misses break down as one workspace-seeding
+gap, two strict single-tool expectations vs. a defensible alternative tool, and one
+model-output edge case where the contract under test actually passed. See
+[`backend/evals/README.md`](./backend/evals/README.md) for the annotated scorecard.
+
 ## Troubleshooting
 
 ### `make dev` cannot find `uv`, `node`, or `pnpm`

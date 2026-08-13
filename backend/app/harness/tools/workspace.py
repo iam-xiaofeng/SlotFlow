@@ -11,6 +11,11 @@ from typing import Any
 from langchain_core.tools import BaseTool, StructuredTool
 
 from app.harness.sandbox import SlotFlowSandboxConfig, build_slotflow_workspace
+from app.harness.sandbox.layout import (
+    ARTIFACTS_DIR_NAME,
+    thread_artifacts_dir,
+    thread_dir_name,
+)
 from app.harness.sandbox.readers import plain_text_excerpt
 
 
@@ -21,7 +26,7 @@ def build_workspace_tools(
 ) -> list[BaseTool]:
     """Build file tools bound to the current SlotFlow workspace config.
 
-    `thread_id` namespaces generated artifacts under `artifacts/<thread_id>/`, so each
+    `thread_id` namespaces generated artifacts under `<thread_id>/artifacts/`, so each
     conversation gets one folder holding everything the user can open (uploads staged
     by the run plus files the agent generates).
     """
@@ -284,26 +289,23 @@ def search_workspace_text(
 def artifact_dir_for_thread(thread_id: str | None) -> str:
     """Return the artifact folder for a conversation (per-thread when known)."""
 
-    cleaned = (thread_id or "").strip().strip("/")
-    return f"artifacts/{cleaned}" if cleaned else "artifacts"
+    return thread_artifacts_dir(thread_id)
 
 
 def normalize_artifact_path(path: str, thread_id: str | None = None) -> str:
     """Keep generated artifacts under this conversation's artifact directory.
 
-    Accepts a bare name ("report.md"), or a path the model prefixed with
-    "artifacts/" or the thread id; always returns "<artifact_root>/<name>".
+    模型给的 `path` 可能是裸名("report.md"),也可能带上它在沙箱里看到的目录前缀
+    ("artifacts/report.md"、"<thread>/artifacts/report.md")。宽容地把前缀剥掉,
+    最终一律落在 "<thread>/artifacts/<name>"。
     """
 
     base = artifact_dir_for_thread(thread_id)
     stripped = path.strip().lstrip("/").strip()
-    if not stripped or stripped == "artifacts":
+    for _ in range(2):
+        for prefix in (f"{thread_dir_name(thread_id)}/", f"{ARTIFACTS_DIR_NAME}/"):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :].lstrip("/")
+    if not stripped or stripped in (ARTIFACTS_DIR_NAME, thread_dir_name(thread_id)):
         return f"{base}/artifact.md"
-    if stripped.startswith("artifacts/"):
-        stripped = stripped[len("artifacts/") :].lstrip("/")
-    cleaned_thread = (thread_id or "").strip().strip("/")
-    if cleaned_thread and (
-        stripped == cleaned_thread or stripped.startswith(f"{cleaned_thread}/")
-    ):
-        stripped = stripped[len(cleaned_thread) :].lstrip("/")
-    return f"{base}/{stripped}" if stripped else f"{base}/artifact.md"
+    return f"{base}/{stripped}"

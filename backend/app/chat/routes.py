@@ -170,6 +170,7 @@ async def stream_thread_run(
         stage_uploaded_files,
         body.files,
         run_id=run.id,
+        thread_id=thread_id,
         store=upload_store,
     )
     uploaded_file_metadata = [
@@ -504,6 +505,7 @@ def stage_uploaded_files(
     file_ids: list[str],
     *,
     run_id: str,
+    thread_id: str | None = None,
     store: SlotFlowUploadStore,
 ) -> list[UploadedFileContext]:
     """把请求里的 file_id 落位成本次 run 可读取的上传文件元数据。"""
@@ -511,7 +513,11 @@ def stage_uploaded_files(
     uploaded_files: list[UploadedFileContext] = []
     for file_id in file_ids:
         try:
-            staged = store.stage_upload_for_run(file_id, run_id=run_id)
+            staged = store.stage_upload_for_run(
+                file_id,
+                run_id=run_id,
+                thread_id=thread_id,
+            )
             uploaded_files.append(uploaded_file_to_context(staged))
         except UploadNotFoundError as exc:
             raise HTTPException(status_code=404, detail="upload not found") from exc

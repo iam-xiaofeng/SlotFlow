@@ -30,3 +30,8 @@ class SlotFlowMiddlewareConfig:
     subagent_max_concurrent: int = 3
     context_overflow_max_retries: int = 5
     context_overflow_retry_delay_seconds: int = 2
+    # 超长工具结果卸载：单条工具结果文本超过阈值(字符)时，把全文写入工作区隐藏文件，
+    # 上下文只保留"引用句柄 + 预览"，模型按需用 workspace_read/workspace_grep 分块回读
+    # (Manus「file system as context」)。0 或关闭开关即完全禁用、工具结果原样内联。
+    tool_output_offload_enabled: bool = True
+    tool_output_offload_max_chars: int = 16000

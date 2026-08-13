@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import RemoveMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -33,12 +33,14 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
 from app.chat.litellm_provider import (
+    is_retryable_infra_error,
     repair_streamed_tool_call_names,
     sanitize_reasoning_message,
 )
 from app.chat.models import RunContext
 from app.harness.features import SlotFlowHarnessFeatures
-from app.harness.sandbox import SlotFlowSandboxConfig
+from app.harness.sandbox import SlotFlowSandboxConfig, build_slotflow_workspace
+from app.harness.sandbox.workspace import SlotFlowWorkspace
 from app.harness.state import SlotFlowAgentState
 from app.harness.steps.artifact_discovery import (
     artifact_baseline,
@@ -55,8 +57,8 @@ from app.harness.steps.clarify_gate import (
 from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.long_term_memory import (
     aexplicit_save_update,
-    append_memory_system_message,
     aretrieve_memories,
+    build_memory_prompt,
     maybe_schedule_extraction,
 )
 from app.harness.steps.runtime_summary import runtime_summary_update
@@ -74,6 +76,7 @@ from app.harness.steps.todo import (
     todo_parallel_call_guard,
     todo_reminder_update,
 )
+from app.harness.steps.tool_output_offload import maybe_offload_tool_message
 from app.harness.steps.tool_safety import (
     build_error_tool_message,
     build_unknown_tool_error_message,
@@ -236,7 +239,10 @@ def make_prepare_node(inputs: _GraphInputs):
         updates["slotflow"] = slotflow
         # Stash baseline artifacts + memories for finalize/pre_model.
         if flags.artifact_discovery_enabled:
-            updates["artifacts_baseline"] = artifact_baseline(inputs.sandbox_config)
+            updates["artifacts_baseline"] = artifact_baseline(
+                inputs.sandbox_config,
+                thread_id=inputs.run_context.thread_id if inputs.run_context else None,
+            )
         if memories:
             updates["retrieved_memories"] = memories
         return updates
@@ -322,7 +328,14 @@ def make_pre_model_node(inputs: _GraphInputs):
             updates["context_epoch"] = None
         updates["llm_input_messages"] = projected_input
 
-        # Compose the final system prompt for this step: base + memory section.
+        # Compose the STABLE system prompt for this step: base + skills preflight only.
+        # Volatile per-turn/per-step context (recalled long-term memory + todo control) is
+        # intentionally kept OUT of the system prefix and moved to a trailing model-input
+        # suffix (below). Rationale: `tools → system → messages` is the provider's cacheable
+        # prefix; putting memory/todo in `system` made it change every turn/step and blew
+        # away the whole prefix cache. Appending them AFTER all messages keeps the prefix
+        # byte-stable and perturbs only the tail. (Manus: keep the prompt prefix stable +
+        # append-only.)
         system_sections: list[str] = [inputs.system_prompt]
         slotflow = state.get("slotflow") or {}
         skills_preflight = (
@@ -332,24 +345,28 @@ def make_pre_model_node(inputs: _GraphInputs):
         )
         if isinstance(skills_preflight, dict):
             system_sections.append(format_preflight(skills_preflight))
+        composed = "\n\n".join(part for part in system_sections if part)
+        # Recompute-per-step, same lesson as `llm_input_messages` above: writing only when it
+        # differs from the BASE prompt leaves the previous step's snapshot stale in state.
+        updates["system_prompt"] = composed or inputs.system_prompt
+
+        # Trailing model-input suffix (recalled memory + per-step todo control). Rides its own
+        # plain string channel like `system_prompt` — never the `messages` channel — so it is
+        # neither streamed to the user (v3 messages projection) nor persisted/replayed by the
+        # checkpointer (same leak boundary as the 2026-07-15 fix). `agent` appends it as a
+        # trailing user-role <system-reminder> after every conversation message; summarization/epoch
+        # (which read `llm_input_messages`, already computed above) therefore never fold it in.
+        suffix_sections: list[str] = []
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             memories = state.get("retrieved_memories") or []
             if memories:
-                base_system = SystemMessage(content="\n\n".join(system_sections))
-                enriched = append_memory_system_message(
-                    base_system,
-                    memories=memories,
-                    tools_enabled=bool(inputs.tools),
+                suffix_sections.append(
+                    build_memory_prompt(memories, tools_enabled=bool(inputs.tools))
                 )
-                system_sections = [enriched.content]
-        # Per-step todo control blocks go LAST so they are the most recent instruction
-        # the model reads, without ever entering the streamed/persisted message channel.
-        system_sections.extend(step_control_blocks)
-        composed = "\n\n".join(part for part in system_sections if part)
-        # Recompute-per-step, same lesson as `llm_input_messages` above: writing only
-        # when it differs from the BASE prompt leaves the previous step's snapshot
-        # (e.g. a consumed enforcement block) stale in state for every later step.
-        updates["system_prompt"] = composed or inputs.system_prompt
+        suffix_sections.extend(step_control_blocks)
+        updates["model_input_suffix"] = (
+            "\n\n".join(part for part in suffix_sections if part) or None
+        )
         return updates
 
     return pre_model
@@ -455,6 +472,18 @@ def emergency_context_projection(messages: list[Any], *, attempt: int) -> list[A
 # ---------------------------------------------------------------------------
 
 
+def _model_input_suffix_message(suffix: str) -> HumanMessage:
+    """把易变的尾部上下文(召回记忆 / todo 控制)包成**用户角色**的 <system-reminder> 追加消息。
+
+    用 user 角色而非 system:让送进模型的消息序列**始终以 user/tool 结尾**——这是所有 OpenAI
+    兼容 provider 都接受的生成形态(部分较严的中转会拒绝"最后一条是 system")。外层 <system-reminder>
+    让模型仍按"带外系统提示"理解,而非用户原话。该消息在 agent 调用时即时构造,绝不写入 `messages`
+    通道,因此既不流式泄漏给用户、也不被 checkpointer 回放(与 2026-07-15 泄漏修复同一边界)。
+    """
+
+    return HumanMessage(content=f"<system-reminder>\n{suffix}\n</system-reminder>")
+
+
 def make_agent_node(inputs: _GraphInputs):
     def model_for_state(state: SlotFlowAgentState):
         promoted = set(state.get("promoted_tool_names") or [])
@@ -470,18 +499,23 @@ def make_agent_node(inputs: _GraphInputs):
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
         system_text = state.get("system_prompt") or inputs.system_prompt
+        # Volatile context (memory/todo) rides as a trailing user-role <system-reminder>
+        # AFTER all conversation messages: keeps the cacheable `system → messages` prefix
+        # stable AND leaves the payload ending on a user message (provider-safe).
+        suffix = state.get("model_input_suffix")
+        suffix_messages = [_model_input_suffix_message(suffix)] if suffix else []
         bound_model = model_for_state(state)
         projected_messages = list(messages)
         retries = max(1, inputs.config_flags.context_overflow_max_retries)
         for attempt in range(retries + 1):
             try:
                 response = await bound_model.ainvoke(
-                    [SystemMessage(content=system_text), *projected_messages],
+                    [SystemMessage(content=system_text), *projected_messages, *suffix_messages],
                     config,
                 )
                 response.name = "slotflow"
                 repair_streamed_tool_call_names(response)
-                sanitize_reasoning_message(response)
+                sanitize_reasoning_message(response, provider=inputs.run_context.model_provider)
                 return {"messages": [response]}
             except Exception as exc:
                 if not is_context_overflow_error(exc) or attempt >= retries:
@@ -501,13 +535,15 @@ def make_agent_node(inputs: _GraphInputs):
     ) -> dict[str, Any]:
         messages = state.get("llm_input_messages") or state.get("messages") or []
         system_text = state.get("system_prompt") or inputs.system_prompt
+        suffix = state.get("model_input_suffix")
+        suffix_messages = [_model_input_suffix_message(suffix)] if suffix else []
         bound_model = model_for_state(state)
         response = bound_model.invoke(
-            [SystemMessage(content=system_text), *messages], config
+            [SystemMessage(content=system_text), *messages, *suffix_messages], config
         )
         response.name = "slotflow"
         repair_streamed_tool_call_names(response)
-        sanitize_reasoning_message(response)
+        sanitize_reasoning_message(response, provider=inputs.run_context.model_provider)
         return {"messages": [response]}
 
     return agent, agent_sync
@@ -585,6 +621,7 @@ def make_finalize_node(inputs: _GraphInputs):
                 state={"slotflow": slotflow},
                 baseline_paths=baseline,
                 sandbox_config=inputs.sandbox_config,
+                thread_id=inputs.run_context.thread_id if inputs.run_context else None,
             )
             slotflow.update(artifact_update["slotflow"])
 
@@ -635,12 +672,18 @@ def _slotflow_tool_safety_wrapper(
         return build_unknown_tool_error_message(request.tool_call)
     try:
         return handler(request)
-    except GraphBubbleUp:
-        # interrupt() inside a tool (e.g. ask_clarification) raises GraphBubbleUp to pause
-        # the graph for HITL. It MUST propagate — never convert it to a tool_execution_error,
-        # or the graph never pauses and HITL silently dies. Same rule as triage_gate.
+    except (GraphBubbleUp, asyncio.CancelledError):
+        # 两类"控制流,不是错误",绝不能转成 tool_execution_error:
+        #  - GraphBubbleUp:工具里的 interrupt()(如 ask_clarification)靠它暂停图做 HITL——吞了图就不暂停、HITL 静默死;
+        #  - CancelledError:用户点停止后一路从下往上拆连接(SSE 断 → CancelledError 传播 → 取消模型请求)——吞了停止按钮就失效。
+        # CancelledError 是 BaseException、本就能穿过下面的 except Exception;这里显式并列,把"靠语言特性"写成"写明白",
+        # 也防日后有人把 except Exception 放宽成 except BaseException 时意外吞掉取消。
         raise
     except Exception as exc:  # noqa: BLE001
+        if is_retryable_infra_error(exc):
+            # 限流/超时/连接/5xx 是瞬时基础设施抖动(通常来自 task_tool 子代理内部的模型调用):
+            # 重抛让整轮干净失败、state 不留假失败,别把它当成永久的"工具失败"污染历史。
+            raise
         return build_error_tool_message(
             request.tool_call,
             error_type="tool_execution_error",
@@ -657,10 +700,14 @@ async def _slotflow_async_tool_safety_wrapper(
         return build_unknown_tool_error_message(request.tool_call)
     try:
         return await handler(request)
-    except GraphBubbleUp:
-        # See _slotflow_tool_safety_wrapper: interrupt() must propagate, not be swallowed.
+    except (GraphBubbleUp, asyncio.CancelledError):
+        # 见 _slotflow_tool_safety_wrapper:GraphBubbleUp(HITL)与 CancelledError(用户停止)都是控制流,
+        # 必须重抛、绝不能吞成 tool_execution_error,否则图不暂停 / 停止按钮静默失效。
         raise
     except Exception as exc:  # noqa: BLE001
+        if is_retryable_infra_error(exc):
+            # 见 _slotflow_tool_safety_wrapper:限流/超时/连接/5xx 瞬时错误重抛、不转永久工具失败。
+            raise
         return build_error_tool_message(
             request.tool_call,
             error_type="tool_execution_error",
@@ -673,6 +720,8 @@ def make_tools_node(
     tools: list[BaseTool],
     *,
     initial_tool_names: frozenset[str] | None = None,
+    workspace: SlotFlowWorkspace | None = None,
+    offload_max_chars: int = 0,
 ) -> ToolNode:
     initial = initial_tool_names or frozenset(tool.name for tool in tools)
 
@@ -690,7 +739,12 @@ def make_tools_node(
                 message="Activate this tool through its tool-space loader first.",
                 exception_type="ToolNotActivated",
             )
-        return _slotflow_tool_safety_wrapper(request, handler)
+        result = _slotflow_tool_safety_wrapper(request, handler)
+        if workspace is not None and offload_max_chars > 0:
+            result = maybe_offload_tool_message(
+                result, workspace=workspace, max_chars=offload_max_chars
+            )
+        return result
 
     async def awrap(
         request: ToolCallRequest,
@@ -703,7 +757,16 @@ def make_tools_node(
                 message="Activate this tool through its tool-space loader first.",
                 exception_type="ToolNotActivated",
             )
-        return await _slotflow_async_tool_safety_wrapper(request, handler)
+        result = await _slotflow_async_tool_safety_wrapper(request, handler)
+        if workspace is not None and offload_max_chars > 0:
+            # 卸载做本地文件 IO，放线程池避免阻塞事件循环。
+            result = await asyncio.to_thread(
+                maybe_offload_tool_message,
+                result,
+                workspace=workspace,
+                max_chars=offload_max_chars,
+            )
+        return result
 
     return ToolNode(
         tools,
@@ -757,9 +820,23 @@ def build_slotflow_graph(
     agent_async, agent_sync = make_agent_node(inputs)
     graph.add_node("agent", RunnableLambda(agent_sync, afunc=agent_async, name="agent"))
     graph.add_node("post_model", make_post_model_node(inputs))
+    # 超长工具结果卸载：仅在开关开启且阈值>0 时建工作区句柄，交给 tools 节点的 wrap/awrap。
+    offload_max_chars = (
+        int(getattr(inputs.config_flags, "tool_output_offload_max_chars", 0) or 0)
+        if getattr(inputs.config_flags, "tool_output_offload_enabled", True)
+        else 0
+    )
+    offload_workspace = (
+        build_slotflow_workspace(inputs.sandbox_config) if offload_max_chars > 0 else None
+    )
     graph.add_node(
         "tools",
-        make_tools_node(tools, initial_tool_names=inputs.initial_tool_names),
+        make_tools_node(
+            tools,
+            initial_tool_names=inputs.initial_tool_names,
+            workspace=offload_workspace,
+            offload_max_chars=offload_max_chars,
+        ),
     )
     graph.add_node("finalize", make_finalize_node(inputs))
 

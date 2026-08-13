@@ -66,7 +66,7 @@ import {
   sortRecordsByNames,
 } from "./chat-app-helpers";
 import { ChatComposer } from "./chat-composer";
-import { filterThreadArtifacts, makeThreadTitle } from "./chat-format";
+import { filterThreadArtifacts, isThreadArtifactPath, makeThreadTitle } from "./chat-format";
 import { ThreadSidebar } from "./chat-sidebar";
 import { EmptyState, MessageList } from "./message-list";
 import { useModelCatalog } from "./use-model-catalog";
@@ -291,14 +291,13 @@ export function ChatApp() {
           refreshMemories(),
         ]);
         // Only auto-open artifacts that belong to THIS thread and are genuinely new.
-        // `nextArtifacts` is the full recursive listing under artifacts/ (every thread +
-        // legacy), so naively taking newArtifacts[0] could pop up an older thread's file
-        // after answering an unrelated question (issue #8). Restrict to this thread's
-        // namespaced path + remembered paths, then to files not seen before this run.
+        // `nextArtifacts` is the aggregated listing of every conversation's artifacts
+        // (plus legacy), so naively taking newArtifacts[0] could pop up an older
+        // thread's file after answering an unrelated question (issue #8). Restrict to
+        // this thread's own folder + remembered paths, then to files not seen before.
         const threadId = result.thread?.id ?? thread?.id;
-        const threadPrefix = threadId ? `artifacts/${threadId}/` : null;
         const threadOwned = (artifact: WorkspaceEntryRecord) =>
-          threadPrefix !== null && artifact.path.startsWith(threadPrefix);
+          threadId !== undefined && isThreadArtifactPath(artifact.path, threadId);
         const newArtifacts = mergeWorkspaceEntries(
           discoveredArtifacts.filter(threadOwned),
           nextArtifacts.filter(

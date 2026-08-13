@@ -10,6 +10,12 @@ from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import get_chat_repo, get_upload_store
 from app.harness.sandbox import WorkspaceFileTooLargeError, WorkspacePathError
+from app.harness.sandbox.layout import (
+    LEGACY_ARTIFACTS_DIR,
+    is_artifact_path,
+    thread_artifacts_dir,
+    viewable_kind,
+)
 from app.harness.sandbox.workspace import SlotFlowWorkspace
 from app.workspace.models import (
     ThreadWorkspaceRecord,
@@ -23,32 +29,31 @@ router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
 
 def _is_viewable_path(path: str) -> bool:
     """Read/preview is allowed only for generated artifacts and user uploads; other
-    workspace areas (e.g. skills) stay private. The sandbox is still enforced by
-    `resolve_path`."""
+    workspace areas (scratch `work/`, upload originals, skills) stay private. The
+    sandbox is still enforced by `resolve_path`."""
 
-    return (
-        path == "artifacts"
-        or path.startswith("artifacts/")
-        or path == "uploads"
-        or path.startswith("uploads/")
-    )
+    return viewable_kind(path) is not None
 
 
 @router.get("/artifacts", response_model=list[WorkspaceEntryRecord])
 async def list_artifacts(
     request: Request,
-    path: str = Query("artifacts"),
+    path: str = Query(""),
 ) -> list[WorkspaceEntryRecord]:
-    """List immediate children under `workspace/artifacts` or one of its subdirectories.
+    """List artifacts.
 
-    `path` lets the directory browser drill down; it must stay under `artifacts/`
-    (the workspace sandbox is additionally enforced by `list_entries`/`resolve_path`).
+    不带 `path` 时返回**聚合视图**:所有对话的 `<thread>/artifacts/` 递归展开,加上旧布局
+    遗留在 `artifacts/` 下的文件。带 `path` 时是目录浏览器的下钻,只能落在产物区
+    (工作区越界另由 `list_entries`/`resolve_path` 兜住)。
     """
 
-    if path != "artifacts" and not path.startswith("artifacts/"):
-        raise HTTPException(status_code=400, detail="path must be under artifacts/")
-
     workspace = get_upload_store(request).workspace
+    if not path:
+        return await run_in_threadpool(_list_all_artifacts, workspace)
+
+    if not is_artifact_path(path):
+        raise HTTPException(status_code=400, detail="path must be an artifact directory")
+
     try:
         entries = await run_in_threadpool(workspace.list_entries, path)
     except WorkspacePathError:
@@ -71,8 +76,8 @@ async def read_artifact(
 ) -> WorkspaceReadRecord:
     """Read one generated artifact or user upload for preview."""
 
-    if path in ("artifacts", "uploads") or not _is_viewable_path(path):
-        raise HTTPException(status_code=400, detail="path must be a file under artifacts/ or uploads/")
+    if not _is_viewable_path(path):
+        raise HTTPException(status_code=400, detail="path must be a file under an artifacts/ or uploads/ folder")
 
     workspace = get_upload_store(request).workspace
     try:
@@ -93,8 +98,8 @@ async def raw_artifact(
 ) -> FileResponse:
     """Serve one generated artifact or user upload for browser preview."""
 
-    if path in ("artifacts", "uploads") or not _is_viewable_path(path):
-        raise HTTPException(status_code=400, detail="path must be a file under artifacts/ or uploads/")
+    if not _is_viewable_path(path):
+        raise HTTPException(status_code=400, detail="path must be a file under an artifacts/ or uploads/ folder")
 
     workspace = get_upload_store(request).workspace
     try:
@@ -127,8 +132,8 @@ async def delete_artifact(
 ) -> Response:
     """Delete one generated artifact file."""
 
-    if path == "artifacts" or not path.startswith("artifacts/"):
-        raise HTTPException(status_code=400, detail="artifact path must be under artifacts/")
+    if not is_artifact_path(path):
+        raise HTTPException(status_code=400, detail="artifact path must be under an artifacts/ folder")
 
     workspace = get_upload_store(request).workspace
     try:
@@ -153,9 +158,13 @@ async def list_thread_workspaces(request: Request) -> list[ThreadWorkspaceRecord
 
     records: list[ThreadWorkspaceRecord] = []
     threads = repo.list_threads()
-    thread_artifact_prefixes = {f"artifacts/{thread.id}/" for thread in threads}
+    legacy_owned_prefixes = {f"{LEGACY_ARTIFACTS_DIR}/{thread.id}/" for thread in threads}
     for thread in threads:
-        generated = _list_workspace_files(workspace, f"artifacts/{thread.id}")
+        generated = _list_workspace_files(workspace, thread_artifacts_dir(thread.id))
+        # 旧布局 artifacts/<thread_id>/ 里的存量文件继续展示,免得迁移前后前端"少东西"。
+        generated += _list_workspace_files(
+            workspace, f"{LEGACY_ARTIFACTS_DIR}/{thread.id}"
+        )
         uploads = _collect_thread_uploads(repo, workspace, thread.id)
         if not generated and not uploads:
             continue
@@ -172,8 +181,8 @@ async def list_thread_workspaces(request: Request) -> list[ThreadWorkspaceRecord
     # must still be findable — surface them as an "未归类产物" group.
     flat = [
         entry
-        for entry in _list_workspace_files(workspace, "artifacts")
-        if not any(entry.path.startswith(prefix) for prefix in thread_artifact_prefixes)
+        for entry in _list_workspace_files(workspace, LEGACY_ARTIFACTS_DIR)
+        if not any(entry.path.startswith(prefix) for prefix in legacy_owned_prefixes)
     ]
     if flat:
         records.append(
@@ -186,6 +195,37 @@ async def list_thread_workspaces(request: Request) -> list[ThreadWorkspaceRecord
         )
 
     return records
+
+
+def _list_all_artifacts(workspace: SlotFlowWorkspace) -> list[WorkspaceEntryRecord]:
+    """聚合所有对话的产物文件:``<thread>/artifacts/**`` 加上旧布局的 ``artifacts/**``。
+
+    以点开头的目录是 SlotFlow 自己的存储(上传原件、卸载文件、浏览器状态),跳过;
+    ``work/`` 是沙箱 scratch,不在产物区,``_list_workspace_files`` 只被指向 artifacts 子目录。
+    """
+
+    entries: list[WorkspaceEntryRecord] = []
+    seen: set[str] = set()
+    try:
+        children = sorted(workspace.root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return []
+
+    for child in children:
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        if child.name == LEGACY_ARTIFACTS_DIR:
+            continue
+        for entry in _list_workspace_files(workspace, f"{child.name}/artifacts"):
+            if entry.path not in seen:
+                seen.add(entry.path)
+                entries.append(entry)
+
+    for entry in _list_workspace_files(workspace, LEGACY_ARTIFACTS_DIR):
+        if entry.path not in seen:
+            seen.add(entry.path)
+            entries.append(entry)
+    return entries
 
 
 def _list_workspace_files(

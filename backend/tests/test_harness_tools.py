@@ -347,9 +347,9 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
     assert {"path": "docs/guide.md", "kind": "file", "size_bytes": 25} in tree["entries"]
     assert search["matches"][0]["path"] == "docs/guide.md"
     assert grep["matches"][0]["path"] == "docs/guide.md"
-    assert artifact["path"] == "artifacts/summary.md"
+    assert artifact["path"] == "default/artifacts/summary.md"
     assert artifacts["entries"] == [
-        {"path": "artifacts/summary.md", "kind": "file", "size_bytes": 9}
+        {"path": "default/artifacts/summary.md", "kind": "file", "size_bytes": 9}
     ]
 
 
@@ -395,12 +395,12 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
         {"path": "notes/a.txt", "content": "hello"}
     )
     assert json.loads(raw) == {
-        "path": "artifacts/thread_abc123abc123/notes/a.txt",
+        "path": "thread_abc123abc123/artifacts/notes/a.txt",
         "bytes_written": 5,
         "source": "slotflow_workspace",
     }
     assert (
-        writable_root / "artifacts" / "thread_abc123abc123" / "notes" / "a.txt"
+        writable_root / "thread_abc123abc123" / "artifacts" / "notes" / "a.txt"
     ).read_text(encoding="utf-8") == "hello"
 
 
@@ -710,3 +710,87 @@ async def test_ask_clarification_via_slotflow_tool_node_actually_interrupts() ->
         assert not after.interrupts
     finally:
         G.run_triage = original
+
+
+def _stub_tool_request(name: str = "task_tool"):
+    """最小 ToolCallRequest 替身:safety wrapper 只读 ``.tool`` 与 ``.tool_call``。"""
+
+    import types
+
+    return types.SimpleNamespace(tool=object(), tool_call={"id": "c1", "name": name})
+
+
+def test_tool_safety_reraises_retryable_infra_error() -> None:
+    """限流/超时/连接/5xx 是瞬时基础设施错误(典型来自 task_tool 子代理内部的模型调用):
+    safety wrapper 必须重抛让整轮干净失败,绝不能转成 tool_execution_error——否则模型会把"限流"
+    误当成"子任务本身失败"、改写重试或编结论,那条假失败还会永久留在历史里每轮回读。"""
+
+    import litellm
+
+    from app.harness.graph import _slotflow_tool_safety_wrapper
+
+    def handler(_req):
+        raise litellm.RateLimitError("rate limited", llm_provider="custom", model="grok-4.5")
+
+    with pytest.raises(litellm.RateLimitError):
+        _slotflow_tool_safety_wrapper(_stub_tool_request(), handler)
+
+
+def test_tool_safety_reraises_cancelled_error() -> None:
+    """用户点停止 = CancelledError 从下往上一路拆连接;wrapper 必须重抛,吞了停止按钮就静默失效。"""
+
+    import asyncio
+
+    from app.harness.graph import _slotflow_tool_safety_wrapper
+
+    def handler(_req):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        _slotflow_tool_safety_wrapper(_stub_tool_request(), handler)
+
+
+def test_tool_safety_still_wraps_permanent_error_as_tool_message() -> None:
+    """永久错误(参数错/文件不存在/一般异常)仍应转成模型可读的 tool_execution_error,让模型自我纠正。"""
+
+    import json
+
+    from app.harness.graph import _slotflow_tool_safety_wrapper
+
+    def handler(_req):
+        raise ValueError("bad argument")
+
+    result = _slotflow_tool_safety_wrapper(_stub_tool_request(), handler)
+    assert result.status == "error"
+    payload = json.loads(result.content)
+    assert payload["error"]["type"] == "tool_execution_error"
+    assert payload["error"]["exception_type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_async_tool_safety_classifies_errors() -> None:
+    """异步 wrapper 同源:瞬时基础设施错误与 CancelledError 都重抛,永久错误仍转 ToolMessage。"""
+
+    import asyncio
+    import json
+
+    import litellm
+
+    from app.harness.graph import _slotflow_async_tool_safety_wrapper
+
+    async def transient(_req):
+        raise litellm.Timeout("timed out", llm_provider="custom", model="grok-4.5")
+
+    async def cancelled(_req):
+        raise asyncio.CancelledError
+
+    async def permanent(_req):
+        raise FileNotFoundError("missing")
+
+    with pytest.raises(litellm.Timeout):
+        await _slotflow_async_tool_safety_wrapper(_stub_tool_request(), transient)
+    with pytest.raises(asyncio.CancelledError):
+        await _slotflow_async_tool_safety_wrapper(_stub_tool_request(), cancelled)
+    msg = await _slotflow_async_tool_safety_wrapper(_stub_tool_request(), permanent)
+    assert msg.status == "error"
+    assert json.loads(msg.content)["error"]["exception_type"] == "FileNotFoundError"

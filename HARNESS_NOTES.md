@@ -3291,3 +3291,238 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 - 5 轮真机(trigger=1200、keep=4、带 MemorySaver):**每个 agent 调用 `leaked_thinking_blocks=0`**(修复前 turn≥3 会累积上一轮的成百块);epoch 从 turn3 起被复用(`source_count` 5→7→9 递增=只追加、`epoch_msgs` 恒为 5=压实前缀不再膨胀);多次摘要后最终仍准确复述 turn1 的 `ORION-7/张伟/350 万`(retention 全 True)。
 - 回归 `tests/test_provider_reasoning_contract.py`(新增 3 个 sanitize 测试)+ 全量 `uv run pytest -q -k "not live"` = 434 passed。
 
+---
+
+## 55. 迭代 47（2026-07-26）：上下文工程三改（cache 稳定 + 工具结果卸载）+ 为什么不退回 create_agent
+
+> 对照当前代码核实。离线 `uv run pytest -q -k "not live"` **443 passed**（新增 7 用例）。三改都是
+> 「让有限上下文窗口塞对信息」的工程，核心衡量指标是 **prompt 前缀缓存命中率**（agent
+> input:output≈100:1，缓存 vs 未缓存差 ~10×）。
+
+### 55.0 TL;DR
+- **A（改代码）**：召回的长期记忆 + 每步 todo 控制块**移出 `system_prompt` 前缀**，改由 `agent` 作为
+  **最后一条 user 角色 `<system-reminder>` 消息**追加在所有会话消息之后。前缀稳→缓存能命中。
+- **B（无需改代码，记录结论）**：工具 schema 缓存本分支已是稳态——`DEFAULT_GATED_SPACES={browser,
+  extensions}`，没 promote 时 `tools` 数组每步逐字节相同。
+- **C（改代码）**：单条工具结果超阈值（默认 16000 字符）→ 全文写工作区隐藏文件、上下文只留「引用+
+  预览」，模型按需 `workspace_read/workspace_grep` 分块回读（Manus「file system as context」）。
+
+### 55.1 A：易变上下文移出 system 前缀（根因：前缀每轮变→打穿 prompt cache）
+- **问题**：`pre_model` 原先把召回记忆（`append_memory_system_message`）+ 每步 todo 控制块拼进
+  `system_prompt`。provider 可缓存前缀顺序是 `tools → system → messages`；记忆随 query 每轮变、todo
+  每步变 → system 段每步变 → 从 system 往后（含全部 messages）前缀哈希全废，缓存永不命中。
+- **改法**（`graph.py::make_pre_model_node`/`make_agent_node`，`state.py` 新增 `model_input_suffix` 通道）：
+  `system_prompt` 只留稳定基座（base + skills preflight）；记忆 + todo 组进新的 `model_input_suffix`
+  字符串通道；`agent` 用 `_model_input_suffix_message()` 包成 `HumanMessage("<system-reminder>…")` 拼在
+  `[System(base), *messages]` **之后**。
+- **三个必须守的点**：
+  1. **append-only**：放到所有 messages **之后**，前缀（tools+system+历史）逐字节稳定，只扰动尾部——顺带
+     蹭到「最近注意力」（Manus recitation）。
+  2. **user 角色而非 system**：让送模型的消息序列**始终以 user/tool 结尾**，兼容对顺序更严的中转 provider
+     （部分会拒绝「最后一条是 system」）；外层 `<system-reminder>` 让模型仍按带外提示理解。
+  3. **不进 `messages` 通道**：`model_input_suffix` 是普通字符串通道（同 `system_prompt`），`agent` 调用时
+     即时构造那条消息、绝不写回 `messages` → 既不流式泄漏、也不被 checkpointer 回放（**沿用 §48/2026-07-15
+     泄漏边界**）；也**不进 `llm_input_messages`**，故下游 summarization/epoch 不折进摘要（epoch 干净）。
+- **验证**：`test_recalled_memory_rides_trailing_suffix_not_system_prefix`——真图跑一轮，断言记忆**不在**首条
+  system、**在**尾部 user `<system-reminder>`（顺带证明检索命中）。
+
+### 55.2 B：渐进披露与工具缓存（已是务实版，勿误改）
+- `model_for_state` 每步 `bind_tools(initial ∪ promoted)`；`initial_names` 含全部日常工具（只 gate
+  browser/extensions），`tool_by_name` 是插入序稳定 dict → **没 promote 时每步 `tools` 数组逐字节相同、
+  前缀缓存稳**。只有 browser/extensions 被 loader 激活时打断一次（只增不减、至多一两次/会话）。
+- 想彻底不动 `tools` 只剩「Mask, Don't Remove」（约束解码遮蔽），需 provider 支持，留作可选激进版。
+  **结论：本分支无需改代码；别为「做点什么」去动它。**
+
+### 55.3 C：超长工具结果卸载（`steps/tool_output_offload.py`）
+- **机制**：`make_tools_node` 的 `wrap`/`awrap` 在安全包装后调 `maybe_offload_tool_message`。一条 `ToolMessage`
+  文本超 `tool_output_offload_max_chars`（默认 16000；env `SLOTFLOW_TOOL_OUTPUT_OFFLOAD_MAX_CHARS`，开关
+  `SLOTFLOW_TOOL_OUTPUT_OFFLOAD`）→ 全文写 `<workspace_root>/.slotflow_offload/<tool>-<callid>.txt`，
+  `ToolMessage` 换成 `{path, chars, lines, preview 首尾, how_to_read}`。模型用**默认激活的**
+  `workspace_read('<path>')` 取全文 / `workspace_grep('<kw>','<path>')` 定位。
+- **防御**（都在 `tests/test_tool_output_offload.py`）：跳过 `workspace_read` 等读文件工具（避免写回工作区的
+  循环）；多模态/含非文本块 content 原样放过；写盘失败/只读/超 `max_write_bytes` → 回退「内联截断+预览、
+  path=None」，**绝不抛异常**；`awrap` 的卸载走 `asyncio.to_thread` 不阻塞事件循环。
+- **为什么不用外部 DB/句柄表**：SlotFlow 早有工作区文件系统 + `workspace_read/grep`（默认激活）+
+  `context_archive`，缺的只是「写时把大输出落盘 + 留句柄」这一层。复用文件系统 = 最贴 Manus 模型、零新增工具。
+
+### 55.4 为什么不退回 create_agent（诚实版：可维护性取舍，不是能力取舍）
+- **核心判据（最重要的一条）**：分不分图，看 **subagent 之间要不要共享、互相看得见 state**——子任务是黑盒、只回结果、
+  彼此不看中间状态 → subagent 当工具、create_agent 够；几个 subagent 要共享同一块 state / 看彼此中间产物 / 并行汇总
+  → graph 编排（共享状态 + 并行合并 + per-node checkpoint/中断是图独有的机制）。**只要 subagent 还是工具，SlotFlow
+  就是"一个环"，纯 create_agent 就够；图是可读性偏好 + 多 agent 保险，不是必需。**
+- **先纠正一个常见（我自己也犯过的）错误框架**：别说「这些流程 create_agent 做不到」。**create_agent
+  本身就编译成一张 LangGraph 图**，每个中间件钩子都是图里一个节点；凡手写图能表达的控制流，中间件基本也能
+  （`before/after_model` + `wrap_model_call/tool_call` + `jump_to` model/tools/end）。旁证：**SlotFlow 重构前
+  这些全是中间件**（澄清门 = `abefore_model` 里 `interrupt()`；todo 自环 = after_model `jump_to="model"`；
+  压缩 = wrap 一层投影）。所以三处并非「做不到」。
+- **真实差别 = 显式 vs 隐式的控制流表达**：中间件把流程藏在「钩子类型 + 列表顺序 + 各处 jump_to」里，且不同
+  钩子合成规则不同（`wrap_*` 洋葱嵌套、before/after 各自方向）——确定但要心算；图把每条路径写成可读、可 diff、
+  可按节点名看 trace 的边。定制点少时中间件更短更清楚；到十来个、且多处带控制流跳转/子调用要单独过滤流时，
+  「隐式 + 心算」开始让人出错——**迁移的本质是赌「控制流已复杂到：画出来比塞进钩子桶更好维护」，是复杂度阈值
+  上的判断，不是能力必需。**
+- **唯一算「结构性」的边（仍是更自然、非唯一可行）**：图能有任意的、有名字的独立节点并路由到任意节点；像
+  `prepare`/`triage_gate`/`finalize` 这种「每轮一次、与模型调用无直接关系」的工位做成独立节点，比硬塞进
+  before_agent/before_model 顺眼。
+- **判据（软化版）**：复杂度**长在流程控制**（分支/门/回环/HITL/子流过滤）→ 显式图更好维护；只是**工具多/推理长**
+  的标准循环 → create_agent 够。SlotFlow 属前者，故**保留**；但这是维护性判断，不是「非图不可」。
+- **该不该退回**：既是可维护性取舍、且已有可跑的图 → **现在退回不划算**（重写+重测只换来少点样板）；从零起步
+  用 create_agent 当默认也合理。DeerFlow 反向不矛盾（它复杂在多 agent 协调、单 agent 标准 ReAct）。
+
+## 56. 迭代 48（2026-07-26）：停止(取消)与 429 的错误分类加固
+
+### 56.0 TL;DR
+两类事、一个判据。**停止 ≠ 给模型发信号**——模型收不到「停止」，停止是前端断 SSE → Starlette 抛
+`asyncio.CancelledError` → 一路向下拆连接（httpx 请求取消 → provider 停生成）；任何一环把它吞掉，停止按钮就
+静默失效。**429/限流恰恰相反——它是异常**，危险处在 `task_tool` 内部：子代理撞限流 → 异常在工具里 →
+`tool_safety` 把它当普通失败转成 `tool_execution_error` → 模型误以为「任务本身失败」、还永久污染历史。
+本迭代把这两条从「靠运气对」变成「写明白 + 主动分类」。
+
+### 56.1 逐条核对（动手前先证明我们本来有什么、缺什么）
+- **裸 `except:` / `except BaseException` 吞取消**：全仓仅 2 处命中——`mcp/loader.py:105` 是
+  `except BaseException: aclose(); raise`（清理后**重抛**，正确）；另一处在技能模板 `.md`（非代码）。✅ 无隐患。
+- **`CancelledError` 能否穿透 tool_safety**：`graph.py` 两个 wrapper 用 `except Exception`——`CancelledError`
+  是 `BaseException` 不是 `Exception`，**天然放行**。✅ 成立，但「靠语言特性」，没写明。
+- **SDK `max_retries` 没被关**：`models.py` `DEFAULT_MODEL_MAX_RETRIES=5` 走 `load_positive_int_from_env`
+  （**恒 ≥1、关不掉**）+ 完整退避 + `litellm_provider` `stop_after_attempt`。✅（对照故事 4 的 `0→2` 教训）。
+- **停在 tools 节点的孤儿 tool_call 兜底**：`repair_dangling_tool_calls`（`steps/dangling_tool_call.py`）由
+  `pre_model` 每步先修，防下一轮 400。✅
+- **干净断开标记 run 取消**：`routes.py:302 except CancelledError: update_run_status('cancelled'); raise`。✅
+- **retryable / permanent 分类**：`tool_safety` 一律转 `tool_execution_error`，**无分类**。❌ 缺——最高 ROI。
+- **子进程可取消 + docker kill**：`sandbox_exec` 走 `asyncio.to_thread(subprocess.run)`（阻塞、不可取消）、
+  `agent_reach` 同理。停止后容器/宿主子进程继续跑到超时。❌ 缺（见 56.3 为什么这次不动）。
+- **非干净断开（拔网/飞行模式）**：Starlette 靠 `http.disconnect`，拔网不触发 → 整轮跑完落库。⚠️ 框架固有，基本无解。
+
+### 56.2 做了什么（只做真正有用、且改动小的两条）
+1. **`tool_safety` 显式重抛 `CancelledError`**：两个 wrapper 从 `except GraphBubbleUp: raise` 改为
+   `except (GraphBubbleUp, asyncio.CancelledError): raise`。不改行为（本就穿过 `except Exception`），把「靠语言
+   特性」变成「写明白」，并防日后有人把 `except Exception` 放宽成 `except BaseException` 时意外吞掉取消。
+   与 GraphBubbleUp 并列写清「两者都是控制流、不是错误」。
+2. **`tool_safety` 分类可重试/永久错误**（收益最大）：新增 `litellm_provider.is_retryable_infra_error`
+   （`_RETRYABLE_INFRA_EXCEPTIONS = {Timeout, RateLimitError, APIConnectionError, ServiceUnavailableError,
+   InternalServerError}`，含 `BaseExceptionGroup` 递归）。wrapper 的 `except Exception` 里先判定：命中 →
+   **重抛**（让整轮像 agent 节点的瞬时错误一样干净失败、state 不落假 ToolMessage，用户重发即可）；未命中
+   （参数错/文件不存在/exit≠0/一般异常）→ 维持转 `tool_execution_error` 给模型自我纠正。
+   - **为什么精准无误伤**：`litellm.RateLimitError` 等**只**由「工具内部再调模型」的路径抛出（典型 `task_tool`
+     子代理）；`web_fetch` 撞站点 429 是把 `status_code` 放进结果 dict、**并不抛** `litellm.*` 异常。所以分类
+     刚好只覆盖模型调用类瞬时错误，不动普通工具。
+   - **为什么重抛而非工具层退避**：子代理自己的模型调用已带 `max_retries=5` 退避；能逃出来说明退避已耗尽，
+     再原地重试无益，干净失败 + 保持 state 干净才是对的（对齐上面「agent 节点里的 429 是安全失败」）。
+
+### 56.3 为什么这次不动 ④（子进程取消）
+真问题（停止后 `docker exec` 里的 `pip/npm` 跑到 120s 超时、共享容器还可能干扰别的会话），但修法是把
+`subprocess.run` 换成 `asyncio.create_subprocess_exec` + 记容器/pid + `finally: docker kill`——**改的是
+demo 关键路径 `sandbox_exec` 的执行模型，测试面大、回归风险高**。以「作品要看得过去、别 churn 关键路径」为准，
+本轮**记为已知限制 + 修法草案**，不实现。验证脚本备忘：写个 `sleep 30` 的 sandbox 调用→按停止→看容器里进程
+是否还在（顺带验证 ① 没被吞：若后端日志显示整轮跑完，就是取消被吞）。
+
+### 56.4 验证
+- 新增 4 条单测（`tests/test_harness_tools.py`）：retryable(`RateLimitError`/`Timeout`)→重抛、`CancelledError`→
+  重抛、永久错误(`ValueError`/`FileNotFoundError`)→仍转 `tool_execution_error`；同步/异步两路都覆盖。
+- 离线全量 **443 passed**、`ruff` 干净；既有 GraphBubbleUp(HITL) 集成测试不回归。
+
+## 57. 迭代 48 续（2026-07-26）：grok 思考流的**非流式(合并)孪生**（承接 §54.9）
+
+### 57.0 起因
+跑 `evals --live --model grok-4.5` 第一条 `no-tool-chat` 就 FAIL——`answer_contains` 报**终答为空**。
+§54.9 修的是**流式**方向（`sanitize_reasoning_message` 清洗落库对象、#223 合并逐 token 思考块）；这条是它的
+**非流式(`ainvoke`)孪生**：一直没被单独验证过。
+
+### 57.1 真机探针链（每步都花钱，故按最小增量推进）
+1. 裸 `model.invoke([Human])` + sanitize → **3/3 有正文**（低思考量时 sanitize 能从合并后的 list 里把答案
+   字符串捞回，所以"以为早修好了"）。
+2. `graph.ainvoke`（真图，带 system + 工具）→ **1/3**；`[System, Human]` 无工具无 suffix → **0/3**；
+   `[Human]` 无 system → 3/3。**→ 差异变量 = system 提示**（不是我这轮加的 suffix，也不是工具；suffix 那版
+   反而略好，**排除是本轮上下文工程改动的回归**）。
+3. `[System, Human]` **流式** `m.stream` 分通道计量 → **content 39/39/36(3/3 非空)** vs reasoning 250~486。
+   **→ 决定性:带 system 时 grok 思考量翻几倍,思考块(内容块)与答案(裸字符串)在 content 里大量交错,
+   langchain 的 chunk 合并把答案压没(`ainvoke` 0/3);而流式逐 token 投影从不合并,正文照常出。**
+   所以**产品(SSE 流式)一直是好的**,坏的只有 `ainvoke`/合并/落库对象这一路。
+
+### 57.2 根因与修复
+**根因**：`_convert_delta_to_message_chunk_preserving_thinking_blocks` 此前只把 `thinking_blocks` **补进**
+`additional_kwargs`，却把思考块**留在 `chunk.content` 里**。低思考量时合并后是 `[…thinking, "答案"]`，sanitize
+还能捞回；高思考量时合并直接把答案压成空/混合 list，sanitize 已无正文可捞。
+
+**修复(litellm_provider.py，同一函数加 3 行)**：转换阶段就用既有 `_without_reasoning_metadata_blocks` 把思考块
+从 `content` 剔除——`content` 只留纯答案 → 合并变成干净字符串拼接、`ainvoke`/落库不再丢正文；思考已完整在
+`additional_kwargs.reasoning_content` / `thinking_blocks`，**前端思考框走 v3 `message.reasoning` 通道（源自
+`reasoning_content`，非 content 块）**，故不受影响。是 §54.9 那套「入站清洗」向**流式 chunk 转换**这一层的延伸。
+
+### 57.3 验证(真机 grok-4.5，用真实 SSE 适配器 `LangGraphEventAgentAdapter` 逐通道核对)
+- **流式(产品)**：content 54/45（答案照出）、reasoning 126/126（**思考框不回归**）。
+- **非流式(`ainvoke`/评测)**：终答 len 36/48（**从 0 → 非空,合并 bug 修好**）。
+- 2 条确定性单测（`tests/test_provider_reasoning_contract.py`）钉死：thinking 块从 content 剔除+答案保留、
+  纯思考 chunk 塌成空串;`reasoning` 契约 22/22 不破;离线全量 **449 passed**。
+- **真机 live 评测(10 条,grok-4.5,`--judge --langsmith`)**:`no-tool-chat` 从修复前空答案 → **PASS**(本修复的
+  端到端验证);`memory-after-compaction` **PASS**(强制压缩后仍答对暗号「42 号蓝盒子」= Issue-2 有效);完整
+  scorecard(6/10、含逐条归因与识别出的评测改进项)见 `backend/evals/README.md`。
+- **边界（诚实标注）**：若某模型在特定 system 下**根本把答案留在 reasoning、content 交空**，这是模型输出层的事,
+  清洗无法凭空造正文——属选模型/调 thinking 的范畴，与本修复无关。
+
+
+
+## 58. 迭代 49（2026-08-09）：工作区改为「一个对话一个目录」
+
+### 58.0 起因
+旧布局是三个**横切**目录:`artifacts/<thread>/`、`uploads/<file_id|run_id>/`、`.sandbox/<thread>/`。
+容器里 `docker exec` 的 cwd 是 `/workspace/work/<thread>`,模型在里面 `ls` 只看得到自己的 scratch——
+要读上传得知道 `/workspace/uploads/<run_id>/`(这个 run_id 只出现在 system prompt 的上传注入块里),
+要写产物得读 `SLOTFLOW_THREAD_ARTIFACTS` 环境变量。**三条路径三种发现方式**,全靠提示词把路径讲清楚。
+
+### 58.1 新布局
+```
+<workspace>/
+├── <thread>/                 一个对话一个目录,docker exec 的 cwd 就在这
+│   ├── work/                 沙箱 scratch
+│   ├── artifacts/            用户可见产物
+│   └── uploads/<run_id>/     本次 run 的上传副本
+├── .uploads/<file_id>/       上传原件 + metadata.json(容器内只读)
+├── .slotflow_offload/  .playwright-mcp/
+└── artifacts/  uploads/      旧布局遗留,只读兼容(见 58.5)
+```
+模型在对话目录里 `ls` 一次就同时看到 `work / artifacts / uploads`,不再依赖提示词描述路径。
+
+**单一事实源 `sandbox/layout.py`**:容器路径、宿主相对路径、路由可见性校验三方必须对齐。
+以前分散在 `docker.py` / `tools/workspace.py` / `workspace/routes.py` 各写一份,
+`artifacts/` 用**原始** thread_id 而 `.sandbox/` 用**规范化**后的 key,已经是口径不一致。
+
+### 58.2 挂载:为什么只能挂根,以及只读怎么保住
+容器是全局共享的(空闲只 stop 不 rm,为的是 pip 依赖跨对话保留),挂载在 `docker run` 时固定,
+而对话目录是**动态出现**的 → 只能把工作区整根读写挂进 `/workspace`。
+
+代价是旧布局 `/workspace/uploads` 的 `readonly=true` 保不住。解法是**把原件挪出对话目录**:
+`.uploads/` 存原件并叠一层**嵌套只读挂载**,对话目录里的只是本次 run 的副本——模型改坏了也不动
+用户的原始文件。实测确认(alpine 容器)嵌套 ro 生效:整根可写、`.uploads` 写入被拒。
+
+**skills 改挂 `/skills`**:实测发现挂在 `/workspace/skills` 会在**宿主**工作区根留下一个空的挂载点
+目录,破坏"根下只有对话目录"。
+
+**容器名混入 `LAYOUT_VERSION`**:挂载结构固定在 `docker run`,换了布局却复用旧容器,跑的还是旧挂载,
+现象是"代码改了但容器里看到的还是老目录"。版本进哈希 → 换布局自然换新容器。
+
+### 58.3 顺带修掉的真 bug:产物发现跨对话串台
+`artifact_baseline()` 以前扫的是**所有对话共用**的 `artifacts/`,`finalize` 拿它做差集算「本轮新增产物」。
+两个对话并发跑时,B 新写的文件会被算进 A 的 `new_entries`,前端就弹出一个跟当前提问无关的产物。
+按对话分目录后自然只扫本对话,既修串台,又把每轮两次全库扫降成单对话扫。回归测试
+`test_artifact_discovery_ignores_other_conversations` 钉住。
+
+### 58.4 上传为什么分两处落盘
+`POST /api/uploads` 时**根本不知道 thread**——前端 `uploadFile(file)` 只传文件,用户完全可能在新建
+对话之前就把文件拖进来。所以原件按 `file_id` 存 `.uploads/`;等 run 真正开始(那时才知道属于哪个对话)
+再 `stage_upload_for_run(file_id, run_id, thread_id)` 复制进 `<thread>/uploads/<run_id>/`。
+
+### 58.5 兼容与迁移(刻意不搬的两类)
+`viewable_kind()` 同时认新旧两种路径,旧文件不迁移也能读。`scripts/migrate_workspace_layout.py`
+(默认 dry-run,`--apply` 才动)搬 `artifacts/<t>`→`<t>/artifacts`、`.sandbox/<t>`→`<t>/work`、
+`uploads/file_*`→`.uploads/`(并改写 metadata.json 的 `workspace_path`)。
+
+**刻意不搬**:
+- `uploads/<run_id>/`:run→对话的对应**只存在聊天库的消息元数据里**,搬动就必须同步改写数据库。
+  后端保留旧路径读取分支,留在原地照样预览。
+- `artifacts/` 下的散落文件:本来就不属于任何对话,前端「未归类产物」分组兜着。
+
+### 58.6 安全边界的变化(必须知道)
+可见性校验从「路径必须以 `artifacts/` 开头」变成「**第二段**必须是 `artifacts`|`uploads`」——**规则变松了**,
+是这轮最容易出洞的地方。因此:点开头的目录(`.uploads`/`.slotflow_offload`/`.playwright-mcp`)一律拒绝,
+`work/` scratch 不可见,`..` 直接拒,且 `resolve_path` 的越界防护仍是第二道闸。
+`test_workspace_layout.py` 把这些边界逐条钉住。

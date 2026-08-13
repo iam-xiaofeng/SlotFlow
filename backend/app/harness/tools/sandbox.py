@@ -40,13 +40,14 @@ def build_sandbox_tools(
         experiments, and commands that must not run on the host. The sandbox starts
         only on first use. The default image includes Python, pip, bash, and common
         build tooling; use `python -m pip install ...` inside the sandbox when a
-        script needs Python dependencies. Paths inside the container:
-        `/workspace/uploads` = read-only user uploads,
-        `/workspace/artifacts` = read/write current conversation artifacts,
-        `/workspace/work` = read/write scratch working directory,
-        `/workspace/skills` = read-only installed Skills when available.
-        Write user-visible outputs to `/workspace/artifacts`; they are bind-mounted
-        back to SlotFlow's local workspace automatically.
+        script needs Python dependencies. The working directory is this conversation's
+        own folder `/workspace/<thread>`, and `ls` there shows everything you need:
+        `work/` = read/write scratch, `artifacts/` = read/write user-visible outputs,
+        `uploads/` = this conversation's copies of user uploads.
+        `/skills` holds read-only installed Skills when available.
+        Write user-visible outputs to `artifacts/` (also available as the absolute path
+        in `$SLOTFLOW_THREAD_ARTIFACTS`); they are bind-mounted back to SlotFlow's local
+        workspace automatically.
         """
 
         try:
@@ -73,13 +74,12 @@ def build_sandbox_tools(
     ) -> str:
         """Publish a file created inside Docker to the visible artifact panel.
 
-        Use this after sandbox_exec creates a file in the current thread's scratch
-        directory or /tmp and the user should be able to open it. `source_path` may
-        be relative to the current sandbox workdir, under /workspace/work/<thread>,
-        under /tmp, or already inside this thread's /workspace/artifacts folder.
-        `artifact_path` is a destination filename/path relative to this conversation's
-        artifact folder. The tool copies one file only, enforces max_write_bytes, and
-        refuses to overwrite unless overwrite=true.
+        Use this after sandbox_exec creates a file in the current conversation's scratch
+        directory or /tmp and the user should be able to open it. `source_path` may be
+        relative to the sandbox workdir (this conversation's folder), anywhere inside
+        that folder, or under /tmp. `artifact_path` is a destination filename/path
+        relative to this conversation's artifact folder. The tool copies one file only,
+        enforces max_write_bytes, and refuses to overwrite unless overwrite=true.
         """
 
         try:

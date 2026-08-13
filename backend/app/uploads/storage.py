@@ -1,4 +1,12 @@
-"""Store user uploads under the SlotFlow workspace."""
+"""Store user uploads under the SlotFlow workspace.
+
+分两处落盘,原因是**上传发生时还不知道 thread**:
+
+- 原件 ``<workspace>/.uploads/<file_id>/``:``POST /api/uploads`` 只拿得到文件本身,
+  用户完全可能在新建对话之前就把文件拖进来。以点开头,容器里叠只读挂载,模型改不了。
+- 副本 ``<workspace>/<thread>/uploads/<run_id>/``:run 真正开始时才知道属于哪个对话,
+  这时复制一份进对话目录,模型 ``ls`` 就能看到,改坏了也只是副本。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +21,7 @@ from app.harness.sandbox import (
     WorkspaceFileTooLargeError,
     build_slotflow_workspace,
 )
+from app.harness.sandbox.layout import UPLOAD_ORIGINALS_DIR, run_uploads_dir
 from app.uploads.models import UploadedFileRecord
 
 
@@ -25,7 +34,7 @@ class UploadFileTooLargeError(WorkspaceFileTooLargeError):
 
 
 class SlotFlowUploadStore:
-    """Persist uploaded files inside `workspace/uploads`."""
+    """Persist uploaded files inside the SlotFlow workspace."""
 
     def __init__(self, config: SlotFlowSandboxConfig | None = None) -> None:
         self.workspace = build_slotflow_workspace(config)
@@ -55,7 +64,7 @@ class SlotFlowUploadStore:
         file_id = new_file_id()
         original_filename = normalize_upload_display_filename(filename)
         safe_filename = sanitize_upload_filename(filename)
-        workspace_path = f"uploads/{file_id}/{safe_filename}"
+        workspace_path = f"{UPLOAD_ORIGINALS_DIR}/{file_id}/{safe_filename}"
         target = self.workspace.resolve_path(workspace_path)
         metadata_target = self._metadata_path(file_id)
 
@@ -92,19 +101,26 @@ class SlotFlowUploadStore:
         record = self.get_upload(file_id)
         return self.workspace.resolve_path(record.workspace_path)
 
-    def stage_upload_for_run(self, file_id: str, *, run_id: str) -> UploadedFileRecord:
-        """Copy an uploaded file into a run-scoped workspace upload path."""
+    def stage_upload_for_run(
+        self,
+        file_id: str,
+        *,
+        run_id: str,
+        thread_id: str | None = None,
+    ) -> UploadedFileRecord:
+        """Copy an uploaded file into this conversation's run-scoped upload folder."""
 
         validate_run_id(run_id)
         record = self.get_upload(file_id)
-        if record.workspace_path.startswith(f"uploads/{run_id}/"):
+        run_dir = run_uploads_dir(thread_id, run_id)
+        if record.workspace_path.startswith(f"{run_dir}/"):
             return record
 
         source = self.workspace.resolve_path(record.workspace_path)
         if not source.is_file():
             raise UploadNotFoundError(f"upload not found: {file_id}")
 
-        run_workspace_path = self._next_run_upload_path(run_id, record.filename)
+        run_workspace_path = self._next_run_upload_path(run_dir, record.filename)
         target = self.workspace.resolve_path(run_workspace_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
@@ -120,7 +136,9 @@ class SlotFlowUploadStore:
 
     def _metadata_path(self, file_id: str) -> Path:
         validate_upload_id(file_id)
-        target = self.workspace.resolve_path(f"uploads/{file_id}/metadata.json")
+        target = self.workspace.resolve_path(
+            f"{UPLOAD_ORIGINALS_DIR}/{file_id}/metadata.json"
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
 
@@ -130,7 +148,7 @@ class SlotFlowUploadStore:
             encoding="utf-8",
         )
 
-    def _next_run_upload_path(self, run_id: str, filename: str) -> str:
+    def _next_run_upload_path(self, run_dir: str, filename: str) -> str:
         safe_filename = sanitize_upload_filename(filename)
         stem, dot, suffix = safe_filename.rpartition(".")
         name_stem = stem if dot else safe_filename
@@ -142,7 +160,7 @@ class SlotFlowUploadStore:
                 if index == 1
                 else f"{name_stem}-{index}{name_suffix}"
             )
-            candidate = f"uploads/{run_id}/{candidate_name}"
+            candidate = f"{run_dir}/{candidate_name}"
             if not self.workspace.resolve_path(candidate).exists():
                 return candidate
 

@@ -41,17 +41,52 @@ def _write(store: SlotFlowUploadStore, relative_path: str, text: str = "x") -> N
     target.write_text(text, encoding="utf-8")
 
 
-def test_list_artifacts_root_returns_immediate_children(tmp_path: Path) -> None:
+def test_list_artifacts_root_aggregates_every_conversation(tmp_path: Path) -> None:
+    """不带 path 时返回聚合视图:各对话的 <thread>/artifacts/**,加旧布局遗留。"""
+
     client, store = _client(tmp_path)
-    _write(store, "artifacts/threadA/a.md")
+    _write(store, "thread_a/artifacts/a.md")
+    _write(store, "thread_b/artifacts/nested/b.md")
+    _write(store, "thread_a/work/scratch.py")  # scratch 不是产物
+    _write(store, ".uploads/file_x/orig.txt")  # 上传原件不对外
+    _write(store, "artifacts/threadA/a.md")  # 旧布局存量
     _write(store, "artifacts/top.txt")
 
     response = client.get("/api/workspace/artifacts")
 
     assert response.status_code == 200
-    entries = {(entry["path"], entry["kind"]) for entry in response.json()}
-    assert ("artifacts/threadA", "directory") in entries
-    assert ("artifacts/top.txt", "file") in entries
+    paths = {entry["path"] for entry in response.json()}
+    assert paths == {
+        "thread_a/artifacts/a.md",
+        "thread_b/artifacts/nested/b.md",
+        "artifacts/threadA/a.md",
+        "artifacts/top.txt",
+    }
+
+
+def test_list_artifacts_drills_into_thread_folder(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _write(store, "thread_a/artifacts/nested/deep.md", "hello")
+
+    response = client.get(
+        "/api/workspace/artifacts", params={"path": "thread_a/artifacts"}
+    )
+
+    assert response.status_code == 200
+    paths = {entry["path"] for entry in response.json()}
+    assert "thread_a/artifacts/nested" in paths
+
+
+def test_list_artifacts_rejects_scratch_and_upload_originals(tmp_path: Path) -> None:
+    """产物浏览器不能被用来翻 work/ scratch 或上传原件。"""
+
+    client, store = _client(tmp_path)
+    _write(store, "thread_a/work/scratch.py")
+    _write(store, ".uploads/file_x/orig.txt")
+
+    for path in ("thread_a/work", ".uploads", ".uploads/file_x", "uploads"):
+        response = client.get("/api/workspace/artifacts", params={"path": path})
+        assert response.status_code == 400, path
 
 
 def test_list_artifacts_drills_into_subdirectory(tmp_path: Path) -> None:
