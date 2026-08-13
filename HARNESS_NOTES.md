@@ -3460,3 +3460,69 @@ demo 关键路径 `sandbox_exec` 的执行模型，测试面大、回归风险�
   清洗无法凭空造正文——属选模型/调 thinking 的范畴，与本修复无关。
 
 
+
+## 58. 迭代 49（2026-08-09）：工作区改为「一个对话一个目录」
+
+### 58.0 起因
+旧布局是三个**横切**目录:`artifacts/<thread>/`、`uploads/<file_id|run_id>/`、`.sandbox/<thread>/`。
+容器里 `docker exec` 的 cwd 是 `/workspace/work/<thread>`,模型在里面 `ls` 只看得到自己的 scratch——
+要读上传得知道 `/workspace/uploads/<run_id>/`(这个 run_id 只出现在 system prompt 的上传注入块里),
+要写产物得读 `SLOTFLOW_THREAD_ARTIFACTS` 环境变量。**三条路径三种发现方式**,全靠提示词把路径讲清楚。
+
+### 58.1 新布局
+```
+<workspace>/
+├── <thread>/                 一个对话一个目录,docker exec 的 cwd 就在这
+│   ├── work/                 沙箱 scratch
+│   ├── artifacts/            用户可见产物
+│   └── uploads/<run_id>/     本次 run 的上传副本
+├── .uploads/<file_id>/       上传原件 + metadata.json(容器内只读)
+├── .slotflow_offload/  .playwright-mcp/
+└── artifacts/  uploads/      旧布局遗留,只读兼容(见 58.5)
+```
+模型在对话目录里 `ls` 一次就同时看到 `work / artifacts / uploads`,不再依赖提示词描述路径。
+
+**单一事实源 `sandbox/layout.py`**:容器路径、宿主相对路径、路由可见性校验三方必须对齐。
+以前分散在 `docker.py` / `tools/workspace.py` / `workspace/routes.py` 各写一份,
+`artifacts/` 用**原始** thread_id 而 `.sandbox/` 用**规范化**后的 key,已经是口径不一致。
+
+### 58.2 挂载:为什么只能挂根,以及只读怎么保住
+容器是全局共享的(空闲只 stop 不 rm,为的是 pip 依赖跨对话保留),挂载在 `docker run` 时固定,
+而对话目录是**动态出现**的 → 只能把工作区整根读写挂进 `/workspace`。
+
+代价是旧布局 `/workspace/uploads` 的 `readonly=true` 保不住。解法是**把原件挪出对话目录**:
+`.uploads/` 存原件并叠一层**嵌套只读挂载**,对话目录里的只是本次 run 的副本——模型改坏了也不动
+用户的原始文件。实测确认(alpine 容器)嵌套 ro 生效:整根可写、`.uploads` 写入被拒。
+
+**skills 改挂 `/skills`**:实测发现挂在 `/workspace/skills` 会在**宿主**工作区根留下一个空的挂载点
+目录,破坏"根下只有对话目录"。
+
+**容器名混入 `LAYOUT_VERSION`**:挂载结构固定在 `docker run`,换了布局却复用旧容器,跑的还是旧挂载,
+现象是"代码改了但容器里看到的还是老目录"。版本进哈希 → 换布局自然换新容器。
+
+### 58.3 顺带修掉的真 bug:产物发现跨对话串台
+`artifact_baseline()` 以前扫的是**所有对话共用**的 `artifacts/`,`finalize` 拿它做差集算「本轮新增产物」。
+两个对话并发跑时,B 新写的文件会被算进 A 的 `new_entries`,前端就弹出一个跟当前提问无关的产物。
+按对话分目录后自然只扫本对话,既修串台,又把每轮两次全库扫降成单对话扫。回归测试
+`test_artifact_discovery_ignores_other_conversations` 钉住。
+
+### 58.4 上传为什么分两处落盘
+`POST /api/uploads` 时**根本不知道 thread**——前端 `uploadFile(file)` 只传文件,用户完全可能在新建
+对话之前就把文件拖进来。所以原件按 `file_id` 存 `.uploads/`;等 run 真正开始(那时才知道属于哪个对话)
+再 `stage_upload_for_run(file_id, run_id, thread_id)` 复制进 `<thread>/uploads/<run_id>/`。
+
+### 58.5 兼容与迁移(刻意不搬的两类)
+`viewable_kind()` 同时认新旧两种路径,旧文件不迁移也能读。`scripts/migrate_workspace_layout.py`
+(默认 dry-run,`--apply` 才动)搬 `artifacts/<t>`→`<t>/artifacts`、`.sandbox/<t>`→`<t>/work`、
+`uploads/file_*`→`.uploads/`(并改写 metadata.json 的 `workspace_path`)。
+
+**刻意不搬**:
+- `uploads/<run_id>/`:run→对话的对应**只存在聊天库的消息元数据里**,搬动就必须同步改写数据库。
+  后端保留旧路径读取分支,留在原地照样预览。
+- `artifacts/` 下的散落文件:本来就不属于任何对话,前端「未归类产物」分组兜着。
+
+### 58.6 安全边界的变化(必须知道)
+可见性校验从「路径必须以 `artifacts/` 开头」变成「**第二段**必须是 `artifacts`|`uploads`」——**规则变松了**,
+是这轮最容易出洞的地方。因此:点开头的目录(`.uploads`/`.slotflow_offload`/`.playwright-mcp`)一律拒绝,
+`work/` scratch 不可见,`..` 直接拒,且 `resolve_path` 的越界防护仍是第二道闸。
+`test_workspace_layout.py` 把这些边界逐条钉住。

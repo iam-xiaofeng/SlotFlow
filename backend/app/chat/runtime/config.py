@@ -69,6 +69,7 @@ DEFAULT_MEMORY_SQLITE_PATH = Path(".slotflow/memory.sqlite3")
 DEFAULT_MCP_CONFIG_PATH = Path(".slotflow/mcp.json")
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_PLAYWRIGHT_MCP_NAME = "playwright"
+PLAYWRIGHT_MCP_OUTPUT_DIR = ".playwright-mcp"
 PLAYWRIGHT_PRIVATE_ORIGIN_GLOBS = (
     "localhost",
     "127.*",
@@ -513,6 +514,9 @@ def build_playwright_mcp_server(
         args.extend(["--blocked-origins", ";".join(PLAYWRIGHT_PRIVATE_ORIGIN_GLOBS)])
 
     workspace_root = sandbox_config.resolved_workspace_root()
+    # 显式钉住输出目录。playwright-mcp 的默认值是 `<cwd>/.playwright-mcp`,写死之后
+    # 截图/trace/console 日志不会随 cwd 漂移到工作区根,和对话目录混在一起。
+    args.extend(["--output-dir", str(workspace_root / PLAYWRIGHT_MCP_OUTPUT_DIR)])
 
     host_path = os.pathsep.join(
         [
