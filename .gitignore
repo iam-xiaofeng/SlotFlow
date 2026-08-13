@@ -18,3 +18,7 @@ scratch/
 
 # personal interview-prep material — local only, never upload
 面试准备/
+
+# local analysis notes that name the specific relay providers in use — local only
+工具架构总览.md
+模型调用链路详解.md
