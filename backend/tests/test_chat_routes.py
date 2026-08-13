@@ -526,7 +526,7 @@ def test_stream_run_emits_sse_and_persists_messages_and_completed_run(
     assert messages[0].metadata["request_metadata"] == {}
     assert messages[0].metadata["uploaded_files"][0]["id"] == uploaded["id"]
     assert messages[0].metadata["uploaded_files"][0]["workspace_path"] == (
-        f"uploads/{runs[0].id}/report.md"
+        f"{thread['id']}/uploads/{runs[0].id}/report.md"
     )
     assert upload_store.workspace.resolve_path(
         messages[0].metadata["uploaded_files"][0]["workspace_path"]

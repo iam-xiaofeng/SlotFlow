@@ -114,7 +114,7 @@ def test_tool_writes_large_result_only_inside_thread_artifacts(tmp_path: Path) -
             }
         )
     )
-    assert payload["output_path"] == "artifacts/thread_docs/converted/report.md"
+    assert payload["output_path"] == "thread_docs/artifacts/converted/report.md"
     target = tmp_path / payload["output_path"]
     assert target.is_file()
     assert "Quarterly Report" in target.read_text()

@@ -365,16 +365,19 @@ def test_lazy_docker_sandbox_starts_only_on_first_exec(tmp_path: Path) -> None:
         for index, value in enumerate(run_command)
         if value == "--mount"
     ]
-    assert any("/workspace/uploads" in mount and "readonly=true" in mount for mount in mounts)
-    assert any("/workspace/skills" in mount and "readonly=true" in mount for mount in mounts)
-    assert any("/workspace/artifacts" in mount and "readonly" not in mount for mount in mounts)
-    assert any("/workspace/work" in mount and "readonly" not in mount for mount in mounts)
-    # exec 以线程隔离的工作目录运行,容器按名字引用
+    assert any(
+        mount.endswith("target=/workspace") and "readonly" not in mount for mount in mounts
+    )
+    assert any("/workspace/.uploads" in mount and "readonly=true" in mount for mount in mounts)
+    assert any("target=/skills" in mount and "readonly=true" in mount for mount in mounts)
+    # exec 在本对话目录里运行:`ls` 直接看到 work/artifacts/uploads
     exec_command = calls[2]
-    assert "/workspace/work/thread-1" in exec_command
+    assert "/workspace/thread-1" in exec_command
+    assert "SLOTFLOW_THREAD_ARTIFACTS=/workspace/thread-1/artifacts" in exec_command
     assert sandbox.container_name in exec_command
-    assert (root / "artifacts" / "thread-1").is_dir()
-    assert (root / ".sandbox" / "thread-1").is_dir()
+    assert (root / "thread-1" / "artifacts").is_dir()
+    assert (root / "thread-1" / "work").is_dir()
+    assert (root / "thread-1" / "uploads").is_dir()
 
 
 def test_lazy_docker_sandbox_stops_after_idle_and_restarts_same_container(tmp_path: Path) -> None:
@@ -479,23 +482,23 @@ def test_sandbox_artifact_copy_copies_thread_file_with_guardrails(tmp_path: Path
     )
 
     assert result["ok"] is True
-    assert result["path"] == "artifacts/thread-1/reports/out.html"
+    assert result["path"] == "thread-1/artifacts/reports/out.html"
     assert result["bytes_copied"] == 12
     exec_command = next(call for call in calls if call[:2] == ["docker", "exec"])
     script = exec_command[-1]
-    assert "src=/workspace/work/thread-1/charts/out.html" in script
-    assert "dst=/workspace/artifacts/thread-1/reports/out.html" in script
+    assert "src=/workspace/thread-1/charts/out.html" in script
+    assert "dst=/workspace/thread-1/artifacts/reports/out.html" in script
     assert "max_bytes=128" in script
     assert "artifact_path already exists" in script
     assert FakeTimer.instances[-1].started is True
 
     escaped = sandbox.copy_to_artifacts(
-        source_path="/workspace/uploads/private.txt",
+        source_path="/workspace/.uploads/private.txt",
         artifact_path="../bad.txt",
     )
 
     assert escaped["ok"] is False
-    assert "source_path must be relative" in escaped["error"]
+    assert "must stay inside this conversation directory" in escaped["error"]
 
 
 def test_sandbox_artifact_copy_tool_returns_structured_error_without_docker(

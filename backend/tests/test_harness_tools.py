@@ -347,9 +347,9 @@ def test_workspace_tree_search_and_artifact_write(tmp_path: Path) -> None:
     assert {"path": "docs/guide.md", "kind": "file", "size_bytes": 25} in tree["entries"]
     assert search["matches"][0]["path"] == "docs/guide.md"
     assert grep["matches"][0]["path"] == "docs/guide.md"
-    assert artifact["path"] == "artifacts/summary.md"
+    assert artifact["path"] == "default/artifacts/summary.md"
     assert artifacts["entries"] == [
-        {"path": "artifacts/summary.md", "kind": "file", "size_bytes": 9}
+        {"path": "default/artifacts/summary.md", "kind": "file", "size_bytes": 9}
     ]
 
 
@@ -395,12 +395,12 @@ def test_artifact_write_tool_is_only_registered_when_enabled(tmp_path: Path) -> 
         {"path": "notes/a.txt", "content": "hello"}
     )
     assert json.loads(raw) == {
-        "path": "artifacts/thread_abc123abc123/notes/a.txt",
+        "path": "thread_abc123abc123/artifacts/notes/a.txt",
         "bytes_written": 5,
         "source": "slotflow_workspace",
     }
     assert (
-        writable_root / "artifacts" / "thread_abc123abc123" / "notes" / "a.txt"
+        writable_root / "thread_abc123abc123" / "artifacts" / "notes" / "a.txt"
     ).read_text(encoding="utf-8") == "hello"
 
 

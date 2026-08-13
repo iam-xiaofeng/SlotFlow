@@ -6,9 +6,12 @@
   agent 装的依赖(pip/apt)跨对话保留,不再"每次空闲回收后一切从零"。
 - 空闲超时执行 ``docker stop``(内容保留),下次使用 ``docker start`` 秒级恢复;
   永不自动 ``rm``。磁盘增长只来自 agent 实际安装的内容,是最省盘的方案。
-- 挂载改为工作区级:``/workspace/uploads``(只读)、``/workspace/artifacts``(全部
-  线程可写)、``/workspace/work``(读写 scratch)、``/workspace/skills``(只读);
-  每次 exec 的工作目录仍按线程隔离在 ``/workspace/work/<thread>``。
+- 挂载(2026-08-09 改为按对话聚合,见 ``sandbox/layout.py``):工作区整根读写挂到
+  ``/workspace``,``docker exec`` 的工作目录锁定在 ``/workspace/<thread>``——模型在里面
+  ``ls`` 一次就能看到 ``work / artifacts / uploads`` 三个目录,不必再靠环境变量或
+  system prompt 去猜路径。上传原件目录额外叠一层只读挂载防改;skills 挂在
+  ``/skills``(**不能**挂进 ``/workspace`` 下:嵌套挂载点会在宿主工作区根目录留下一个
+  空目录,破坏"根下只有对话目录")。
 - 守护进程不可达时先尝试 ``DockerEngineSetup.ensure_daemon()`` 自动拉起
   (systemctl → service → rc-service → 直接 dockerd;非 root 时走 ``sudo -n``),再重试一次。
 
@@ -19,7 +22,6 @@ from __future__ import annotations
 
 import atexit
 import hashlib
-import re
 import shlex
 import subprocess
 import threading
@@ -29,6 +31,19 @@ from typing import Any, Callable
 
 from app.harness.sandbox.config import SlotFlowSandboxConfig
 from app.harness.sandbox.docker_engine import DockerEngineSetup
+from app.harness.sandbox.layout import (
+    ARTIFACTS_DIR_NAME,
+    CONTAINER_SKILLS_ROOT,
+    CONTAINER_WORKSPACE_ROOT,
+    LAYOUT_VERSION,
+    THREAD_SUBDIR_NAMES,
+    UPLOAD_ORIGINALS_DIR,
+    container_artifacts_dir,
+    container_thread_dir,
+    thread_artifacts_dir,
+    thread_dir,
+    thread_dir_name,
+)
 from app.harness.sandbox.workspace import build_slotflow_workspace
 
 
@@ -51,9 +66,8 @@ def _looks_like_daemon_down(message: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class DockerSandboxMounts:
-    uploads: Path
-    artifacts_root: Path
-    work_root: Path
+    workspace_root: Path
+    upload_originals: Path
     skills: Path | None
 
 
@@ -83,10 +97,14 @@ class LazyDockerSandbox:
 
     @property
     def container_name(self) -> str:
-        """共享容器名:同一 workspace 恒定;workspace 变更时自然换新容器。"""
+        """共享容器名:同一 workspace 恒定;workspace 或**布局版本**变更时自然换新容器。
+
+        布局版本必须进哈希——挂载结构是在 ``docker run`` 时固定的,换了布局却复用旧容器,
+        跑的还是旧挂载,现象是"代码改了但容器里看到的还是老目录"。
+        """
 
         root = str(self.config.resolved_workspace_root())
-        digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha256(f"{root}\0{LAYOUT_VERSION}".encode("utf-8")).hexdigest()[:8]
         return f"slotflow-sandbox-{digest}"
 
     @property
@@ -117,16 +135,16 @@ class LazyDockerSandbox:
                 requested=timeout_seconds,
                 default=self.config.docker_timeout_seconds,
             )
-            thread_key = _safe_thread_key(self.thread_id)
-            thread_workdir = f"/workspace/work/{thread_key}"
-            thread_artifacts = f"/workspace/artifacts/{self.thread_id or 'default'}"
+            thread_workdir = container_thread_dir(self.thread_id)
+            thread_artifacts = container_artifacts_dir(self.thread_id)
             try:
                 result = self._runner(
                     [
                         "docker",
                         "exec",
-                        # 共享容器内按 thread 目录隔离:工作目录/HOME 锁定本线程,
-                        # 产物目录经环境变量指向本线程,避免对话之间串台。
+                        # 共享容器内按对话目录隔离:工作目录/HOME 锁定本对话目录,
+                        # 进去就能 `ls` 到 work/artifacts/uploads;产物目录同时经环境
+                        # 变量给出绝对路径,方便脚本直接写。
                         "-w",
                         thread_workdir,
                         "--env",
@@ -198,12 +216,7 @@ class LazyDockerSandbox:
             }
 
         try:
-            thread_key = _safe_thread_key(self.thread_id)
-            source = _normalize_copy_source_path(
-                source_path,
-                thread_id=self.thread_id,
-                thread_key=thread_key,
-            )
+            source = _normalize_copy_source_path(source_path, thread_id=self.thread_id)
             destination_tail = _normalize_artifact_destination_tail(
                 artifact_path,
                 source_path=source,
@@ -292,18 +305,19 @@ class LazyDockerSandbox:
 
     def mount_summary(self) -> dict[str, str | None]:
         mounts = self._mounts()
-        thread_key = _safe_thread_key(self.thread_id)
+        thread_root = container_thread_dir(self.thread_id)
         return {
-            "/workspace/uploads": "read-only user uploads",
-            "/workspace/artifacts": (
-                f"read-write all-thread artifacts -> {mounts.artifacts_root}; "
-                f"current thread: /workspace/artifacts/{self.thread_id or 'default'}"
+            CONTAINER_WORKSPACE_ROOT: (
+                f"read-write SlotFlow workspace -> {mounts.workspace_root}; "
+                f"current conversation directory: {thread_root}"
             ),
-            "/workspace/work": (
-                f"read-write scratch -> {mounts.work_root}; "
-                f"current thread cwd: /workspace/work/{thread_key}"
+            f"{thread_root}/{ARTIFACTS_DIR_NAME}": "read-write user-visible artifacts",
+            f"{thread_root}/uploads": "read-write per-run copies of user uploads",
+            f"{thread_root}/work": "read-write scratch working directory (the exec cwd)",
+            f"{CONTAINER_WORKSPACE_ROOT}/{UPLOAD_ORIGINALS_DIR}": (
+                "read-only original uploads kept by SlotFlow"
             ),
-            "/workspace/skills": (
+            CONTAINER_SKILLS_ROOT: (
                 f"read-only installed skills -> {mounts.skills}"
                 if mounts.skills is not None
                 else None
@@ -345,12 +359,13 @@ class LazyDockerSandbox:
             return
 
         mounts = self._mounts()
-        mounts.uploads.mkdir(parents=True, exist_ok=True)
-        mounts.artifacts_root.mkdir(parents=True, exist_ok=True)
-        mounts.work_root.mkdir(parents=True, exist_ok=True)
-        (mounts.work_root / _safe_thread_key(self.thread_id)).mkdir(parents=True, exist_ok=True)
-        if self.thread_id:
-            (mounts.artifacts_root / self.thread_id).mkdir(parents=True, exist_ok=True)
+        # 目录必须先在宿主建好:bind 挂载的是整个工作区根,容器里 `mkdir` 也能建,
+        # 但 cwd 不存在时 `docker exec -w` 会直接失败,所以三个子目录先落地。
+        mounts.workspace_root.mkdir(parents=True, exist_ok=True)
+        mounts.upload_originals.mkdir(parents=True, exist_ok=True)
+        thread_root = mounts.workspace_root / thread_dir(self.thread_id)
+        for subdir in THREAD_SUBDIR_NAMES:
+            (thread_root / subdir).mkdir(parents=True, exist_ok=True)
 
         self._ensure_container(mounts, daemon_start_attempted=False)
         self._running = True
@@ -394,19 +409,23 @@ class LazyDockerSandbox:
             "--env",
             "PIP_DISABLE_PIP_VERSION_CHECK=1",
             "-w",
-            "/workspace/work",
+            CONTAINER_WORKSPACE_ROOT,
             "--mount",
-            _bind_mount(mounts.uploads, "/workspace/uploads", readonly=True),
+            _bind_mount(mounts.workspace_root, CONTAINER_WORKSPACE_ROOT, readonly=False),
+            # 嵌套只读挂载:整根是可写的,单独把上传原件目录盖成只读,
+            # 模型改不了用户的原始文件(每次 run 的副本仍在对话目录里可写)。
             "--mount",
-            _bind_mount(mounts.artifacts_root, "/workspace/artifacts", readonly=False),
-            "--mount",
-            _bind_mount(mounts.work_root, "/workspace/work", readonly=False),
+            _bind_mount(
+                mounts.upload_originals,
+                f"{CONTAINER_WORKSPACE_ROOT}/{UPLOAD_ORIGINALS_DIR}",
+                readonly=True,
+            ),
         ]
         if mounts.skills is not None:
             command.extend(
                 [
                     "--mount",
-                    _bind_mount(mounts.skills, "/workspace/skills", readonly=True),
+                    _bind_mount(mounts.skills, CONTAINER_SKILLS_ROOT, readonly=True),
                 ]
             )
         command.extend([self.config.docker_image, "sleep", "infinity"])
@@ -451,18 +470,16 @@ class LazyDockerSandbox:
             pass
 
     def _mounts(self) -> DockerSandboxMounts:
-        artifacts_root = self._workspace.resolve_path("artifacts")
-        work_root = self._workspace.resolve_path(".sandbox")
-        uploads_path = self._workspace.resolve_path("uploads")
+        workspace_root = self._workspace.root
+        upload_originals = self._workspace.resolve_path(UPLOAD_ORIGINALS_DIR)
         skills_path = (
             self.skills_root.expanduser().resolve(strict=False)
             if self.skills_root is not None
             else None
         )
         return DockerSandboxMounts(
-            uploads=uploads_path,
-            artifacts_root=artifacts_root,
-            work_root=work_root,
+            workspace_root=workspace_root,
+            upload_originals=upload_originals,
             skills=skills_path if skills_path is not None and skills_path.exists() else None,
         )
 
@@ -474,31 +491,15 @@ def _bind_mount(source: Path, target: str, *, readonly: bool) -> str:
     return ",".join(payload)
 
 
-def _safe_thread_key(thread_id: str | None) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", (thread_id or "default").strip())
-    return cleaned.strip(".-") or "default"
-
-
 def _container_artifact_root(thread_id: str | None) -> str:
-    cleaned = (thread_id or "").strip().strip("/")
-    return f"/workspace/artifacts/{cleaned}" if cleaned else "/workspace/artifacts"
+    return container_artifacts_dir(thread_id)
 
 
 def _workspace_artifact_path(*, destination_tail: str, thread_id: str | None) -> str:
-    cleaned = (thread_id or "").strip().strip("/")
-    return (
-        f"artifacts/{cleaned}/{destination_tail}"
-        if cleaned
-        else f"artifacts/{destination_tail}"
-    )
+    return f"{thread_artifacts_dir(thread_id)}/{destination_tail}"
 
 
-def _normalize_copy_source_path(
-    source_path: str,
-    *,
-    thread_id: str | None,
-    thread_key: str,
-) -> str:
+def _normalize_copy_source_path(source_path: str, *, thread_id: str | None) -> str:
     raw = source_path.strip()
     if not raw:
         raise ValueError("source_path must not be blank")
@@ -507,23 +508,19 @@ def _normalize_copy_source_path(
     if "\\" in raw:
         raise ValueError("source_path must use forward slashes")
 
+    thread_root = container_thread_dir(thread_id)
     path = PurePosixPath(raw)
     if path.is_absolute():
         normalized = _normalize_posix_path(path)
     else:
-        normalized = _normalize_posix_path(
-            PurePosixPath("/workspace/work") / thread_key / path
-        )
+        # 相对路径按 exec 的 cwd(= 对话目录)解释,和模型看到的 `ls` 一致。
+        normalized = _normalize_posix_path(PurePosixPath(thread_root) / path)
 
-    allowed_roots = (f"/workspace/work/{thread_key}", "/tmp")
-    current_artifact_root = _container_artifact_root(thread_id)
-    if not any(
-        root and _is_same_or_child_posix(normalized, root)
-        for root in (*allowed_roots, current_artifact_root)
-    ):
+    # 整个对话目录都可以作为来源:work/ 里的中间产物、uploads/ 里的原始数据都算。
+    allowed_roots = (thread_root, "/tmp")
+    if not any(_is_same_or_child_posix(normalized, root) for root in allowed_roots):
         raise ValueError(
-            "source_path must be relative to this thread workdir or under "
-            "/workspace/work/<thread>, /tmp, or the current thread artifact folder"
+            f"source_path must stay inside this conversation directory ({thread_root}) or /tmp"
         )
     return normalized
 
@@ -549,12 +546,13 @@ def _normalize_artifact_destination_tail(
             raise ValueError("absolute artifact_path must stay inside the current thread artifact folder")
         raw = normalized[len(current_artifact_root) :].lstrip("/")
     else:
+        # 模型经常把自己所在的目录一起写进来。宽容地剥掉 "<thread>/" 和 "artifacts/"
+        # 两层前缀(顺序不限),剩下的才是产物目录内的相对名。
         raw = raw.lstrip("/")
-        if raw.startswith("artifacts/"):
-            raw = raw[len("artifacts/") :].lstrip("/")
-        cleaned_thread = (thread_id or "").strip().strip("/")
-        if cleaned_thread and (raw == cleaned_thread or raw.startswith(f"{cleaned_thread}/")):
-            raw = raw[len(cleaned_thread) :].lstrip("/")
+        for _ in range(2):
+            for prefix in (f"{thread_dir_name(thread_id)}/", f"{ARTIFACTS_DIR_NAME}/"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix) :].lstrip("/")
 
     tail = _normalize_posix_path(PurePosixPath(raw), require_relative=True)
     if tail in {"", "."}:

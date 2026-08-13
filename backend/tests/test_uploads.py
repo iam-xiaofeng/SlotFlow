@@ -41,10 +41,10 @@ def test_upload_file_stores_bytes_and_metadata_under_workspace(tmp_path: Path) -
     assert body["filename"] == "hello_world.txt"
     assert body["content_type"] == "text/plain"
     assert body["size_bytes"] == 5
-    assert body["workspace_path"] == f"uploads/{body['id']}/hello_world.txt"
+    assert body["workspace_path"] == f".uploads/{body['id']}/hello_world.txt"
 
     stored_path = store.workspace.resolve_path(body["workspace_path"])
-    metadata_path = store.workspace.resolve_path(f"uploads/{body['id']}/metadata.json")
+    metadata_path = store.workspace.resolve_path(f".uploads/{body['id']}/metadata.json")
 
     assert stored_path.read_bytes() == b"hello"
     assert json.loads(metadata_path.read_text(encoding="utf-8"))["id"] == body["id"]
@@ -140,7 +140,7 @@ def test_workspace_read_can_read_uploaded_file_by_workspace_path(tmp_path: Path)
 
 
 def test_upload_store_stages_file_under_run_scoped_path(tmp_path: Path) -> None:
-    """发送消息时上传文件会复制到 uploads/<run_id>/ 下供 agent 读取。"""
+    """发送消息时上传文件会复制到 <thread>/uploads/<run_id>/ 下供 agent 读取。"""
 
     client, store = _client(tmp_path)
     uploaded = client.post(
@@ -148,9 +148,13 @@ def test_upload_store_stages_file_under_run_scoped_path(tmp_path: Path) -> None:
         files={"file": ("report.md", b"# report", "text/markdown")},
     ).json()
 
-    staged = store.stage_upload_for_run(uploaded["id"], run_id="run_abc123abc123")
+    staged = store.stage_upload_for_run(
+        uploaded["id"],
+        run_id="run_abc123abc123",
+        thread_id="thread_abc123abc123",
+    )
 
-    assert staged.workspace_path == "uploads/run_abc123abc123/report.md"
+    assert staged.workspace_path == "thread_abc123abc123/uploads/run_abc123abc123/report.md"
     assert store.get_upload(uploaded["id"]).workspace_path == staged.workspace_path
     assert store.workspace.resolve_path(staged.workspace_path).read_bytes() == b"# report"
 
