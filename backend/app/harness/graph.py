@@ -239,7 +239,10 @@ def make_prepare_node(inputs: _GraphInputs):
         updates["slotflow"] = slotflow
         # Stash baseline artifacts + memories for finalize/pre_model.
         if flags.artifact_discovery_enabled:
-            updates["artifacts_baseline"] = artifact_baseline(inputs.sandbox_config)
+            updates["artifacts_baseline"] = artifact_baseline(
+                inputs.sandbox_config,
+                thread_id=inputs.run_context.thread_id if inputs.run_context else None,
+            )
         if memories:
             updates["retrieved_memories"] = memories
         return updates
@@ -618,6 +621,7 @@ def make_finalize_node(inputs: _GraphInputs):
                 state={"slotflow": slotflow},
                 baseline_paths=baseline,
                 sandbox_config=inputs.sandbox_config,
+                thread_id=inputs.run_context.thread_id if inputs.run_context else None,
             )
             slotflow.update(artifact_update["slotflow"])
 
