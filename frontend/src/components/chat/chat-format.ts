@@ -113,6 +113,19 @@ export function entryName(path: string): string {
   return segments[segments.length - 1] ?? path;
 }
 
+/**
+ * 产物路径是不是属于这个对话。
+ *
+ * 新布局是 `<thread>/artifacts/...`(一个对话一个目录);`artifacts/<thread>/...`
+ * 是旧布局的存量文件,迁移前后都要认,否则老对话的产物会从面板里消失。
+ */
+export function isThreadArtifactPath(path: string, threadId: string): boolean {
+  return (
+    path.startsWith(`${threadId}/artifacts/`) ||
+    path.startsWith(`artifacts/${threadId}/`)
+  );
+}
+
 export function filterThreadArtifacts(
   threadId: string,
   artifacts: WorkspaceEntryRecord[],
@@ -120,12 +133,11 @@ export function filterThreadArtifacts(
   messages: Pick<ChatUiMessage, "content">[] = [],
 ): WorkspaceEntryRecord[] {
   const explicitPaths = new Set(threadArtifactPaths[threadId] ?? []);
-  const threadPrefix = `artifacts/${threadId}/`;
   const messageText = messages.map((message) => message.content).join("\n");
   return artifacts.filter(
     (artifact) =>
       explicitPaths.has(artifact.path) ||
-      artifact.path.startsWith(threadPrefix) ||
+      isThreadArtifactPath(artifact.path, threadId) ||
       messageText.includes(artifact.path) ||
       messageText.includes(artifact.path.replace(/^artifacts\//, "")),
   );
