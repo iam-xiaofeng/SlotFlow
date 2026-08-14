@@ -464,6 +464,8 @@ def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str |
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
+        if is_ui_message_boundary(message):
+            return None
         role = message.get("role")
         value = message.get(field)
         if field == "content" and message.get("has_tool_calls") is True:
@@ -471,6 +473,27 @@ def latest_assistant_message_field(event: BusinessSseEvent, field: str) -> str |
         if role in ("assistant", "ai") and isinstance(value, str):
             return value
     return None
+
+
+def is_ui_message_boundary(message: dict) -> bool:
+    """反向扫描 state.snapshot 时,扫到这条就必须停:再往前是**上一条气泡**的内容。
+
+    快照带的是整段对话历史,不是本轮新增。不设边界的话,本轮还没产出正文/思考的那一小段
+    时间里,扫描会一路退到上一轮,把上一轮的内容当成本轮的——注入新气泡,甚至落库。
+
+    两个边界:
+
+    - **用户消息**:普通一轮的起点。
+    - **``ask_clarification`` 的工具结果**:澄清 resume 的起点。resume 走
+      ``Command(resume=...)``,答案是写成工具结果的,state 里**不会新增 user message**,
+      所以光看 role 拦不住。不拦的话,澄清前那一大段思考会被算成 resume 这一轮的,
+      在「思考框 → 澄清框 → 新思考框」里重复出现两次。
+    """
+
+    role = message.get("role")
+    if role in ("human", "user"):
+        return True
+    return role == "tool" and message.get("name") == "ask_clarification"
 
 
 def assistant_message_metadata(

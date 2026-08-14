@@ -25,7 +25,11 @@ from app.chat.agent_adapter import AgentEvent
 from app.chat.models import ChatStreamRequest, RunConfigBundle
 from app.chat.repository import ChatRepository, SQLiteChatRepository
 from app.chat.sse import BusinessSseEvent
-from app.chat.routes import latest_assistant_content, select_assistant_content
+from app.chat.routes import (
+    latest_assistant_content,
+    latest_assistant_reasoning_content,
+    select_assistant_content,
+)
 from app.harness.sandbox import SlotFlowSandboxConfig
 from app.main import create_app
 from app.uploads import SlotFlowUploadStore
@@ -637,6 +641,80 @@ def test_latest_assistant_content_skips_intermediate_tool_call_messages() -> Non
     )
 
     assert latest_assistant_content(event) == "最终答案。"
+
+
+def test_snapshot_scan_stops_at_the_user_message() -> None:
+    """快照带的是整段历史；本轮还没产出正文时，不能把上一轮的答案当成本轮的。"""
+
+    event = BusinessSseEvent(
+        event="state.snapshot",
+        data={
+            "messages": [
+                {"role": "human", "content": "第一个问题"},
+                {
+                    "role": "assistant",
+                    "content": "上一轮的答案。",
+                    "reasoning_content": "上一轮想了很久很久很久很久。",
+                },
+                {"role": "human", "content": "第二个问题"},
+            ]
+        },
+    )
+
+    assert latest_assistant_content(event) is None
+    assert latest_assistant_reasoning_content(event) is None
+
+
+def test_snapshot_scan_stops_at_the_clarification_tool_result() -> None:
+    """澄清 resume 用 Command(resume=...)，答案写成工具结果，state 里没有新的 user message。
+
+    不在这里设边界，澄清前那一大段思考就会被算成 resume 这一轮的，在
+    「思考框 → 澄清框 → 新思考框」里重复出现两次。
+    """
+
+    event = BusinessSseEvent(
+        event="state.snapshot",
+        data={
+            "messages": [
+                {"role": "human", "content": "帮我做个图"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "澄清之前想了一大堆，这段属于澄清那条气泡。",
+                    "has_tool_calls": True,
+                },
+                {"role": "tool", "name": "ask_clarification", "content": "折线图"},
+            ]
+        },
+    )
+
+    assert latest_assistant_reasoning_content(event) is None
+
+
+def test_snapshot_scan_still_sees_this_turn_across_tool_steps() -> None:
+    """边界只挡上一条气泡；本轮内部的普通工具往返照常要能扫到。"""
+
+    event = BusinessSseEvent(
+        event="state.snapshot",
+        data={
+            "messages": [
+                {"role": "human", "content": "上一轮"},
+                {"role": "assistant", "content": "上一轮的答案。"},
+                {"role": "human", "content": "这一轮"},
+                {
+                    "role": "assistant",
+                    "content": "先查一下。",
+                    "reasoning_content": "本轮的思考。",
+                    "has_tool_calls": True,
+                },
+                {"role": "tool", "name": "web_search", "content": "搜索结果"},
+                {"role": "assistant", "content": "本轮的答案。"},
+            ]
+        },
+    )
+
+    assert latest_assistant_content(event) == "本轮的答案。"
+    assert latest_assistant_reasoning_content(event) == "本轮的思考。"
 
 
 def test_stream_run_can_reuse_user_message_for_edit_or_retry() -> None:
