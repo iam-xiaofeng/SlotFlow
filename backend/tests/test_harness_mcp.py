@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from langchain_core.tools import BaseTool, tool
 
@@ -13,6 +15,7 @@ from app.harness.mcp import (
     build_multi_server_mcp_connections,
     ensure_mcp_tools_loaded,
     load_mcp_tools,
+    mcp_server_name,
 )
 from app.harness.tools.registry import build_harness_tools
 
@@ -22,6 +25,13 @@ def mcp_echo_tool(value: str) -> str:
     """Echo a value from a fake MCP provider."""
 
     return value
+
+
+@tool("browser_navigate")
+def browser_navigate_tool(url: str) -> str:
+    """Fake playwright-style MCP browser tool used to prove the vertical-subagent boundary."""
+
+    return url
 
 
 @tool("bash")
@@ -105,7 +115,9 @@ def test_load_mcp_tools_filters_disabled_servers_before_provider_call() -> None:
     )
 
 
-def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
+def test_mcp_tools_are_proxied_instead_of_bound_as_individual_schemas() -> None:
+    """MCP 收敛边界:不管接多少 server,主 agent 只多出 mcp_docs / mcp_call 两个工具。"""
+
     provider = CapturingMcpToolProvider()
 
     tools = build_harness_tools(
@@ -118,12 +130,61 @@ def test_build_harness_tools_includes_mcp_tools_after_workspace_tools() -> None:
     )
 
     names = [tool.name for tool in tools]
-    # MCP server tools are appended after the built-in/workspace/customization tools.
-    assert "mcp_echo" in names
-    assert names.index("mcp_echo") > names.index("artifact_write")
-    assert names.index("mcp_echo") > names.index("skill_match")
+    assert "mcp_docs" in names
+    assert "mcp_call" in names
+    # 真实 MCP 工具的 schema 绝不进模型工具面。
+    assert "mcp_echo" not in names
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     assert provider.calls[0].servers[0].name == "filesystem"
+
+
+@pytest.mark.asyncio
+async def test_mcp_docs_lists_the_real_tool_and_mcp_call_reaches_it() -> None:
+    provider = CapturingMcpToolProvider()
+
+    tools = build_harness_tools(
+        features=_features(),
+        mcp_config=SlotFlowMcpConfig(
+            enabled=True,
+            servers=(SlotFlowMcpServerConfig(name="filesystem"),),
+        ),
+        mcp_tool_provider=provider,
+    )
+    by_name = {tool.name: tool for tool in tools}
+
+    docs = json.loads(by_name["mcp_docs"].invoke({"query": "echo"}))
+    assert [entry["tool"] for entry in docs["tools"]] == ["mcp_echo"]
+    assert "value" in docs["tools"][0]["arguments"]
+
+    called = json.loads(
+        await by_name["mcp_call"].ainvoke(
+            {"server": docs["tools"][0]["server"], "tool": "mcp_echo", "arguments": {"value": "hi"}}
+        )
+    )
+    assert called["result"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_rejects_a_tool_name_the_model_invented() -> None:
+    provider = CapturingMcpToolProvider()
+
+    tools = build_harness_tools(
+        features=_features(),
+        mcp_config=SlotFlowMcpConfig(
+            enabled=True,
+            servers=(SlotFlowMcpServerConfig(name="filesystem"),),
+        ),
+        mcp_tool_provider=provider,
+    )
+    by_name = {tool.name: tool for tool in tools}
+
+    result = json.loads(
+        await by_name["mcp_call"].ainvoke(
+            {"server": "filesystem", "tool": "read_everything", "arguments": {}}
+        )
+    )
+    assert result["error"] == "unknown_mcp_tool"
+    assert "mcp_docs" in result["hint"]
 
 
 def test_build_harness_tools_filters_unsafe_mcp_execution_tools() -> None:
@@ -137,12 +198,13 @@ def test_build_harness_tools_filters_unsafe_mcp_execution_tools() -> None:
         ),
         mcp_tool_provider=provider,
     )
+    by_name = {tool.name: tool for tool in tools}
 
-    names = [tool.name for tool in tools]
-
-    assert "mcp_echo" in names
-    assert "sandbox_exec" in names
-    assert "bash" not in names
+    assert "sandbox_exec" in by_name
+    assert "bash" not in by_name
+    # 被过滤掉的宿主执行工具也不能从 mcp_docs 手册的后门重新暴露出来。
+    docs = json.loads(by_name["mcp_docs"].invoke({"query": "bash"}))
+    assert [entry["tool"] for entry in docs["tools"]] == ["mcp_echo"]
 
 
 def test_build_multi_server_mcp_connections_requires_real_server_config() -> None:
@@ -189,6 +251,9 @@ async def test_multi_server_mcp_provider_loads_and_caches_tools() -> None:
 
     assert loaded_tools == [mcp_echo_tool]
     assert cached_tools == [mcp_echo_tool]
+    # 来源 server 标签由 loader 打上:mcp_docs/mcp_call 靠它把工具归到对应 server,
+    # 否则同名工具跨 server 撞车时无法区分(adapter 自己不写这个字段)。
+    assert mcp_server_name(loaded_tools[0]) == "filesystem"
     assert captured_connections == [
         {
             "filesystem": {
@@ -250,3 +315,23 @@ async def test_ensure_mcp_tools_loaded_calls_async_provider_before_registry() ->
             }
         }
     ]
+
+
+def test_browser_mcp_tools_fall_back_to_the_proxy_when_no_subagent_can_own_them() -> None:
+    """flash 模式没有子代理承载 browser_*,能力不能凭空消失——回落到通用 MCP 代理。"""
+
+    provider = CapturingMcpToolProvider(tools=[browser_navigate_tool, mcp_echo_tool])
+
+    tools = build_harness_tools(
+        features=_features(),  # subagent_enabled=False
+        mcp_config=SlotFlowMcpConfig(
+            enabled=True,
+            servers=(SlotFlowMcpServerConfig(name="playwright"),),
+        ),
+        mcp_tool_provider=provider,
+    )
+    by_name = {tool.name: tool for tool in tools}
+
+    assert "browser_navigate" not in by_name  # 仍然不直绑 schema
+    docs = json.loads(by_name["mcp_docs"].invoke({"query": "browser navigate"}))
+    assert "browser_navigate" in [entry["tool"] for entry in docs["tools"]]

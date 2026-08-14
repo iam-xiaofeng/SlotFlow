@@ -1,8 +1,8 @@
 """Tests for SlotFlow harness steps (node-reusable pure functions).
 
 重构后中间件逻辑已抽成 app/harness/steps/* 无状态纯函数。这些测试直接覆盖 steps，
-对应原 middleware 单测的行为契约（runtime summary / uploads / skills preflight /
-todo / subagent limit / tool safety / dangling / artifact discovery / clarify gate）。
+对应原 middleware 单测的行为契约（runtime summary / uploads / todo / subagent limit /
+tool safety / dangling / artifact discovery）。
 """
 
 from __future__ import annotations
@@ -24,19 +24,8 @@ from app.harness.steps.artifact_discovery import (
     artifact_finalize_update,
     list_artifact_entries,
 )
-from app.harness.steps.clarify_gate import (
-    already_clarified,
-    clarify_mode_enabled,
-    is_fresh_user_turn,
-    parse_triage,
-)
 from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.runtime_summary import runtime_summary_update
-from app.harness.steps.skills_preflight import (
-    format_preflight,
-    should_run_preflight,
-    skills_preflight_update,
-)
 from app.harness.steps.subagent_limit import cap_subagent_calls
 from app.harness.steps.todo import (
     consume_todo_enforcement,
@@ -156,50 +145,6 @@ def test_uploads_injects_image_content_blocks(tmp_path: Path) -> None:
     assert base64.b64decode(url.split(",", 1)[1]) == image_bytes
 
 
-# --- skills preflight ------------------------------------------------------
-
-
-def test_skills_preflight_stores_result_without_mutating_user_message() -> None:
-    calls: list[tuple[str, int]] = []
-    message = HumanMessage(content="请分析股票数据并生成图表报告")
-
-    def fake_finder(query, max_results, config, skills_root=None, skills_config_store=None):
-        calls.append((query, max_results))
-        return {
-            "query": query,
-            "installed_matches": [{"name": "chart skill"}],
-            "tool": "find-skills",
-        }
-
-    update = skills_preflight_update(
-        state={"messages": [message]},
-        finder=fake_finder,
-    )
-    assert calls == [("请分析股票数据并生成图表报告", 5)]
-    assert update is not None
-    assert update["slotflow"]["skills_preflight"]["tool"] == "find-skills"
-    assert "messages" not in update
-    assert message.content == "请分析股票数据并生成图表报告"
-
-
-def test_skills_preflight_format_is_internal_system_context() -> None:
-    preflight = format_preflight(
-        {
-            "installed_matches": [{"name": "academic-plotting"}],
-            "tool": "find-skills",
-        }
-    )
-
-    assert preflight.startswith("<slotflow-skills-preflight>")
-    assert "SlotFlow internal context" in preflight
-    assert "academic-plotting" in preflight
-
-
-def test_should_run_preflight_skips_simple_chat() -> None:
-    assert should_run_preflight("你好") is False
-    assert should_run_preflight("请分析股票数据并生成图表报告") is True
-
-
 # --- todo reminder ---------------------------------------------------------
 
 
@@ -302,11 +247,11 @@ def test_todo_enforcement_skips_simple_unplanned_answer() -> None:
 
 def test_todo_enforcement_ignores_slotflow_injected_context_for_complexity() -> None:
     injected = (
-        "<slotflow-skills-preflight>\n"
+        "<slotflow-long-term-memory>\n"
         "This injected block is intentionally long and mentions analyze, research, report, "
         "implement, test, verify, and other workflow words that must not make a simple "
         "user request look todo-worthy.\n"
-        "</slotflow-skills-preflight>\n\n"
+        "</slotflow-long-term-memory>\n\n"
         "读取当前 SlotFlow run context"
     )
     update = todo_enforcement_update(
@@ -583,29 +528,3 @@ def test_list_artifact_entries_empty_when_no_artifacts(tmp_path: Path) -> None:
     assert list_artifact_entries(SlotFlowSandboxConfig(workspace_root=tmp_path)) == []
 
 
-# --- clarify gate ----------------------------------------------------------
-
-
-def test_clarify_mode_enabled_only_for_pro_ultra() -> None:
-    assert clarify_mode_enabled("pro") is True
-    assert clarify_mode_enabled("ultra") is True
-    assert clarify_mode_enabled("flash") is False
-
-
-def test_is_fresh_user_turn_and_already_clarified() -> None:
-    assert is_fresh_user_turn([HumanMessage("hi")]) is True
-    assert is_fresh_user_turn([AIMessage(content="x")]) is False
-    messages = [
-        HumanMessage("做个表格"),
-        AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {}, "id": "c1", "type": "tool_call"}]),
-        ToolMessage(content="{}", name="ask_clarification", tool_call_id="c1"),
-        HumanMessage("CSV"),
-    ]
-    assert already_clarified(messages) is True
-    assert already_clarified([HumanMessage("hi")]) is False
-
-
-def test_parse_triage_reads_json_object() -> None:
-    triage = parse_triage('noise {"actionable": false, "question": "q?"} more')
-    assert triage == {"actionable": False, "question": "q?"}
-    assert parse_triage("no json") is None

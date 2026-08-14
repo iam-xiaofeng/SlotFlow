@@ -1,11 +1,11 @@
 """Shared clarification payload construction for SlotFlow harness HITL.
 
-Both the ``ask_clarification`` tool (``harness/tools/builtins.py``) and the clarify gate
-(``harness/middleware/clarify_gate_middleware.py``) turn a clarification request into the SAME
-structured payload, which the agent adapter surfaces to the UI as ``clarification.requested``.
+澄清现在**只有一条路**:模型自己调 ``ask_clarification`` 工具(``harness/tools/builtins.py``)。
+2026-08-14 删掉了 ``triage_gate`` 强制门——它在每个新用户轮额外跑一次模型去判断"这个请求够不够
+清楚",既是首字延迟,也常常在请求本来就明确时打断用户;模型自己判断该不该问已经够用。
 
 Mechanism note: clarification is delivered through LangGraph native ``interrupt()``/resume.
-The tool/gate call ``interrupt(build_clarification_payload(...))`` to pause the graph; the
+The tool calls ``interrupt(build_clarification_payload(...))`` to pause the graph; the
 user's answer is fed back via ``Command(resume=<answer>)`` and becomes the tool result
 directly — so there is no separate "rewrite the answered tool message" step. See HARNESS_NOTES.md.
 """

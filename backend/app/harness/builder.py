@@ -17,7 +17,7 @@ from app.harness.config import SlotFlowHarnessConfig
 from app.harness.graph import build_slotflow_graph
 from app.harness.features import SlotFlowHarnessFeatures, features_from_run_context
 from app.harness.skills import build_skills_prompt, load_enabled_skills
-from app.harness.tool_spaces import assemble_tool_spaces, gated_tool_spaces_from_env
+from app.harness.subagents import build_subagent_catalog_prompt
 from app.harness.tools import build_harness_tools
 from app.harness.utils import model_supports_tools
 
@@ -58,19 +58,18 @@ def build_slotflow_harness_graph(
         markitdown_config=harness_config.markitdown_config,
         subagent_config=harness_config.subagent_config,
     )
+    # 工具集恒定:`build_harness_tools` 已经把重工具(浏览器自动化)和数量发散的 MCP 原生
+    # schema 挡在主 agent 之外(前者归 browser 子代理、后者收敛成 mcp_docs/mcp_call),
+    # 所以这里直接全绑,不再有加载器/激活门。见 `harness/tool_spaces.py` 顶部说明。
     selected_tools = built_tools if tools_supported else []
-    tool_space_setup = assemble_tool_spaces(
-        selected_tools,
-        gated_spaces=gated_tool_spaces_from_env(),
-    )
     return build_slotflow_graph(
         model=model,
-        tools=list(tool_space_setup.tools),
-        initial_tool_names=tool_space_setup.initial_names,
+        tools=list(selected_tools),
         system_prompt=build_system_prompt(
             harness_config=harness_config,
             features=features,
             run_context=run_context,
+            mcp_proxy_available=any(tool.name == "mcp_call" for tool in selected_tools),
         ),
         run_context=run_context,
         features=features,
@@ -98,6 +97,7 @@ def build_system_prompt(
     harness_config: SlotFlowHarnessConfig,
     features: SlotFlowHarnessFeatures,
     run_context: RunContext,
+    mcp_proxy_available: bool = True,
 ) -> str:
     """构建第一版 harness system prompt。
 
@@ -147,12 +147,14 @@ def build_system_prompt(
             "Use web_search/web_fetch for public web access when current information is needed.",
             "Do not put internal reasoning, durable context summaries, todo updates, or tool-call transcripts in the final answer body. Thinking-mode output belongs in reasoning_content; final answer content should contain only user-facing results.",
             "When public web or fetched data supports a claim, include a Markdown source link next to the relevant sentence or data point, for example [来源](https://example.com/page).",
-            "Use skill_match to check installed Skills first; it falls back to find-skills only when no local match exists.",
+            "Skills are two-step: DISCOVER, then READ. <slotflow-skills> below lists only each installed Skill's name and one-line description — never its instructions. When a Skill looks relevant, you MUST call skill_read(name) to load its SKILL.md body as a tool result and then follow it. Do NOT act on a Skill from its description alone, and do NOT guess its procedure from general knowledge.",
+            "skill_read also returns the Skill's bundled files (scripts, templates, references). Read one with skill_read(name, path=...) when the body points at it; run its helper scripts with sandbox_exec.",
+            "If a compaction summary says a Skill was already loaded but its text is gone, call skill_read(name) again rather than working from the summary; use context_archive_search/context_archive_read to recover the original tool result and other dropped details.",
+            "Use skill_match to check installed Skills first; it falls back to find-skills only when no local match exists. It returns candidates to read, not instructions — follow it with skill_read.",
             "Use find-skills to search installable Skills when skill_match finds no relevant installed Skill. find-skills is a callable tool, not only a prompt skill.",
             "Query find-skills (and search_skill_repos) by CAPABILITY or task type in English — e.g. 'research', 'data analysis', 'web scraping', 'pdf', 'slides', 'stock'/'finance' — NOT by the literal topic words of the request (do not search '世界杯' or '股市'). Skills are organized by what they DO, not by subject. If the first query returns nothing, try synonyms and broader capability terms, and use search_skill_repos / web_search to look on GitHub before concluding that no Skill exists. Do not give up after one literal-keyword search.",
             "Use search_skill_repos to find installable Skills hosted on GitHub when the curated find-skills registry has no match; it returns repositories you can then install with skill_install.",
             "When the user asks about a domain, profession, specialized task, or expert workflow, call skill_match before doing the work so you can discover whether a matching installed or installable Skill exists.",
-            "For specialized requests, SlotFlow may provide a backend skills preflight as internal system context; review installed_matches before deciding whether to search, install, or use a Skill.",
             "Use skill_install only when a concrete package_url and skill_name are known or the user explicitly asks for that exact install.",
             "After installing a relevant Skill, use it for the corresponding work as soon as it is available; if it only becomes available on the next run, say that plainly and continue with the best current tools.",
             "Use mcp_add_http only when the user provides a concrete streamable HTTP MCP endpoint or explicitly asks to register it.",
@@ -177,30 +179,22 @@ def build_system_prompt(
         orchestration_lines.extend(
             [
                 "- When the task splits into INDEPENDENT parts (research multiple items, evaluate multiple options, build multiple components), delegate each to a sub-agent via task_tool and run them in parallel, then synthesize the results yourself — don't do every part sequentially in one thread.",
-                "- For delegation, call subagent_list before choosing workers when role fit matters. Pick a Layer-1 functional agent_name (researcher/analyst/planner/coder/reviewer/writer), then usually pass only a Layer-2 domain to task_tool for domain guidance.",
-                "- Use subagent_role_search(query, domain) only when the exact Layer-3 professional role matters; pass one returned role_name/id to task_tool. Do not ask to see or summarize the full role library.",
-                "- subagent_list/subagent_role_search expose compact role metadata only; task_tool loads at most one file-backed agency role template into the child subagent.",
+                "- Delegation is ONE call: task_tool(agent_name=..., task=..., ...). The agent_name catalog is in <slotflow-subagents> below — there is no list/search round-trip to make first.",
+                "- Pass role_query when a precise professional role would help. The role library is English-only, so query it in ENGLISH by profession ('penetration tester', 'tax accountant') even when the conversation is in another language; SlotFlow injects at most ONE matching role template into that child run. Leave it empty when the functional agent_name is enough.",
+                "- Browser automation is NOT available to you directly: delegate it with task_tool(agent_name='browser', ...) and describe the goal (which site, what to extract or do). The child owns the browser tools and returns only the result, keeping page dumps out of this context.",
                 "- task_tool.tool_spaces may grant at most three named spaces (workspace/sandbox/browser/network/documents/extensions/memory). Never use all or wildcard; split cross-domain work instead. Child agents have no todo, clarification/HITL, memory middleware, or recursive task_tool.",
             ]
         )
     sections.extend(
         ["", "<slotflow-operating-procedure>", *orchestration_lines, "</slotflow-operating-procedure>"]
     )
-    gated_spaces = gated_tool_spaces_from_env()
-    if gated_spaces:
-        gated_list = ", ".join(f"{space}_tools" for space in sorted(gated_spaces))
-        sections.extend(
-            [
-                "",
-                "<slotflow-tool-spaces>",
-                "Most tools (workspace/file, web, sandbox, documents, memory) are directly callable — just call them.",
-                f"Only these heavier tool spaces are disclosed lazily through a loader: {gated_list}. "
-                "Call the matching *_tools loader with the exact tool names to activate them before use; "
-                "the loader description lists its exact tool catalog. Activation is additive for the current context epoch.",
-                "Do not guess a hidden tool call; only load a gated space when you actually need one of its tools.",
-                "</slotflow-tool-spaces>",
-            ]
-        )
+    if features.subagent_enabled:
+        # 子代理目录是**静态文本**(6 个功能画像 + 8 个角色领域),不是工具。它随 system 前缀
+        # 一起被缓存,模型读一眼就能直接 task_tool,省掉曾经的 subagent_list /
+        # subagent_role_search 两次工具往返。角色检索下沉进 task_tool 的 role_query 参数。
+        catalog = build_subagent_catalog_prompt(harness_config.subagent_config)
+        if catalog:
+            sections.extend(["", catalog])
     sections.extend(
         [
             "",
@@ -211,7 +205,12 @@ def build_system_prompt(
             "</slotflow-context-archive>",
         ]
     )
-    sections.extend(build_mcp_status_prompt(harness_config.mcp_config))
+    sections.extend(
+        build_mcp_status_prompt(
+            harness_config.mcp_config,
+            proxy_available=mcp_proxy_available,
+        )
+    )
     sections.extend(build_agent_reach_status_prompt(harness_config))
     sections.extend(build_markitdown_status_prompt(harness_config))
     skills_prompt = build_skills_prompt(enabled_skills)
@@ -252,8 +251,12 @@ def build_agent_reach_status_prompt(harness_config: SlotFlowHarnessConfig) -> li
     ]
 
 
-def build_mcp_status_prompt(mcp_config) -> list[str]:
-    """Describe configured MCP servers in the system prompt."""
+def build_mcp_status_prompt(mcp_config, *, proxy_available: bool = True) -> list[str]:
+    """Describe configured MCP servers and the fixed two-tool MCP boundary.
+
+    `proxy_available` 反映本次运行是否真的绑上了 `mcp_docs`/`mcp_call`（没有可代理的
+    MCP 工具时不会绑）。提示词必须和实际工具面一致——描述一个不存在的工具，模型就会去调它。
+    """
 
     sections = [
         "",
@@ -271,9 +274,28 @@ def build_mcp_status_prompt(mcp_config) -> list[str]:
                 f"enabled={server.enabled}; "
                 f"transport={server.config.get('transport', 'unknown') if server.config else 'unknown'}"
             )
+    if proxy_available:
+        sections.extend(
+            [
+                "MCP tools are NOT bound as individual tools. However many servers are enabled, you "
+                "always see exactly two: mcp_docs and mcp_call. This keeps your tool schema list "
+                "identical from turn 1 to the end of the conversation.",
+                "Two-step usage: call mcp_docs(query=..., server=...) first to read the generated "
+                "manual for the relevant server (tool names, required arguments, types), then call "
+                "mcp_call(server=..., tool=..., arguments={...}) with exactly those argument names.",
+                "Never invent an MCP tool name or argument from the server name alone — read "
+                "mcp_docs first. mcp_docs with no arguments lists every server and its tool count.",
+            ]
+        )
+    else:
+        sections.append(
+            "No MCP tool is reachable in this run: either no server connected, or the only "
+            "connected server is the browser one handled by the browser sub-agent. Do not call "
+            "mcp_docs/mcp_call — they are not bound."
+        )
     sections.extend(
         [
-            "Enabled MCP servers are loaded as tools when their connection succeeds.",
+            "Browser automation runs through the browser sub-agent (task_tool), not mcp_call.",
             "</slotflow-mcp-status>",
         ]
     )

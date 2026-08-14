@@ -84,6 +84,32 @@ DEFAULT_SUBAGENT_PROFILES: tuple[SlotFlowSubagentProfile, ...] = (
         ),
         output_contract="Return the proposed text plus assumptions that need confirmation.",
     ),
+    # 唯一的"垂类"画像:它存在的理由不是角色,而是**承载重工具空间**。playwright MCP 的
+    # browser_* 有二十来个 schema、一次自动化动辄十几轮、每轮回大段页面快照——正好命中
+    # "schema 多 × 轮数长 × 中间产物脏"三条,是子代理上下文隔离最划算的场景。父 agent 因此
+    # 完全不绑 browser_*,只按结果委派。反过来,web_search/web_fetch 只有 2 个 schema、单轮、
+    # 结果还要父 agent 带链接引用,做成垂类纯亏,所以它们保持直绑。
+    SlotFlowSubagentProfile(
+        name="browser",
+        description=(
+            "Drive a real browser (navigate, click, fill, extract, screenshot) for pages that "
+            "plain web_fetch cannot handle: logins, JS-rendered content, multi-step flows."
+        ),
+        system_prompt=(
+            "You are a browser automation subagent. You own the browser tools. Work the page "
+            "step by step, verify what actually rendered before acting, and return only the "
+            "extracted result — never dump raw page snapshots or DOM into your answer."
+        ),
+        capabilities=(
+            "page navigation and interaction",
+            "JS-rendered content extraction",
+            "multi-step web flows",
+        ),
+        output_contract=(
+            "Return the extracted data or the outcome of the flow, the final URL, and anything "
+            "that blocked completion (login wall, captcha, missing element)."
+        ),
+    ),
 )
 
 

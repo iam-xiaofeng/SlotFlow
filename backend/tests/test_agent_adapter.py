@@ -838,8 +838,7 @@ async def test_langgraph_event_adapter_filters_real_summarization_middleware_str
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试助手。",
             middleware_config=SlotFlowMiddlewareConfig(
-                clarify_gate_enabled=False,
-                summarization_enabled=True,
+                    summarization_enabled=True,
                 summarization_trigger_tokens=1,
                 summarization_keep_messages=1,
                 summarization_trim_tokens=100,
@@ -933,8 +932,7 @@ async def test_todo_enforcer_control_text_never_reaches_stream_or_history() -> N
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试助手。",
             middleware_config=SlotFlowMiddlewareConfig(
-                clarify_gate_enabled=False,
-                summarization_enabled=False,
+                    summarization_enabled=False,
                 proactive_memory_extraction_enabled=False,
             ),
         ),

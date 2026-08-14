@@ -1,6 +1,7 @@
 """SlotFlow read-only skills registry。"""
 
 from app.harness.skills.parser import parse_skill_file
+from app.harness.skills.reader import MAX_SKILL_READ_CHARS, read_skill
 from app.harness.skills.registry import (
     build_skills_prompt,
     invalidate_skill_scan_cache,
@@ -19,6 +20,7 @@ from app.harness.skills.types import Skill
 __all__ = [
     "DEFAULT_FIND_SKILLS_NAME",
     "DEFAULT_FIND_SKILLS_PACKAGE",
+    "MAX_SKILL_READ_CHARS",
     "ProtectedSkillError",
     "Skill",
     "SkillConfig",
@@ -28,4 +30,5 @@ __all__ = [
     "invalidate_skill_scan_cache",
     "load_enabled_skills",
     "parse_skill_file",
+    "read_skill",
 ]

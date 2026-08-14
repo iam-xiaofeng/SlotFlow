@@ -1,4 +1,4 @@
-"""Context-window, epoch fallback, and tool-space policy contracts."""
+"""Context-window、epoch 回退,以及"工具集恒定"这条策略的契约测试。"""
 
 
 import pytest
@@ -15,9 +15,9 @@ from app.harness.graph import (
     make_tools_node,
     project_with_context_epoch,
 )
-from app.harness.state import SlotFlowAgentState, merge_promoted_tool_names
+from app.harness.state import SlotFlowAgentState, merge_ordered_unique
 from app.harness.subagents.tools import resolve_subagent_tool_spaces
-from app.harness.tool_spaces import assemble_tool_spaces
+from app.harness.tool_spaces import tool_space_for_name
 
 
 def test_custom_context_window_uses_per_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,38 +63,38 @@ def test_subagent_tool_spaces_are_bounded_and_never_all() -> None:
     )[1]
 
 
-def test_promoted_tool_names_reducer_is_ordered_union() -> None:
-    assert merge_promoted_tool_names(None, None) == []
-    assert merge_promoted_tool_names(["a"], None) == ["a"]
-    assert merge_promoted_tool_names(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
+def test_used_skills_reducer_is_ordered_union() -> None:
+    assert merge_ordered_unique(None, None) == []
+    assert merge_ordered_unique(["a"], None) == ["a"]
+    assert merge_ordered_unique(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
 
 
-def test_concurrent_tool_space_promotion_does_not_raise_invalid_update() -> None:
-    """Two *_tools loaders in one model step must not trip INVALID_CONCURRENT_GRAPH_UPDATE."""
+def test_concurrent_skill_reads_do_not_raise_invalid_update() -> None:
+    """两个 skill_read 落在同一步时,台账通道必须靠 reducer 合并而不是报并发写入。"""
 
     def fan(_state):
-        return [Send("promote_a", _state), Send("promote_b", _state)]
+        return [Send("read_a", _state), Send("read_b", _state)]
 
-    def promote_a(_state):
-        return {"promoted_tool_names": ["web_search", "web_fetch"]}
+    def read_a(_state):
+        return {"used_skills": ["pdf", "charts"]}
 
-    def promote_b(_state):
-        return {"promoted_tool_names": ["sandbox_exec", "web_search"]}
+    def read_b(_state):
+        return {"used_skills": ["charts", "slides"]}
 
     graph = StateGraph(SlotFlowAgentState)
-    graph.add_node("promote_a", promote_a)
-    graph.add_node("promote_b", promote_b)
-    graph.add_conditional_edges(START, fan, ["promote_a", "promote_b"])
-    graph.add_edge("promote_a", END)
-    graph.add_edge("promote_b", END)
+    graph.add_node("read_a", read_a)
+    graph.add_node("read_b", read_b)
+    graph.add_conditional_edges(START, fan, ["read_a", "read_b"])
+    graph.add_edge("read_a", END)
+    graph.add_edge("read_b", END)
     compiled = graph.compile()
 
-    result = compiled.invoke({"messages": [], "promoted_tool_names": ["artifact_write"]})
+    result = compiled.invoke({"messages": [], "used_skills": ["find-skills"]})
 
-    promoted = result.get("promoted_tool_names")
-    assert promoted[0] == "artifact_write"
-    assert set(promoted) == {"artifact_write", "web_search", "web_fetch", "sandbox_exec"}
-    assert len(promoted) == len(set(promoted))
+    used = result.get("used_skills")
+    assert used[0] == "find-skills"
+    assert set(used) == {"find-skills", "pdf", "charts", "slides"}
+    assert len(used) == len(set(used))
 
 
 def _fake_tool(name: str):
@@ -106,56 +106,49 @@ def _fake_tool(name: str):
     return _f
 
 
-def test_default_partition_keeps_everyday_tools_active_and_gates_heavy_spaces() -> None:
-    names = [
-        "workspace_read",
-        "artifact_write",
-        "web_search",
-        "sandbox_exec",
-        "convert_file_to_markdown",
-        "memory_save",
-        "browser_navigate",
-        "skill_match",
-    ]
-    setup = assemble_tool_spaces([_fake_tool(n) for n in names])
-    # Everyday tools are bound & callable on turn 1 (no loader dance).
-    for n in ["workspace_read", "artifact_write", "web_search", "sandbox_exec", "convert_file_to_markdown", "memory_save"]:
-        assert n in setup.initial_names, n
-    # Only the heavy browser/extensions spaces stay behind a loader.
-    assert "browser_navigate" not in setup.initial_names
-    assert "skill_match" not in setup.initial_names
-    assert {"browser_tools", "extensions_tools"} <= setup.initial_names
-    assert set(setup.spaces) == {"browser", "extensions"}
-
-
-def test_gated_space_becomes_callable_after_loader_promotes_it() -> None:
-    """Loader -> promote -> call must actually work through the real ToolNode gate."""
+def test_every_bound_tool_is_callable_without_any_activation_step() -> None:
+    """工具集恒定:绑上的工具第一步就能直接调,没有加载器、没有 tool_not_activated。"""
 
     web_search = _fake_tool("web_search")
-    setup = assemble_tool_spaces([web_search], gated_spaces=frozenset({"network"}))
-    assert "web_search" not in setup.initial_names  # gated
-    assert "network_tools" in setup.initial_names  # loader active
 
     def agent(state):
-        ai = sum(1 for m in (state.get("messages") or []) if isinstance(m, AIMessage) and m.tool_calls)
-        if ai == 0:
-            return {"messages": [AIMessage(content="", tool_calls=[{"name": "network_tools", "args": {"names": ["web_search"]}, "id": "c1"}])]}
-        if ai == 1:
-            return {"messages": [AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "today"}, "id": "c2"}])]}
+        called = sum(
+            1
+            for m in (state.get("messages") or [])
+            if isinstance(m, AIMessage) and m.tool_calls
+        )
+        if called == 0:
+            return {
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[{"name": "web_search", "args": {"query": "today"}, "id": "c1"}],
+                    )
+                ]
+            }
         return {"messages": [AIMessage(content="done")]}
 
     graph = StateGraph(SlotFlowAgentState)
     graph.add_node("agent", agent)
-    graph.add_node("tools", make_tools_node(list(setup.tools), initial_tool_names=setup.initial_names))
+    graph.add_node("tools", make_tools_node([web_search]))
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", tools_condition)
     graph.add_edge("tools", "agent")
-    out = graph.compile().invoke({"messages": [], "promoted_tool_names": []}, config={"recursion_limit": 12})
+    out = graph.compile().invoke({"messages": []}, config={"recursion_limit": 12})
 
-    assert out.get("promoted_tool_names") == ["web_search"]
     tool_msgs = [m.content for m in out["messages"] if type(m).__name__ == "ToolMessage"]
-    assert any("web_search:today" in c for c in tool_msgs)  # executed, not tool_not_activated
-    assert not any("not_activated" in c for c in tool_msgs)
+    assert any("web_search:today" in content for content in tool_msgs)
+    assert not any("not_activated" in content for content in tool_msgs)
+
+
+def test_tool_space_classification_still_partitions_subagent_tool_faces() -> None:
+    """分类函数保留下来给子代理切工具面用(加载器没了,分类还在)。"""
+
+    assert tool_space_for_name("browser_navigate") == "browser"
+    assert tool_space_for_name("web_search") == "network"
+    assert tool_space_for_name("skill_read") == "extensions"
+    assert tool_space_for_name("mcp_call") == "extensions"
+    assert tool_space_for_name("write_todos") is None
 
 
 def test_context_epoch_is_reused_across_appended_turns_not_reset() -> None:
@@ -200,4 +193,3 @@ def test_context_epoch_resets_when_prefix_signature_changes() -> None:
     projected, used = project_with_context_epoch(canonical, epoch)
     assert used is False  # stale epoch -> caller clears it
     assert projected == canonical  # falls back to full (repaired) canonical, nothing dropped
-

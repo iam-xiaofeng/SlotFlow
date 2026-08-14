@@ -6,9 +6,12 @@ import json
 import re
 import time
 from pathlib import Path
+from typing import Annotated, Any
 from urllib.parse import quote_plus
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langgraph.types import Command
 
 from app.harness.mcp import SlotFlowMcpConfigStore
 from app.harness.skills import (
@@ -16,6 +19,7 @@ from app.harness.skills import (
     SlotFlowSkillsConfigStore,
     invalidate_skill_scan_cache,
     load_enabled_skills,
+    read_skill,
 )
 from app.harness.tools.network import fetch_url, search_web
 from app.harness.sandbox import SlotFlowSandboxConfig
@@ -82,7 +86,11 @@ def build_customization_tools(
 
     @tool("skill_match")
     def skill_match(query: str, max_results: int = 5) -> str:
-        """Find relevant installed Skills first; search installable Skills only if needed."""
+        """Find relevant installed Skills first; search installable Skills only if needed.
+
+        Returns candidates to READ, not instructions. Follow a hit with skill_read(name) to
+        load that Skill's actual procedure before doing the work.
+        """
 
         result = find_relevant_skills(
             query=query,
@@ -92,6 +100,43 @@ def build_customization_tools(
             config=config,
         )
         return json.dumps(result, ensure_ascii=False)
+
+    @tool("skill_read")
+    def skill_read(
+        name: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
+        path: str = "",
+        offset: int = 0,
+    ) -> Command:
+        """Read an installed Skill's full instructions (its SKILL.md body).
+
+        The system prompt lists only each Skill's name and one-line description — never its
+        procedure. Call this before doing the work whenever a listed Skill matches the task,
+        then FOLLOW the returned instructions instead of improvising from general knowledge.
+
+        `path` reads one of the Skill's bundled files (scripts, templates, references) that the
+        body points at; the file list comes back with the body. `offset` continues a long body
+        that was truncated. Reading is host-side and does not require Docker; run helper scripts
+        with sandbox_exec, where Skills are mounted read-only at /skills.
+        """
+
+        result = read_skill(skills_root=skills_root, name=name, path=path, offset=offset)
+        update: dict[str, Any] = {
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(result, ensure_ascii=False),
+                    tool_call_id=tool_call_id,
+                    name="skill_read",
+                    status="error" if result.get("error") else "success",
+                )
+            ]
+        }
+        # 台账只记成功读到正文的 Skill:压缩会把这段正文整段折叠掉,台账让模型在压缩之后
+        # 仍然知道"我已经在按某个 Skill 做事",需要时重新 skill_read 拿回原文
+        # (见 `steps/summarization.py`)。
+        if not result.get("error") and result.get("skill"):
+            update["used_skills"] = [str(result["skill"])]
+        return Command(update=update)
 
     @tool("skill_install")
     def skill_install(package_url: str, skill_name: str) -> str:
@@ -286,6 +331,7 @@ def build_customization_tools(
 
     return [
         skill_match,
+        skill_read,
         find_skills,
         skill_list,
         skill_install,
@@ -382,9 +428,11 @@ def find_relevant_skills(
         "source": "slotflow_customization",
     }
     if installed_matches:
-        result["next_action"] = "use_installed_skills"
+        result["next_action"] = "read_installed_skill"
         result["hint"] = (
-            "Use the installed Skill matches for this run before searching or installing more Skills."
+            "Call skill_read(name) on the best match to load its full SKILL.md instructions, "
+            "then follow them for this run. Do not act on the description alone, and do not "
+            "search or install more Skills first."
         )
         return result
 

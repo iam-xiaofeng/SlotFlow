@@ -68,8 +68,7 @@ def message_text(message: Any) -> str:
 def message_content_text(content: Any) -> str:
     """把消息 content（str / content-block 列表 / dict）拍平成纯文本。
 
-    这是 harness 侧唯一的消息拍平实现（clarify_gate / skills_preflight /
-    long_term_memory / todo / title_generation 共用）。注意 SSE 投影层的
+    这是 harness 侧唯一的消息拍平实现（long_term_memory / todo / title_generation 共用）。注意 SSE 投影层的
     ``projections.normalize_message_content`` 语义不同（未知 dict 走 repr 兜底、
     跳过 reasoning 块），面向前端展示，不要与本函数合并。
     """

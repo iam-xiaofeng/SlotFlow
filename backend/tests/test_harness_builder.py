@@ -135,7 +135,6 @@ def test_harness_builder_skips_tools_for_models_without_bind_tools(monkeypatch) 
 
     assert captured["tools"] == []
     # node+edge graph: behavior toggles live in config_flags, no middleware list
-    assert captured["config_flags"].clarify_gate_enabled is True
 
 
 def test_harness_builder_routes_uploaded_files_through_uploads_middleware(monkeypatch) -> None:
@@ -212,9 +211,10 @@ def test_harness_builder_passes_mcp_config_to_tool_registry(monkeypatch) -> None
     )
 
     tool_names = [tool.name for tool in captured["tools"]]
-    # MCP config tools are appended to the registry passed to the graph, after customization.
-    assert "mcp_fake" in tool_names
-    assert tool_names.index("mcp_fake") > tool_names.index("skill_match")
+    # MCP 只经代理边界进入图:原生 schema 不绑,mcp_docs/mcp_call 绑。
+    assert "mcp_fake" not in tool_names
+    assert {"mcp_docs", "mcp_call"} <= set(tool_names)
+    assert tool_names.index("mcp_call") > tool_names.index("skill_match")
     assert {"ask_clarification", "artifact_write"} <= set(tool_names)
     assert len(tool_names) == len(set(tool_names)), f"duplicate tool names: {tool_names}"
 
@@ -239,8 +239,6 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
                 runtime_summary_enabled=False,
                 artifact_discovery_enabled=False,
                 summarization_enabled=False,
-                skills_preflight_enabled=False,
-                clarify_gate_enabled=False,
                 uploads_enabled=False,
                 todo_enabled=False,
             ),
@@ -252,8 +250,6 @@ def test_harness_builder_can_disable_builtin_middleware(monkeypatch) -> None:
     assert not flags.runtime_summary_enabled
     assert not flags.artifact_discovery_enabled
     assert not flags.summarization_enabled
-    assert not flags.skills_preflight_enabled
-    assert not flags.clarify_gate_enabled
     assert not flags.uploads_enabled
     assert not flags.todo_enabled
 

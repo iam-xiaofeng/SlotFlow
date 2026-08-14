@@ -11,6 +11,9 @@
 - `artifacts_baseline`：`prepare` 的产物基线快照，供 `finalize` 计算新增产物。
 - `todo_enforcement`：`post_model` 的 todo 约束控制通道（`pending` 指令文本 +
   `attempted` 防循环标记）。
+- `used_skills`：本轮对话里被 `skill_read` 读过正文的 Skill 名台账。压缩时会被写进摘要，
+  这样正文被折叠掉之后，模型仍然知道"我用过哪些 Skill"，可以重新 `skill_read` 或用
+  `context_archive_*` 回溯原始工具结果。
 - `model_input_suffix`：`pre_model` 组装的"尾部注入"字符串——召回的长期记忆 + 当步
   todo 控制文本。`agent` 把它包成**用户角色的 `<system-reminder>` 消息**、拼在所有会话消息
   之后。三点好处：(1) 让易变内容离开 `system` 前缀，`tools→system→messages` 这段前缀保持
@@ -28,17 +31,16 @@ from langchain.agents import AgentState
 from langchain_core.messages import BaseMessage
 
 
-def merge_promoted_tool_names(
+def merge_ordered_unique(
     existing: list[str] | None,
     incoming: list[str] | None,
 ) -> list[str]:
-    """保序去重地并入 `promoted_tool_names`,支持同一步内的并发写入。
+    """保序去重地合并两个名字列表,支持同一步内的并发写入。
 
-    工具空间加载器(`*_tools`)在模型单步里可能被并行调用(多个 tool_calls),各自返回
-    `Command(update={"promoted_tool_names": ...})`。没有 reducer 时 LangGraph 会对第二次写入
-    抛 `INVALID_CONCURRENT_GRAPH_UPDATE`("Can receive only one value per step")。工具披露是
-    加性的(一个 context epoch 内只增不减),所以用有序并集作为 reducer:既合并并发写入,也
-    对重复激活保持幂等。
+    `used_skills` 台账由 `skill_read` 工具用 `Command(update=...)` 写入,而模型完全可以在
+    一步里并行读多个 Skill(多个 tool_calls)。没有 reducer 时 LangGraph 会对第二次写入抛
+    `INVALID_CONCURRENT_GRAPH_UPDATE`("Can receive only one value per step")。台账是加性的
+    (只增不减),所以用有序并集:既能合并并发写入,也对重复读取保持幂等。
     """
 
     merged: list[str] = []
@@ -61,5 +63,5 @@ class SlotFlowAgentState(AgentState):
     artifacts_baseline: NotRequired[set[str] | None]
     todo_enforcement: NotRequired[dict[str, Any] | None]
     context_epoch: NotRequired[dict[str, Any] | None]
-    promoted_tool_names: NotRequired[Annotated[list[str] | None, merge_promoted_tool_names]]
+    used_skills: NotRequired[Annotated[list[str] | None, merge_ordered_unique]]
     model_input_suffix: NotRequired[str | None]

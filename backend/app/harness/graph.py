@@ -4,14 +4,17 @@
 `create_agent` + middleware 单 ReAct 循环改为 LangGraph 原生 `StateGraph`（显式 node +
 edge）。链路严格按 `docs/refactor-plan.md` §2 拓扑运行：
 
-    START → prepare → triage_gate → pre_model → agent → post_model
-                                                                  ├─ tools → pre_model
-                                                                  ├─ pre_model (todo enforcement)
-                                                                  └─ finalize → END
+    START → prepare → pre_model → agent → post_model
+                                                    ├─ tools → pre_model
+                                                    ├─ pre_model (todo enforcement)
+                                                    └─ finalize → END
 
 中间件逻辑已抽成 `app/harness/steps/*` 的无状态纯函数，节点直接调用，顺序由边显式
 保证（不再依赖 middleware registry 的 append 顺序）。HITL 仍用 LangGraph 原生
-`interrupt()`/`Command(resume=...)`：强制门在 `triage_gate`，自愿工具在 `tools`。
+`interrupt()`/`Command(resume=...)`，但**只剩自愿一条路**：模型自己调 `ask_clarification`
+工具，在 `tools` 节点暂停。2026-08-14 删掉了 `triage_gate` 强制门——它在每个新用户轮多花一次
+模型调用去猜"这个请求够不够清楚"，而模型自己判断该不该问已经足够好，强制门更多是在打断
+明确的请求。
 """
 
 from __future__ import annotations
@@ -46,14 +49,6 @@ from app.harness.steps.artifact_discovery import (
     artifact_baseline,
     artifact_finalize_update,
 )
-from app.harness.steps.clarify_gate import (
-    already_clarified,
-    clarify_mode_enabled,
-    clarify_via_interrupt,
-    is_fresh_user_turn,
-    run_triage,
-    should_skip_triage_model_call,
-)
 from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.long_term_memory import (
     aexplicit_save_update,
@@ -62,13 +57,11 @@ from app.harness.steps.long_term_memory import (
     maybe_schedule_extraction,
 )
 from app.harness.steps.runtime_summary import runtime_summary_update
-from app.harness.steps.skills_preflight import (
-    default_find_skills,
-    format_preflight,
-    skills_preflight_update,
-)
 from app.harness.steps.subagent_limit import cap_subagent_calls
-from app.harness.steps.summarization import build_summarization_middleware
+from app.harness.steps.summarization import (
+    build_summarization_middleware,
+    format_skills_ledger_message,
+)
 from app.harness.steps.todo import (
     consume_todo_enforcement,
     route_after_model_has_enforcement,
@@ -82,7 +75,7 @@ from app.harness.steps.tool_safety import (
     build_unknown_tool_error_message,
 )
 from app.harness.steps.uploads import uploads_update
-from app.harness.utils import latest_user_message_text, message_content_text, message_role
+from app.harness.utils import message_content_text, message_role
 
 if TYPE_CHECKING:
     from langgraph.types import Checkpointer
@@ -110,7 +103,6 @@ class _GraphInputs:
         skills_config_store: Any,
         config_flags: Any,
         max_results_memories: int,
-        initial_tool_names: frozenset[str] | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -123,8 +115,10 @@ class _GraphInputs:
         self.skills_config_store = skills_config_store
         self.config_flags = config_flags
         self.max_results_memories = max_results_memories
-        self.initial_tool_names = initial_tool_names or frozenset(tool.name for tool in tools)
-        self.tool_by_name = {tool.name: tool for tool in tools}
+        # 工具集在整轮对话里恒定:绑一次、之后每步复用同一个 bound model。这是 provider
+        # 前缀缓存(`tools → system → messages`)能命中的前提,也是删掉 `*_tools` 加载器的
+        # 直接收益——曾经每激活一个工具就改一次 tools 数组,等于每次都把缓存清零。
+        self.bound_model = model.bind_tools(tools) if tools else model
 
 
 def _message_prefix_signature(messages: list[Any]) -> str:
@@ -208,19 +202,6 @@ def make_prepare_node(inputs: _GraphInputs):
                 messages = upload_update["messages"]
                 slotflow.update(upload_update.get("slotflow") or {})
 
-        # skills preflight
-        if flags.skills_preflight_enabled:
-            preflight_state = {"messages": messages, "slotflow": slotflow}
-            preflight = skills_preflight_update(
-                state=preflight_state,
-                sandbox_config=inputs.sandbox_config,
-                skills_root=inputs.skills_root,
-                skills_config_store=inputs.skills_config_store,
-                finder=default_find_skills,
-            )
-            if preflight is not None:
-                slotflow.update(preflight.get("slotflow") or {})
-
         # long-term memory retrieval -> system prompt section (stored for pre_model)
         memories: list[Any] = []
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
@@ -248,40 +229,6 @@ def make_prepare_node(inputs: _GraphInputs):
         return updates
 
     return prepare
-
-
-# ---------------------------------------------------------------------------
-# triage_gate node: first step only, pro/ultra forced clarification
-# ---------------------------------------------------------------------------
-
-
-def make_triage_gate_node(inputs: _GraphInputs):
-    flags = inputs.config_flags
-
-    async def triage_gate(
-        state: SlotFlowAgentState,
-        runtime: Runtime[RunContext],
-    ) -> dict[str, Any]:
-        if not (flags.clarify_gate_enabled and inputs.tools):
-            return {}
-        ctx = runtime.context or inputs.run_context
-        if not clarify_mode_enabled(getattr(ctx, "mode", None)):
-            return {}
-        messages = list(state.get("messages") or [])
-        if not is_fresh_user_turn(messages):
-            return {}
-        if already_clarified(messages):
-            return {}
-        if should_skip_triage_model_call(latest_user_message_text(messages)):
-            return {}
-        triage = await run_triage(messages=messages, model=inputs.model)
-        if triage is None:
-            return {}
-        if not triage.get("actionable", True):
-            return clarify_via_interrupt(triage, ctx)
-        return {}
-
-    return triage_gate
 
 
 # ---------------------------------------------------------------------------
@@ -328,34 +275,21 @@ def make_pre_model_node(inputs: _GraphInputs):
             updates["context_epoch"] = None
         updates["llm_input_messages"] = projected_input
 
-        # Compose the STABLE system prompt for this step: base + skills preflight only.
-        # Volatile per-turn/per-step context (recalled long-term memory + todo control) is
-        # intentionally kept OUT of the system prefix and moved to a trailing model-input
-        # suffix (below). Rationale: `tools → system → messages` is the provider's cacheable
-        # prefix; putting memory/todo in `system` made it change every turn/step and blew
-        # away the whole prefix cache. Appending them AFTER all messages keeps the prefix
-        # byte-stable and perturbs only the tail. (Manus: keep the prompt prefix stable +
-        # append-only.)
-        system_sections: list[str] = [inputs.system_prompt]
-        slotflow = state.get("slotflow") or {}
-        skills_preflight = (
-            slotflow.get("skills_preflight")
-            if isinstance(slotflow, dict)
-            else None
-        )
-        if isinstance(skills_preflight, dict):
-            system_sections.append(format_preflight(skills_preflight))
-        composed = "\n\n".join(part for part in system_sections if part)
-        # Recompute-per-step, same lesson as `llm_input_messages` above: writing only when it
-        # differs from the BASE prompt leaves the previous step's snapshot stale in state.
-        updates["system_prompt"] = composed or inputs.system_prompt
+        # system 前缀现在是**逐字节恒定**的:整轮对话里 `tools → system → messages` 这段
+        # 前缀一个字节都不变,provider 的前缀缓存才可能真的命中。
+        #
+        # 2026-08-14 修:skills preflight 曾经拼在这里(base + preflight)。它每个新用户轮
+        # 都会重算,于是每轮都把 system 前缀改一遍——和长期记忆/todo 早就搬去尾部的理由
+        # 完全一样,却一直漏在 system 通道里。现在它和记忆/todo 一样走尾部 suffix。
+        updates["system_prompt"] = inputs.system_prompt
 
-        # Trailing model-input suffix (recalled memory + per-step todo control). Rides its own
-        # plain string channel like `system_prompt` — never the `messages` channel — so it is
-        # neither streamed to the user (v3 messages projection) nor persisted/replayed by the
-        # checkpointer (same leak boundary as the 2026-07-15 fix). `agent` appends it as a
-        # trailing user-role <system-reminder> after every conversation message; summarization/epoch
-        # (which read `llm_input_messages`, already computed above) therefore never fold it in.
+        # Trailing model-input suffix (skills preflight + recalled memory + per-step todo
+        # control). Rides its own plain string channel like `system_prompt` — never the
+        # `messages` channel — so it is neither streamed to the user (v3 messages projection)
+        # nor persisted/replayed by the checkpointer (same leak boundary as the 2026-07-15
+        # fix). `agent` appends it as a trailing user-role <system-reminder> after every
+        # conversation message; summarization/epoch (which read `llm_input_messages`, already
+        # computed above) therefore never fold it in.
         suffix_sections: list[str] = []
         if flags.long_term_memory_enabled and inputs.memory_store is not None:
             memories = state.get("retrieved_memories") or []
@@ -382,23 +316,23 @@ SUMMARIZATION_NODE_NAME = "SlotFlowSummarizationMiddleware"
 
 def make_summarization_node(inputs: _GraphInputs):
     flags = inputs.config_flags
-    summarization_mw = (
-        build_summarization_middleware(
-            inputs.model,
-            trigger_tokens=flags.summarization_trigger_tokens,
-            keep_messages=flags.summarization_keep_messages,
-            trim_tokens_to_summarize=flags.summarization_trim_tokens,
-        )
-        if flags.summarization_enabled
-        else None
-    )
 
     async def summarize(
         state: SlotFlowAgentState,
         runtime: Runtime[RunContext],
     ) -> dict[str, Any]:
-        if summarization_mw is None:
+        if not flags.summarization_enabled:
             return {}
+        # 台账要在压缩**发生的那一刻**取,所以中间件按需现建(构造只是存参数,成本可忽略):
+        # summary prompt 里带上"这轮读过哪些 Skill",摘要模型才会把它写进摘要正文。
+        used_skills = list(state.get("used_skills") or [])
+        summarization_mw = build_summarization_middleware(
+            inputs.model,
+            trigger_tokens=flags.summarization_trigger_tokens,
+            keep_messages=flags.summarization_keep_messages,
+            trim_tokens_to_summarize=flags.summarization_trim_tokens,
+            used_skills=used_skills,
+        )
         messages = list(state.get("llm_input_messages") or state.get("messages") or [])
         summary_update = await summarization_mw.abefore_model(
             {"messages": messages},
@@ -417,6 +351,12 @@ def make_summarization_node(inputs: _GraphInputs):
         model_input = [
             message for message in summarized if not isinstance(message, RemoveMessage)
         ]
+        # 确定性台账:摘要模型可能没照做,这一行不依赖它。挂在压缩视图末尾,随 epoch 一起
+        # 被后续轮次复用。它只进 `llm_input_messages`/`context_epoch`,不进 `messages` 通道,
+        # 所以既不会流给用户、也不会被 checkpointer 回放(同 2026-07-15 泄漏边界)。
+        ledger = format_skills_ledger_message(used_skills)
+        if ledger:
+            model_input = [*model_input, HumanMessage(content=ledger)]
         # Compute the epoch source over the SAME repaired view that `pre_model` re-derives on
         # every later turn (`repair_dangling_tool_calls(messages)`). Using the RAW messages here
         # made the signature mismatch whenever history had a dangling tool call, so the epoch was
@@ -485,14 +425,6 @@ def _model_input_suffix_message(suffix: str) -> HumanMessage:
 
 
 def make_agent_node(inputs: _GraphInputs):
-    def model_for_state(state: SlotFlowAgentState):
-        promoted = set(state.get("promoted_tool_names") or [])
-        active_names = inputs.initial_tool_names | promoted
-        active_tools = [
-            tool for name, tool in inputs.tool_by_name.items() if name in active_names
-        ]
-        return inputs.model.bind_tools(active_tools) if active_tools else inputs.model
-
     async def agent(
         state: SlotFlowAgentState,
         config: RunnableConfig | None = None,
@@ -504,7 +436,7 @@ def make_agent_node(inputs: _GraphInputs):
         # stable AND leaves the payload ending on a user message (provider-safe).
         suffix = state.get("model_input_suffix")
         suffix_messages = [_model_input_suffix_message(suffix)] if suffix else []
-        bound_model = model_for_state(state)
+        bound_model = inputs.bound_model
         projected_messages = list(messages)
         retries = max(1, inputs.config_flags.context_overflow_max_retries)
         for attempt in range(retries + 1):
@@ -537,7 +469,7 @@ def make_agent_node(inputs: _GraphInputs):
         system_text = state.get("system_prompt") or inputs.system_prompt
         suffix = state.get("model_input_suffix")
         suffix_messages = [_model_input_suffix_message(suffix)] if suffix else []
-        bound_model = model_for_state(state)
+        bound_model = inputs.bound_model
         response = bound_model.invoke(
             [SystemMessage(content=system_text), *messages, *suffix_messages], config
         )
@@ -719,26 +651,10 @@ async def _slotflow_async_tool_safety_wrapper(
 def make_tools_node(
     tools: list[BaseTool],
     *,
-    initial_tool_names: frozenset[str] | None = None,
     workspace: SlotFlowWorkspace | None = None,
     offload_max_chars: int = 0,
 ) -> ToolNode:
-    initial = initial_tool_names or frozenset(tool.name for tool in tools)
-
-    def active(request: ToolCallRequest) -> bool:
-        state = request.state if isinstance(request.state, dict) else {}
-        promoted = set(state.get("promoted_tool_names") or [])
-        name = request.tool_call.get("name")
-        return isinstance(name, str) and name in (initial | promoted)
-
     def wrap(request: ToolCallRequest, handler: Callable[[ToolCallRequest], Any]) -> Any:
-        if not active(request):
-            return build_error_tool_message(
-                request.tool_call,
-                error_type="tool_not_activated",
-                message="Activate this tool through its tool-space loader first.",
-                exception_type="ToolNotActivated",
-            )
         result = _slotflow_tool_safety_wrapper(request, handler)
         if workspace is not None and offload_max_chars > 0:
             result = maybe_offload_tool_message(
@@ -750,13 +666,6 @@ def make_tools_node(
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
-        if not active(request):
-            return build_error_tool_message(
-                request.tool_call,
-                error_type="tool_not_activated",
-                message="Activate this tool through its tool-space loader first.",
-                exception_type="ToolNotActivated",
-            )
         result = await _slotflow_async_tool_safety_wrapper(request, handler)
         if workspace is not None and offload_max_chars > 0:
             # 卸载做本地文件 IO，放线程池避免阻塞事件循环。
@@ -794,7 +703,6 @@ def build_slotflow_graph(
     skills_root: Any,
     skills_config_store: Any,
     config_flags: Any,
-    initial_tool_names: frozenset[str] | None = None,
     checkpointer: "Checkpointer | None" = None,
 ):
     inputs = _GraphInputs(
@@ -809,12 +717,10 @@ def build_slotflow_graph(
         skills_config_store=skills_config_store,
         config_flags=config_flags,
         max_results_memories=5,
-        initial_tool_names=initial_tool_names,
     )
 
     graph = StateGraph(SlotFlowAgentState, context_schema=RunContext)
     graph.add_node("prepare", make_prepare_node(inputs))
-    graph.add_node("triage_gate", make_triage_gate_node(inputs))
     graph.add_node("pre_model", make_pre_model_node(inputs))
     graph.add_node(SUMMARIZATION_NODE_NAME, make_summarization_node(inputs))
     agent_async, agent_sync = make_agent_node(inputs)
@@ -833,7 +739,6 @@ def build_slotflow_graph(
         "tools",
         make_tools_node(
             tools,
-            initial_tool_names=inputs.initial_tool_names,
             workspace=offload_workspace,
             offload_max_chars=offload_max_chars,
         ),
@@ -841,8 +746,7 @@ def build_slotflow_graph(
     graph.add_node("finalize", make_finalize_node(inputs))
 
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "triage_gate")
-    graph.add_edge("triage_gate", "pre_model")
+    graph.add_edge("prepare", "pre_model")
     graph.add_edge("pre_model", SUMMARIZATION_NODE_NAME)
     graph.add_edge(SUMMARIZATION_NODE_NAME, "agent")
     graph.add_edge("agent", "post_model")
