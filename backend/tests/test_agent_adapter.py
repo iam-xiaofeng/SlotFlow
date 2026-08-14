@@ -899,11 +899,17 @@ async def test_message_projection_flattening_preserves_parent_metadata() -> None
 
 
 @pytest.mark.asyncio
-async def test_todo_enforcer_control_text_never_reaches_stream_or_history() -> None:
-    """2026-07-15 live probe: the post_model todo-enforcer control block surfaced in the
-    user-visible content stream. Internal per-step control text must not enter the
-    durable `messages` conversation channel: the checkpointer replays it every later
-    turn (echo bait + §29-class pollution) and it must never surface as message.delta."""
+async def test_answer_without_todos_ends_the_turn_and_leaks_no_control_text() -> None:
+    """模型直接给答案就该收工——图不再把已完成的回合拽回去补 todo。
+
+    原来的 post_model todo 强制门只在「本次 AI 消息没有 tool_calls」时触发,也就是只在模型
+    已经写完最终答案之后;它唯一能做的就是把完成的回合重新拽开(真机上一句「这是什么」被拽了
+    两次,同一个问题答了三遍)。2026-08-14 删除,见 HARNESS_NOTES §63。
+
+    同时保留原来那条边界断言:每步控制文本(现在只剩 todo reminder)走 `model_input_suffix`
+    普通字符串通道,既不能出现在用户可见的 message.delta 里,也不能进持久的 `messages`
+    会话历史——checkpointer 会把它每轮回放(2026-07-15 真机泄漏的根因)。
+    """
 
     from langgraph.checkpoint.memory import InMemorySaver
 
@@ -918,10 +924,11 @@ async def test_todo_enforcer_control_text_never_reaches_stream_or_history() -> N
         def bind_tools(self, tools, *, tool_choice=None, **kwargs):
             return self
 
+    # 第二条响应是"如果图又把这一轮拽回去,就会被消费到"的探针:它不该出现。
     chat_model = _ToolAware(
         responses=[
             AIMessage(content="第一次直接给出答案而不写待办"),
-            AIMessage(content="第二次仍然直接回答"),
+            AIMessage(content="不该有第二次调用"),
         ]
     )
     request = ChatStreamRequest(message="测试 todo 功能:分析这个仓库", mode="pro")
@@ -948,12 +955,13 @@ async def test_todo_enforcer_control_text_never_reaches_stream_or_history() -> N
         for event in events
         if event.event == "message.delta"
     )
-    # The enforcement loop itself must still fire: both model calls streamed.
     assert "第一次直接给出答案而不写待办" in deltas
-    assert "第二次仍然直接回答" in deltas
-    # The control block must never surface in the user-visible stream...
+    # 模型答完就收工:不再有第二次模型调用。
+    assert "不该有第二次调用" not in deltas
+    # 控制文本永远不出现在用户可见流里……
     assert "slotflow-todo-enforcer" not in deltas
-    # ...and must never persist into the conversation history.
+    assert "slotflow-todo-reminder" not in deltas
+    # ……也永远不进持久会话历史。
     state = await graph.aget_state(bundle.config)
     history = state.values.get("messages") or []
     assert not any(

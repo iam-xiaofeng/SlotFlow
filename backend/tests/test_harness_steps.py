@@ -28,8 +28,6 @@ from app.harness.steps.dangling_tool_call import repair_dangling_tool_calls
 from app.harness.steps.runtime_summary import runtime_summary_update
 from app.harness.steps.subagent_limit import cap_subagent_calls
 from app.harness.steps.todo import (
-    consume_todo_enforcement,
-    todo_enforcement_update,
     todo_parallel_call_guard,
     todo_reminder_update,
     write_todos_tool,
@@ -203,120 +201,38 @@ def test_todo_parallel_call_guard_allows_single_call() -> None:
     assert todo_parallel_call_guard(state={"messages": [HumanMessage("go"), msg]}) is None
 
 
-def test_todo_enforcement_requests_initial_list_for_planned_work() -> None:
-    update = todo_enforcement_update(
-        state={"messages": [HumanMessage("修复 todo 链路并补测试"), AIMessage(content="我来处理。")]},
-        plan_enabled=True,
-    )
+def test_route_after_model_ends_the_turn_when_the_model_stops_calling_tools() -> None:
+    """模型不再调工具 = 这一轮结束。图不再把已完成的回合拽回去补 todo。
 
-    # Enforcement rides the `todo_enforcement` state channel, not a message object.
-    assert update is not None
-    enforcement = update["todo_enforcement"]
-    assert enforcement["attempted"] is True
-    assert "Call `write_todos` now" in enforcement["pending"]
-    # A queued enforcement routes back to pre_model for the retry step.
-    assert route_after_model(update) == "pre_model"
+    删掉的 `todo_enforcement_update` 触发条件正是「本次 AI 消息没有 tool_calls」，
+    也就是只在模型已经写完最终答案时才可能触发；它唯一能做的就是把完成的回合重新拽开。
+    真机上一句「这是什么」被拽了两次，同一个问题答了三遍。见 HARNESS_NOTES §63。
+    """
 
-
-def test_todo_enforcement_pending_is_consumed_once_and_clears() -> None:
-    update = todo_enforcement_update(
-        state={"messages": [HumanMessage("修复 todo 链路并补测试"), AIMessage(content="我来处理。")]},
-        plan_enabled=True,
-    )
-    # pre_model consumes the pending text and clears it while keeping the guard.
-    pending, clear = consume_todo_enforcement(update)
-    assert pending is not None and "write_todos" in pending
-    assert clear["todo_enforcement"]["pending"] is None
-    assert clear["todo_enforcement"]["attempted"] is True
-    # After clearing, the enforcement no longer routes back to pre_model.
-    cleared_state = {
-        "messages": [HumanMessage("修复 todo 链路"), AIMessage(content="我来处理。")],
-        **clear,
+    state = {
+        "messages": [
+            HumanMessage("修复 todo 链路并补测试"),
+            AIMessage(content="我来处理。"),
+        ]
     }
-    assert route_after_model(cleared_state) != "pre_model"
+
+    assert route_after_model(state) == "finalize"
 
 
-def test_todo_enforcement_skips_simple_unplanned_answer() -> None:
-    update = todo_enforcement_update(
-        state={"messages": [HumanMessage("你好"), AIMessage(content="你好。")]},
-        plan_enabled=True,
-    )
+def test_route_after_model_still_goes_to_tools_when_the_model_asks_for_one() -> None:
+    state = {
+        "messages": [
+            HumanMessage("go"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "write_todos", "args": {"todos": []}, "id": "a", "type": "tool_call"}
+                ],
+            ),
+        ]
+    }
 
-    assert update is None
-
-
-def test_todo_enforcement_ignores_slotflow_injected_context_for_complexity() -> None:
-    injected = (
-        "<slotflow-long-term-memory>\n"
-        "This injected block is intentionally long and mentions analyze, research, report, "
-        "implement, test, verify, and other workflow words that must not make a simple "
-        "user request look todo-worthy.\n"
-        "</slotflow-long-term-memory>\n\n"
-        "读取当前 SlotFlow run context"
-    )
-    update = todo_enforcement_update(
-        state={"messages": [HumanMessage(injected), AIMessage(content="工具结果已经收到。")]},
-        plan_enabled=True,
-    )
-
-    assert update is None
-
-
-def test_todo_enforcement_honors_explicit_todo_request_without_plan_mode() -> None:
-    update = todo_enforcement_update(
-        state={"messages": [HumanMessage("测试 todo 功能"), AIMessage(content="我会展示。")]},
-        plan_enabled=False,
-    )
-
-    assert update is not None
-    assert update["todo_enforcement"]["pending"]
-
-
-def test_todo_enforcement_requests_status_update_for_incomplete_todos() -> None:
-    update = todo_enforcement_update(
-        state={
-            "messages": [HumanMessage("继续"), AIMessage(content="已经完成。")],
-            "todos": [{"content": "修复后端", "status": "in_progress"}],
-        },
-        plan_enabled=True,
-    )
-
-    assert update is not None
-    assert "The active todo list is not complete" in update["todo_enforcement"]["pending"]
-
-
-def test_todo_enforcement_does_not_loop_after_attempted_guard() -> None:
-    # Once an enforcement was attempted (guard set) and ignored, no re-injection.
-    update = todo_enforcement_update(
-        state={
-            "messages": [HumanMessage("修复 todo 链路"), AIMessage(content="继续解释。")],
-            "todo_enforcement": {"pending": None, "attempted": True},
-        },
-        plan_enabled=True,
-    )
-
-    assert update is None
-
-
-def test_todo_enforcement_guard_rearms_when_model_writes_todos() -> None:
-    # When the model actually calls write_todos, the guard resets so later incomplete
-    # states can enforce again.
-    write_call = AIMessage(
-        content="",
-        tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "w", "type": "tool_call"}],
-    )
-    update = todo_enforcement_update(
-        state={
-            "messages": [HumanMessage("修复 todo 链路"), write_call],
-            "todo_enforcement": {"pending": None, "attempted": True},
-        },
-        plan_enabled=True,
-    )
-
-    assert update == {"todo_enforcement": {"pending": None, "attempted": False}}
-
-
-# --- subagent limit --------------------------------------------------------
+    assert route_after_model(state) == "tools"
 
 
 def _task_call(i: int) -> dict:

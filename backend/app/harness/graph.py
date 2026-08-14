@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -63,9 +63,6 @@ from app.harness.steps.summarization import (
     format_skills_ledger_message,
 )
 from app.harness.steps.todo import (
-    consume_todo_enforcement,
-    route_after_model_has_enforcement,
-    todo_enforcement_update,
     todo_parallel_call_guard,
     todo_reminder_update,
 )
@@ -258,11 +255,6 @@ def make_pre_model_node(inputs: _GraphInputs):
             reminder_text = todo_reminder_update(state=state)
             if reminder_text:
                 step_control_blocks.append(reminder_text)
-        if flags.todo_enabled and inputs.tools:
-            pending_enforcement, enforcement_clear = consume_todo_enforcement(state)
-            if pending_enforcement:
-                step_control_blocks.append(pending_enforcement)
-                updates.update(enforcement_clear)
 
         # Model-input projection (official pre_model_hook convention): recompute from the
         # canonical `messages` on EVERY step. `llm_input_messages` is a plain last-write
@@ -448,6 +440,7 @@ def make_agent_node(inputs: _GraphInputs):
                 response.name = "slotflow"
                 repair_streamed_tool_call_names(response)
                 sanitize_reasoning_message(response, provider=inputs.run_context.model_provider)
+                assert_model_response_not_empty(response)
                 return {"messages": [response]}
             except Exception as exc:
                 if not is_context_overflow_error(exc) or attempt >= retries:
@@ -476,9 +469,41 @@ def make_agent_node(inputs: _GraphInputs):
         response.name = "slotflow"
         repair_streamed_tool_call_names(response)
         sanitize_reasoning_message(response, provider=inputs.run_context.model_provider)
+        assert_model_response_not_empty(response)
         return {"messages": [response]}
 
     return agent, agent_sync
+
+
+class EmptyModelResponseError(RuntimeError):
+    """模型既没给正文也没调工具——这一步没有任何可继续的东西。"""
+
+
+def assert_model_response_not_empty(response: AIMessage) -> None:
+    """空响应必须当场失败，绝不能落进 `messages`。
+
+    2026-08-14 真机:一个 446KB 文件被 `workspace_read` 整段内联后(≈166k token),
+    provider 连着返回 `output_tokens=0` 的空消息、HTTP 却是 200。当时的后果是**静默死亡**:
+
+    - 空消息没有 tool_calls → 路由到 `finalize` → 这一轮"正常结束";
+    - `run.finished` 时 `content` 为空 → `if content and ...` 不成立 → **一条都不落库**,
+      前端看起来就是发完消息什么都没发生;
+    - 更糟的是那条空消息**进了 checkpoint**,于是整个 thread 被永久毒化——用户后来发
+      "继续啊",模型读到的还是那 166k,继续吐空。
+
+    在这里抛异常而不是返回,是为了让 LangGraph **丢弃这个节点的写入**:空消息不进 state、
+    不进 checkpoint,thread 保持可用;同时 `run.error` 会带着可读原因走到前端。
+    """
+
+    if response.tool_calls:
+        return
+    if message_content_text(response.content).strip():
+        return
+    raise EmptyModelResponseError(
+        "模型返回了空响应(既无正文也无工具调用)。常见原因是单次输入过大——"
+        "例如把一个很大的文件整段读进了上下文。可以改用 workspace_grep 定位片段,"
+        "或用 workspace_read 的 offset 分段读取。"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -498,12 +523,6 @@ def make_post_model_node(inputs: _GraphInputs):
             guard = todo_parallel_call_guard(state=state)
             if guard is not None:
                 updates.update(guard)
-            enforcer = todo_enforcement_update(
-                state=state,
-                plan_enabled=inputs.features.plan_enabled,
-            )
-            if enforcer is not None:
-                updates.update(enforcer)
         if flags.subagent_limit_enabled and inputs.features.subagent_enabled and inputs.tools:
             capped = cap_subagent_calls(
                 state=state,
@@ -524,8 +543,9 @@ def make_post_model_node(inputs: _GraphInputs):
 
 
 def route_after_model(state: SlotFlowAgentState) -> str:
-    if route_after_model_has_enforcement(state):
-        return "pre_model"
+    # 只看模型自己的决定:还要调工具就去 tools,否则这一轮结束。
+    # 2026-08-14 删掉了 todo 强制门那条回边(post_model → pre_model):它只在模型
+    # 「已经写完最终答案」时触发,只能把一个完成的回合重新拽开。见 steps/todo.py 模块注释。
     decision = tools_condition(state)
     return "tools" if decision == "tools" else "finalize"
 
