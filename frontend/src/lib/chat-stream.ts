@@ -240,6 +240,7 @@ type ThreadContextUsageRecord = {
   thread_id: string;
   run_id: string | null;
   context_tokens: number | null;
+  context_cached_tokens: number | null;
   context_window_tokens: number | null;
   context_input_budget_tokens: number | null;
   context_window_source: string | null;

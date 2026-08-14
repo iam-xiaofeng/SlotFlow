@@ -154,6 +154,7 @@ async def get_thread_context_usage(
             thread_id=thread_id,
             run_id=run.id,
             context_tokens=metrics.get("context_tokens"),
+            context_cached_tokens=metrics.get("context_cached_tokens"),
             context_window_tokens=metrics.get("context_window_tokens"),
             context_input_budget_tokens=metrics.get("context_input_budget_tokens"),
             context_window_source=metrics.get("context_window_source"),

@@ -170,6 +170,7 @@ class ThreadContextUsageRecord(BaseModel):
     thread_id: str
     run_id: str | None = None
     context_tokens: int | None = None
+    context_cached_tokens: int | None = None
     context_window_tokens: int | None = None
     context_input_budget_tokens: int | None = None
     context_window_source: str | None = None

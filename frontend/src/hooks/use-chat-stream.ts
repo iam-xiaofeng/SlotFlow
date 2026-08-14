@@ -48,9 +48,13 @@ export type ThreadRunStatus = "streaming" | "attention" | "needs_input" | "error
 
 type ThreadTodoState = { todos: ChatTodo[]; listKey: string | null; signature: string };
 
-/** 线程级上下文占用:used = 最近一次成功调用的 prompt tokens;window = 模型上下文上限。 */
+/**
+ * 线程级上下文占用:used = 最近一次主 agent 调用的 prompt tokens;window = 模型上下文上限;
+ * cached = **同一次调用**里命中前缀缓存的部分(null 表示这家 provider 不上报,不是 0%)。
+ */
 type ThreadContextUsage = {
   usedTokens: number | null;
+  cachedTokens: number | null;
   windowTokens: number | null;
   budgetTokens: number | null;
   source: string | null;
@@ -58,6 +62,7 @@ type ThreadContextUsage = {
 
 const emptyContextUsage: ThreadContextUsage = {
   usedTokens: null,
+  cachedTokens: null,
   windowTokens: null,
   budgetTokens: null,
   source: null,
@@ -391,6 +396,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
             updateContextUsage(targetThread.id, {
               usedTokens: usage.context_tokens,
+              cachedTokens: usage.context_cached_tokens,
               windowTokens: usage.context_window_tokens,
               budgetTokens: usage.context_input_budget_tokens,
               source: usage.context_window_source,
@@ -541,7 +547,15 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             const windowTokens = readNumber(streamEvent.data.context_window_tokens);
             const budgetTokens = readNumber(streamEvent.data.context_input_budget_tokens);
             updateContextUsage(threadId, {
-              ...(usedTokens !== null ? { usedTokens } : {}),
+              // cachedTokens 和 usedTokens **必须一起写**:两个数来自同一次主 agent 调用,
+              // 分开更新会让"上一轮报了缓存、这一轮 provider 不报"时留下陈旧分子,
+              // 除出来一个假的命中率。null 是合法值(这家不上报),不能被跳过。
+              ...(usedTokens !== null
+                ? {
+                    usedTokens,
+                    cachedTokens: readNumber(streamEvent.data.context_cached_tokens),
+                  }
+                : {}),
               ...(windowTokens !== null ? { windowTokens } : {}),
               ...(budgetTokens !== null ? { budgetTokens } : {}),
             });
