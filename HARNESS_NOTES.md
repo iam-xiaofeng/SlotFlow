@@ -3913,3 +3913,104 @@ async function handleSelectClarification(messageId, clarification, option) {
 - 后端 467 通过、1 skipped;`ruff` 全绿。
 - 前端 `pnpm test` / `typecheck` / `check:dead-code`(knip) / `build` 全绿。
 - **未做真机验证**:「思考框 → 澄清框 → 新思考框」这条连续记录需要真机点一遍澄清才算数。
+
+## 63. 迭代 54(2026-08-14 续):真机两个大问题 —— 「答完还接着干」和「传大文件对话直接死」
+
+用户报了两条,都拿真机 thread 的 checkpoint + `run_metrics` 复原了完整时序,不是猜的。
+
+### 63.1 「明明早就完活了,还要接着干」—— todo 强制门只会推翻已完成的回合
+
+thread `7450b95f`(一句「这是什么」+ 一个 PPT),checkpoint 里 24 条消息:
+
+```
+[1]  AI   convert_file_to_markdown
+[3]  AI   530字 无 tool_calls   ← 完整答案,结尾「需要我帮你…吗?」本该到此为止
+[4]  AI   write_todos + web_search ×3     ← 被拽回来
+[20] AI   1385字 无 tool_calls  ← 又一份完整答案
+[21] AI   write_todos                      ← 又被拽回来
+[23] AI   1602字                           ← 第三份答案
+```
+
+同一个问题答了三遍,9 次模型调用,思考文本 24617 字符。
+
+根因是 `steps/todo.py` 的 `todo_enforcement_update`(post_model)+ `route_after_model` 的回边。
+它的**结构性矛盾**:
+
+```python
+if last_ai.tool_calls:
+    return None          # ← 只在「模型不再调工具」时才可能触发 = 已经写完最终答案
+...
+pending = "...Do not answer in prose before creating the todo list."
+```
+
+触发条件是「已经答完」,指令内容却是「别用散文回答,先建 todo 列表」——那个时刻早就过去了。
+它唯一能做的就是把一个完成的回合重新拽开。`[3]` 命中「还没有 todos」分支,`[20]` 命中
+「todos 没做完」分支,各拽一次。两个分支的缺陷是同一个,所以**整套删除**:
+`todo_enforcement` 通道、`consume_todo_enforcement`、`route_after_model_has_enforcement`、
+`_should_create_initial_todos` 这些启发式全部删掉。
+
+保留的:`write_todos` 工具本身、系统提示里的主动规划引导、`todo_reminder_update`
+(走 `model_input_suffix` 的非强制提醒)。规划回到"模型自己判断",图不再替它决定什么时候算答完。
+
+### 63.2 「上传大文件,对话直接死」—— 一个没有上限的读口 + 静默死亡
+
+thread `c13009042616`,checkpoint 只有 7 条:
+
+```
+[1] AI    workspace_read('…/index.html')
+[2] Tool  373,215 字   ← 446KB 的 HTML 全量内联(≈166k token)
+[3] AI    len=0        ← 空
+[4] AI    len=0
+[5] Human '继续啊'
+[6] AI    len=0
+```
+
+`run_metrics`:`input_tokens=166730 → output_tokens=0`,`status: "success"`,**全程无报错**。
+
+两层缺陷叠加:
+
+**(a) `workspace_read` 是整个工具集里唯一没有任何上限的读口。** 它恰恰是系统提示点名让模型
+读上传文件的工具;而工具结果卸载(`tool_output_offload`)又把它列在 `_OFFLOAD_SKIP_TOOLS` 里
+——把工作区文件卸载成工作区文件确实是循环,跳过本身没错,但跳过之后就没有任何人管上限了。
+对照 `skill_read` 早有 `MAX_SKILL_READ_CHARS = 24_000` + `offset` 分页。
+修复:`MAX_WORKSPACE_READ_CHARS = 24_000` + `offset` 参数 + `read.next_offset` 续读提示,
+和 `skill_read` 同一套语义。
+
+**(b) 空响应静默终结整轮,还毒化 checkpoint。** 空 AIMessage 没有 tool_calls → 路由到
+`finalize` → 这一轮"正常结束";`run.finished` 时 `content` 为空 →
+`if content and not clarification_saved` 不成立 → **一条都不落库**,前端看起来就是发完消息
+什么都没发生。更糟的是那两条空消息**进了 checkpoint**,于是 thread 被永久毒化:用户后来发
+「继续啊」,模型读到的还是那 166k,继续吐空。
+
+修复:`assert_model_response_not_empty` 在 agent 节点里抛 `EmptyModelResponseError`。
+**抛异常而不是返回**是关键——LangGraph 会丢弃这个节点的写入,空消息不进 state、不进
+checkpoint,thread 保持可用;同时 `run.error` 带着可读原因走到前端。
+
+### 63.3 `reasoning_content` 默认改为保留
+
+原来是白名单:只有 `provider == "deepseek"` 保留,其余全剥,理由是"OpenAI 系推理模型会自己
+重新推理,回喂 CoT 纯浪费 token"。省 token 这点仍然成立,但白名单键的是
+`run_context.model_provider`,而**经 OpenAI 兼容中转访问的 DeepSeek 上报的是 `"custom"`**
+——唯一硬性要求回传这个字段的 provider,恰恰是被剥掉的那个。
+
+现在默认保留:checkpoint 里有,`llm_input_messages`(从 checkpoint 投影)自然也有。
+想恢复省 token 的旧行为,设 `SLOTFLOW_STRIP_REASONING_PROVIDERS="grok,openai,glm"`。
+
+注意这条闸**只管 `additional_kwargs` 里的载体**;content 里的 reasoning/thinking 块仍然一律
+剥掉——那是线路非法(`unknown variant 'reasoning'` → 400)且是体积大头,与本开关无关。
+
+### 63.4 仪表加了前缀缓存命中率
+
+`context_cached_tokens` 取**和 `context_tokens` 同一次主 agent 调用**的数字,不是整轮聚合
+——两者必须同源,否则"整轮缓存总量 / 单次上下文占用"除出来是个没有意义的比例。
+
+前端要能区分两种 `null`:**这家 provider 不上报缓存字段**(实测走中转的 `provider: "custom"`
+就是这样,`cache_status` 全是 unknown)显示 `—`,**报了但没命中**才显示 `0%`。
+混成一个 `0%` 会让人以为缓存策略失效,其实是没有数据。
+
+### 63.5 验证
+
+- 后端 467 通过、1 skipped;`ruff` 全绿。
+- 前端 `pnpm test` / `typecheck` / `check:dead-code` / `build` 全绿。
+- **未做真机验证**:这四项都需要真机再跑一遍——特别是 63.2(a) 之后传同一个 446KB 文件应该
+  能正常回答,以及 63.3 之后 DeepSeek 多轮思考是否确实不再报缺字段。
