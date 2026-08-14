@@ -99,8 +99,6 @@ def test_load_runtime_config_from_env_uses_small_defaults(
     monkeypatch.delenv("SLOTFLOW_SUMMARIZATION_TRIM_TOKENS", raising=False)
     monkeypatch.delenv("SLOTFLOW_LONG_TERM_MEMORY_ENABLED", raising=False)
     monkeypatch.delenv("SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION", raising=False)
-    monkeypatch.delenv("SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE", raising=False)
-    monkeypatch.delenv("SLOTFLOW_CLARIFY_GATE", raising=False)
     monkeypatch.delenv("SLOTFLOW_UPLOADS_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_TODO_MIDDLEWARE", raising=False)
     monkeypatch.delenv("SLOTFLOW_SUBAGENT_LIMIT", raising=False)
@@ -116,7 +114,9 @@ def test_load_runtime_config_from_env_uses_small_defaults(
 
     assert config == SlotFlowRuntimeConfig(
         model_name="deepseek/deepseek-v4-pro",
-        checkpointer_backend="memory",
+        # 默认必须是落盘的 sqlite：模型侧的会话历史只来自 checkpointer，
+        # memory 后端会在 `make dev --reload` 每次热重载时把它清空。
+        checkpointer_backend="sqlite",
         checkpointer_sqlite_path=DEFAULT_CHECKPOINTER_SQLITE_PATH,
         skills_root=tmp_path / "skills",
     )
@@ -180,8 +180,6 @@ def test_load_runtime_config_from_env_reads_harness_feature_flags(
     monkeypatch.setenv("SLOTFLOW_SUMMARIZATION_TRIM_TOKENS", "900")
     monkeypatch.setenv("SLOTFLOW_LONG_TERM_MEMORY_ENABLED", "false")
     monkeypatch.setenv("SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION", "false")
-    monkeypatch.setenv("SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE", "false")
-    monkeypatch.setenv("SLOTFLOW_CLARIFY_GATE", "false")
     monkeypatch.setenv("SLOTFLOW_UPLOADS_MIDDLEWARE", "false")
     monkeypatch.setenv("SLOTFLOW_TODO_MIDDLEWARE", "false")
     monkeypatch.setenv("SLOTFLOW_SUBAGENT_LIMIT", "false")
@@ -198,8 +196,6 @@ def test_load_runtime_config_from_env_reads_harness_feature_flags(
     assert config.middleware_config.summarization_trim_tokens == 900
     assert config.middleware_config.long_term_memory_enabled is False
     assert config.middleware_config.proactive_memory_extraction_enabled is False
-    assert config.middleware_config.skills_preflight_enabled is False
-    assert config.middleware_config.clarify_gate_enabled is False
     assert config.middleware_config.uploads_enabled is False
     assert config.middleware_config.todo_enabled is False
     assert config.middleware_config.subagent_limit_enabled is False
@@ -849,3 +845,55 @@ async def test_runtime_uses_run_scoped_stateful_mcp_providers(monkeypatch) -> No
     assert run_providers[0] is not run_providers[1]
     assert [provider.close_calls for provider in run_providers] == [1, 1]
     assert all(provider.aload_calls == [config] for provider in run_providers)
+
+
+@pytest.mark.asyncio
+async def test_conversation_history_survives_a_backend_restart_with_sqlite_checkpointer(
+    tmp_path,
+) -> None:
+    """会话历史必须活过进程重启。
+
+    模型侧的历史**只**来自 checkpointer（`build_agent_input` 每轮只送一条新的 user message），
+    所以 checkpointer 一丢，模型就在一个"看起来很长、实际全新"的会话里工作 —— 前端消息列表照旧
+    （那是另一套 SQLite），只有 token 仪表会露馅：`message_count` 从几十跌回 3、上下文占用从
+    30k+ 跌回 7k 左右（≈ system prompt + 工具 schema + 一条消息）。
+
+    默认曾经是 `memory`（`InMemorySaver`），而 `make dev` 带 `--reload`：改一次后端代码，
+    所有会话的模型侧历史就被清空一次。本测试用两个**独立的 saver 实例**指向同一个文件来模拟
+    重启，钉住"第二个进程仍能看到第一轮的消息"。
+    """
+
+    from langgraph.graph import END, START, StateGraph
+
+    from app.chat.runtime.checkpointer import create_sqlite_checkpointer
+    from app.harness.state import SlotFlowAgentState
+
+    database_path = tmp_path / "checkpoints.sqlite3"
+    thread_config = {"configurable": {"thread_id": "thread_restart"}}
+
+    def build(checkpointer):
+        graph = StateGraph(SlotFlowAgentState)
+        graph.add_node("agent", lambda state: {"messages": [AIMessage(content="ok")]})
+        graph.add_edge(START, "agent")
+        graph.add_edge("agent", END)
+        return graph.compile(checkpointer=checkpointer)
+
+    first = await create_sqlite_checkpointer(database_path)
+    await build(first).ainvoke(
+        {"messages": [HumanMessage(content="第一轮：记住暗号 42")]},
+        config=thread_config,
+    )
+
+    # 模拟重启：换一个全新的 saver 实例（新连接），只有落盘的状态能活下来。
+    second = await create_sqlite_checkpointer(database_path)
+    result = await build(second).ainvoke(
+        {"messages": [HumanMessage(content="第二轮：暗号是多少")]},
+        config=thread_config,
+    )
+
+    texts = [str(message.content) for message in result["messages"]]
+    assert any("第一轮：记住暗号 42" in text for text in texts), (
+        "重启后模型看不到第一轮消息 —— checkpointer 没有真正落盘"
+    )
+    assert any("第二轮：暗号是多少" in text for text in texts)
+    assert len(result["messages"]) >= 3
