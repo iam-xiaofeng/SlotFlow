@@ -212,7 +212,7 @@ def main() -> None:
     scores = run_offline(items)
     print_scorecard(scores, title="offline(桩 transcript,确定性)")
     print("\n注:offline 的 transcript 是人工编造的,只证明评测器/打分/报表本身正确;")
-    print("    1 号(直调未激活工具)与 10 号(回灌思考)是故意造的红项,演示评测器能抓到 Issue-1 与膨胀。")
+    print("    1 号(工具执行失败)与 10 号(回灌思考)是故意造的红项,演示评测器确实抓得到。")
     print("    真实 agent 分数请跑 --live。")
 
 

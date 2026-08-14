@@ -49,13 +49,13 @@ def attempted_tool_names(transcript: list[Any]) -> list[str]:
 
 
 def tool_execution_errors(transcript: list[Any]) -> list[str]:
-    """工具执行失败记录:ToolMessage.status == error,或内容含 tool_not_activated。"""
+    """工具执行失败记录:ToolMessage.status == error,或内容里带 tool_execution_error。"""
 
     errors: list[str] = []
     for msg in transcript:
         if isinstance(msg, ToolMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            is_error = getattr(msg, "status", None) == "error" or "tool_not_activated" in content
+            is_error = getattr(msg, "status", None) == "error" or "tool_execution_error" in content
             if is_error:
                 errors.append(f"{msg.name}: {content[:60]}")
     return errors
@@ -122,7 +122,7 @@ def eval_forbids_tools(transcript, item, params, *, ctx) -> EvalResult:
 
 
 def eval_no_tool_errors(transcript, item, params, *, ctx) -> EvalResult:
-    """没有工具执行失败(tool_not_activated 会在这里被抓到 → 直指 Issue-1)。"""
+    """没有工具执行失败(任何 status=error 的 ToolMessage 都会在这里被抓到)。"""
 
     errors = tool_execution_errors(transcript)
     return EvalResult(

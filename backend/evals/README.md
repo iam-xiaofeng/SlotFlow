@@ -28,9 +28,9 @@ cd backend
 
 | id | 标签 | 考点 |
 |---|---|---|
-| read-file | tool, issue-1 | 读文件是否可用(桩故意演示 `tool_not_activated`) |
-| write-file | tool, issue-1 | 写文件走 loader→promote→work 两步链 |
-| web-search | tool, issue-1, network | 联网检索 |
+| read-file | tool, tool-error | 读文件是否可用(桩故意演示一次工具执行失败) |
+| write-file | tool | 写文件是否落到 artifacts/ |
+| web-search | tool, network | 联网检索 |
 | artifact-code | tool | 生成 artifact |
 | no-tool-chat | precision | **不该**调用工具时别乱调(精度) |
 | clarify | gate | 信息不足应触发澄清 |
@@ -66,7 +66,7 @@ cd backend
 
 - `expects_tools` —— 期望工具 ⊆ 实际调用(轨迹评测)
 - `forbids_tools` —— 不该调用任何工具(精度)
-- `no_tool_errors` —— 无工具执行失败(**`tool_not_activated` 在这里被抓 → 直指 Issue-1**)
+- `no_tool_errors` —— 无工具执行失败(任何 `status=error` 的 ToolMessage 都在这里被抓)
 - `answer_contains` —— 终答含关键子串(all / any)
 - `no_reasoning_bloat` —— 落库无思考回灌(**这条就是防上下文膨胀的契约,普通正确性评测抓不到**)
 - `llm_judge` —— LLM-as-judge,仅 `--judge` 且 live 时运行,否则跳过
@@ -85,4 +85,4 @@ node/tool span。若要把**分数**也进 LangSmith 的 Experiments 对比视�
 接到官方 `aevaluate(target, data=…, evaluators=[…])` 即可(target = 上面的 graph 包装)。
 
 > ⚠️ offline 的 transcript 是人工编造的,只证明流水线正确;真实分数以 `--live` 为准。
-> 1 号(直调未激活工具)与 10 号(回灌思考)是**故意造的红项**,演示评测器能抓到 Issue-1 与膨胀。
+> 1 号(工具执行失败)与 10 号(回灌思考)是**故意造的红项**,演示评测器确实抓得到。
