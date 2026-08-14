@@ -431,6 +431,8 @@ def make_agent_node(inputs: _GraphInputs):
         bound_model = inputs.bound_model
         projected_messages = list(messages)
         retries = max(1, inputs.config_flags.context_overflow_max_retries)
+        empty_retries = max(0, getattr(inputs.config_flags, "empty_response_max_retries", 3))
+        empty_seen = 0
         for attempt in range(retries + 1):
             try:
                 response = await bound_model.ainvoke(
@@ -442,6 +444,19 @@ def make_agent_node(inputs: _GraphInputs):
                 sanitize_reasoning_message(response, provider=inputs.run_context.model_provider)
                 assert_model_response_not_empty(response)
                 return {"messages": [response]}
+            except EmptyModelResponseError:
+                # 空响应**退避重试**再放弃,而且不改投影——它不是上下文问题。
+                #
+                # 真机实测(2026-08-14,走中转的 deepseek-v4-pro):裸调一个最小 prompt、
+                # 无工具无历史,3 次里有 2 次返回 `content=''` 且 additional_kwargs 也是空。
+                # 中转被限流时不回 429,而是直接给一个空补全。所以重试 1 次远远不够:
+                # 空响应率 2/3 时,单次重试仍有约 44% 会失败。默认 3 次退避重试。
+                if empty_seen >= empty_retries:
+                    raise
+                empty_seen += 1
+                await asyncio.sleep(
+                    inputs.config_flags.context_overflow_retry_delay_seconds * empty_seen
+                )
             except Exception as exc:
                 if not is_context_overflow_error(exc) or attempt >= retries:
                     raise
@@ -500,9 +515,9 @@ def assert_model_response_not_empty(response: AIMessage) -> None:
     if message_content_text(response.content).strip():
         return
     raise EmptyModelResponseError(
-        "模型返回了空响应(既无正文也无工具调用)。常见原因是单次输入过大——"
-        "例如把一个很大的文件整段读进了上下文。可以改用 workspace_grep 定位片段,"
-        "或用 workspace_read 的 offset 分段读取。"
+        "模型返回了空响应(既无正文也无工具调用),重试后仍然为空。"
+        "如果这一轮刚读过很大的文件,多半是单次输入过大——改用 workspace_grep 定位片段,"
+        "或用 workspace_read 的 offset 分段读取;否则通常是 provider 侧的瞬时问题,重发即可。"
     )
 
 

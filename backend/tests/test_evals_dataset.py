@@ -30,10 +30,10 @@ def _live_tool_names() -> set[str]:
     return {tool.name for tool in tools}
 
 
-def test_dataset_has_twenty_unique_samples() -> None:
+def test_dataset_has_unique_sample_ids() -> None:
     ids = [item["id"] for item in DATASET]
-    assert len(ids) == 20
-    assert len(set(ids)) == 20, "样本 id 必须唯一(LangSmith 用它作为 example 的稳定标识)"
+    assert len(ids) == 21
+    assert len(set(ids)) == len(ids), "样本 id 必须唯一(LangSmith 用它作为 example 的稳定标识)"
 
 
 def test_every_expected_tool_actually_exists() -> None:

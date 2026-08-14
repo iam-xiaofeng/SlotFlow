@@ -67,6 +67,37 @@ uv run python -m evals.langsmith_eval --dataset-only                 # 只同步
 | 19 | skill-two-step | skills | Skills 两段式:先发现(目录)再读正文(工具结果) |
 | 20 | reasoning-roundtrip | contract, reasoning | 思考载体保留 + 思考块不入 content |
 
+## 真机结果(2026-08-14 · deepseek-v4-pro 走中转 · `--live --judge --langsmith --concurrency 4`)
+
+**样本 20/21 通过 · 评测器 54/55 通过。** 唯一失败的一条逐条归因如下——**归因比分数重要**:
+
+| # | 样本 | 结果 | 归因 |
+|---|---|---|---|
+| 13 | todo-plan | ⚠️ 1/2 | 模型把 13 个待办拆成 **13 个并行 `write_todos` 调用**,被 `todo_parallel_call_guard` 全部拒绝(它对每个并行调用各回一条 `status=error`,所以 `no_tool_errors` 收到 13 条)。**守卫做的是对的**——并行写 todo 会互相覆盖;模型随后自己纠正,`expects_tools` 那项通过。属于"模型误用一次 + 守卫拦住 + 自愈",不是产品缺陷。这里刻意不放宽评测器:它如实反映了一次真实的工具误用。 |
+
+跑通之前踩到的三件事,都记在这里(它们比分数更能说明评测该怎么做):
+
+**① 模型名过期 → 21 条全红。** `--model` 默认硬编码 `grok-4.5`,而中转早换成了 `deepseek-v4-pro`,
+第一次跑 21 条全部 `NotFoundError`,报表看着像 agent 全线崩溃。现在默认跟随 `.env` 的 `CUSTOM_MODELS`。
+和评测集里那些过期工具名是同一类腐烂:**硬编码的外部事实会漂,而它自己不会喊**。
+
+**② 评测跑的不是产品那张图 → Skills 全废。** `_run_graph` 原来自己拼了个只有 `system_prompt` 的
+`SlotFlowHarnessConfig`,于是 skills_root / MCP / 记忆全是空的:`skill_list` 返回空列表、
+`skill_read` 报 `skills_root_not_configured`。看报表像"agent 不会用 Skill"。现在走**和后端完全
+同一条**路径:同一个 `runtime_config`、同一个 `create_langgraph_agent_graph`、同一套 MCP 异步预加载。
+**评测的价值取决于它跑的东西和线上有多像**,这种"跑了个简化版"的偏差最难发现。
+(改完还崩过一次:MCP 是 stdio 子进程,每条样本各加载一次 = 21 轮 spawn/teardown,
+跑到第二条就 `CancelledError`。改成整轮复用一份、结束统一关闭。)
+
+**③ 中转限流不回 429,回的是空补全 → 又一次 21 条全红。** 裸调最小 prompt(无工具、无历史、
+不经过 harness)实测 **3 次里 2 次 `content=''`**。所以 `assert_model_response_not_empty` 那道闸是
+必要的(否则空消息进 checkpoint,整个 thread 被永久毒化),但**重试 1 次远远不够**:空响应率 2/3 时
+单次重试仍有约 44% 失败。改成 3 次退避重试后,同一套代码、同一个中转,从 0/21 变成 20/21。
+
+并发上限硬夹在 5(`MAX_LIVE_CONCURRENCY`),默认 4。**带 `env_overrides` 的样本始终串行**——
+它们改的是进程级 `os.environ`(压缩阈值),并发会串味:一条把阈值调到 1200,同时在跑的其它样本
+也跟着被压缩。
+
 ## 2026-08-14:上一版有 8/10 条是坏的
 
 复查旧评测集时发现的问题,记在这里比修掉更有价值——**评测集会随架构漂移,而它自己不会报错,

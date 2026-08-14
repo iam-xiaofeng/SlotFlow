@@ -1,4 +1,4 @@
-"""20 条自建 agent 评测样本 + 每条的评测器规格。
+"""21 条自建 agent 评测样本 + 每条的评测器规格。
 
 每条样本(``dict``)字段:
 
@@ -397,7 +397,13 @@ DATASET: list[dict[str, Any]] = [
             "我的项目代号和端口分别是什么?",
         ],
         "env_overrides": {"SLOTFLOW_SUMMARIZATION_TRIGGER_TOKENS": "1200"},
-        "evaluators": [("answer_contains", {"substrings": ["NIGHTHAWK-7", "8123"], "mode": "all"})],
+        "evaluators": [
+            ("answer_contains", {"substrings": ["NIGHTHAWK-7", "8123"], "mode": "all"}),
+            # 压缩把早期消息折叠掉之后,细节要么进了摘要、要么得靠归档检索捞回来。
+            # 这里不强制必须调工具(从摘要里答对也算对),但答不出来就是真的丢了历史。
+            ("no_empty_assistant", {}),
+            ("llm_judge", {}),
+        ],
         "reference": "代号 NIGHTHAWK-7,端口 8123。",
         "stub_note": "离线桩演示归档检索路径;真机是否记得请看 --live",
         "stub": [
@@ -418,22 +424,90 @@ DATASET: list[dict[str, Any]] = [
         "id": "skill-two-step",
         "tags": ["skills"],
         "desc": "Skills 两段式:先发现再读正文",
-        "turns": ["看看你有哪些可用的 skill,挑一个跟数据分析最相关的,把它的正文读出来讲讲怎么用。"],
+        # 不指定领域。本机只装了 find-skills / book-to-skill 两个 skill,原来的措辞是
+        # 「挑一个跟数据分析最相关的」——一个都不相关,模型 skill_list 之后合理地停下,
+        # 却被判成"没做到两段式"。和当初 read-file 没预置文件是同一类环境缺口。
+        #
+        # 改完仍然失败,查出第二层原因:`skill_list` 返回里**已经带完整 description**,
+        # 模型据此就能"讲讲怎么用",不需要读正文——是我的提问没有强制需要正文里的信息。
+        # 现在问的是「正文里的第一个一级标题」,description 里没有,只有 skill_read 拿得到。
+        "turns": [
+            "列出你现在可用的 skill,然后把 find-skills 这个 skill 的正文读出来,"
+            "告诉我它正文里的第一个一级标题(# 开头那行)是什么。"
+        ],
         "evaluators": [
             # 两段式是 2026-08-14 重构的成果:目录常驻前缀(发现),正文按需用 skill_read
             # 走工具结果(读取)。旧版把正文塞进 system 前缀,每轮都在破坏前缀缓存。
-            ("expects_any_tool", {"names": ["skill_list", "skill_match", "find-skills"]}),
+            # **不要求**先调 skill_list —— 两段式的设计就是「发现靠常驻前缀里的 Skill 目录、
+            # 正文靠 skill_read 走工具结果」。模型直接 skill_read 恰恰说明目录起作用了;
+            # 逼它先列一遍是多余往返,也和设计相反。这一条被判红过一次,是评测写反了不是模型错。
             ("expects_tools", {"names": ["skill_read"]}),
             ("no_tool_errors", {}),
+            ("answer_contains", {"substrings": ["Find Skills"], "mode": "any"}),
         ],
-        "reference": "先列出/匹配 skill,再用 skill_read 读出正文并说明用法。",
+        "reference": "正文里的第一个一级标题是 # Find Skills。",
         "stub": [
-            human("看看你有哪些可用的 skill,挑一个跟数据分析最相关的,把它的正文读出来讲讲怎么用。"),
-            ai(tools=[call("skill_match", {"query": "数据分析"}, "c1")]),
-            tool("skill_match", '{"skills": [{"name": "data-analysis"}]}', "c1"),
-            ai(tools=[call("skill_read", {"name": "data-analysis"}, "c2")]),
-            tool("skill_read", '{"skill": "data-analysis", "content": "## 用法\\n…"}', "c2"),
-            ai("最相关的是 data-analysis,用法是:……"),
+            human(
+                "列出你现在可用的 skill,然后把 find-skills 这个 skill 的正文读出来,"
+                "告诉我它正文里的第一个一级标题(# 开头那行)是什么。"
+            ),
+            ai(tools=[call("skill_read", {"name": "find-skills"}, "c2")]),
+            tool("skill_read", '{"skill": "find-skills", "content": "# Find Skills\\n…"}', "c2"),
+            ai("可用的有 find-skills 和 book-to-skill;find-skills 正文的第一个一级标题是 # Find Skills。"),
+        ],
+    },
+    {
+        "id": "offload-recall",
+        "tags": ["context", "tool", "issue-offload"],
+        "desc": "超长工具结果被卸载后,要能用工具把省略掉的部分取回来",
+        # 暗号**只存在于预置文件里,提问里绝不出现**。
+        # 第一版把「打印一行 '中段暗号:ZEBRA-77'」直接写进了提问 —— 模型照抄一遍就答对了,
+        # 根本不需要回头读,量了个寂寞。评测里最容易犯的错就是把答案泄进题面。
+        "workspace_files": {
+            "haystack.txt": (
+                "".join(f"第{i}行:占位内容\n" for i in range(1, 1001))
+                + "中段暗号:ZEBRA-77\n"
+                + "".join(f"第{i}行:占位内容\n" for i in range(1001, 2001))
+            )
+        },
+        "turns": [
+            "用 sandbox_exec 把工作区里的 haystack.txt 整个打印出来,"
+            "然后告诉我文件里那行「中段暗号」的值是什么。"
+        ],
+        "evaluators": [
+            ("expects_tools", {"names": ["sandbox_exec"]}),
+            # 打印出来约 4 万字符,超过 tool_output_offload_max_chars(默认 16000),
+            # 会被换成句柄:只留 preview + 文件路径 + how_to_read。
+            #
+            # 而 `_preview` 是 head + tail 拼的(`text[:HEAD] …省略… text[-TAIL:]`),
+            # 暗号在正中间(第 1001 行),**一定**落在被省略的那段里。所以模型必须回头用
+            # workspace_read(offset) / workspace_grep 去取,光看 preview 答不出来。
+            ("expects_any_tool", {"names": ["workspace_read", "workspace_grep", "workspace_search"]}),
+            ("answer_contains", {"substrings": ["ZEBRA-77"], "mode": "any"}),
+            ("tool_result_capped", {"max_chars": 32_000}),
+            ("no_empty_assistant", {}),
+            ("llm_judge", {}),
+        ],
+        "reference": "中段暗号是 ZEBRA-77。",
+        "stub_note": "演示卸载→句柄→回头读取的完整往返",
+        "stub": [
+            human(
+                "用 sandbox_exec 把工作区里的 haystack.txt 整个打印出来,"
+                "然后告诉我文件里那行「中段暗号」的值是什么。"
+            ),
+            ai(tools=[call("sandbox_exec", {"code": "print(open('haystack.txt').read())"}, "c1")]),
+            tool(
+                "sandbox_exec",
+                '{"slotflow_tool_output_offloaded": true, "tool_name": "sandbox_exec", '
+                '"chars": 42907, "path": ".slotflow_offload/sandbox_exec-c1.txt", '
+                '"preview": "第1行:占位内容\\n…（此处省略约 4 万字）…\\n第2000行:占位内容", '
+                '"how_to_read": "完整结果已保存到工作区文件…需要全文用 workspace_read(…);'
+                '只找关键片段用 workspace_grep(…)"}',
+                "c1",
+            ),
+            ai(tools=[call("workspace_grep", {"pattern": "中段暗号", "path": ".slotflow_offload/sandbox_exec-c1.txt"}, "c2")]),
+            tool("workspace_grep", '{"matches": [{"excerpt": "中段暗号:ZEBRA-77"}]}', "c2"),
+            ai("文件里那行中段暗号的值是 ZEBRA-77。"),
         ],
     },
     {

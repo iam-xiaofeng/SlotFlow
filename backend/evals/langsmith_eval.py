@@ -5,7 +5,7 @@
 - ``--langsmith`` 只是**打开链路追踪**(``LANGSMITH_TRACING=true``),你能在 LangSmith 里看到
   每一次模型调用和工具调用的 trace,但**没有数据集、没有实验、没有分数**——换个模型再跑一遍,
   两次结果只能靠人眼在 trace 列表里对。
-- 这里做的是**评测**:把 20 条样本注册成一个 LangSmith Dataset,把
+- 这里做的是**评测**:把 21 条样本注册成一个 LangSmith Dataset,把
   ``evaluators.py`` 里的确定性评测器 + LLM-as-judge 包装成 LangSmith 的 evaluator,
   用 ``langsmith.evaluate()`` 跑成一次 Experiment。于是每个模型/每次改动都是一行可对比的
   实验记录,逐条样本的分数、失败明细、trace 三者在 UI 里是连起来的。
@@ -13,8 +13,8 @@
 用法::
 
     cd backend
-    uv run python -m evals.langsmith_eval --model grok-4.5                 # 建/更新数据集并跑实验
-    uv run python -m evals.langsmith_eval --model grok-4.5 --judge         # 额外开 LLM-as-judge
+    uv run python -m evals.langsmith_eval                    # 建/更新数据集并跑实验
+    uv run python -m evals.langsmith_eval --judge           # 额外开 LLM-as-judge
     uv run python -m evals.langsmith_eval --dataset-only                   # 只同步数据集,不跑
 
 需要 ``LANGSMITH_API_KEY``(从 ``backend/.env`` 读)。
@@ -35,13 +35,18 @@ if str(_BACKEND) not in sys.path:
 
 from evals.dataset import DATASET, dataset_by_id  # noqa: E402
 from evals.evaluators import EvalContext, _REGISTRY, final_answer_text  # noqa: E402
-from evals.run_eval import _run_live_item, load_dotenv  # noqa: E402
+from evals.run_eval import (  # noqa: E402
+    MAX_LIVE_CONCURRENCY,
+    _run_live_item,
+    default_live_model,
+    load_dotenv,
+)
 
 DATASET_NAME = "SlotFlow-agent-evals"
 
 
 def sync_dataset(client: Any) -> Any:
-    """建立(或复用)数据集,并把 20 条样本同步上去。
+    """建立(或复用)数据集,并把全部样本同步上去。
 
     以样本 id 作为 example 的稳定标识:重复运行不会产生重复 example,改了样本内容会更新。
     """
@@ -143,16 +148,21 @@ def build_evaluators(ctx: EvalContext):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="grok-4.5", help="被测模型(默认 grok-4.5)")
+    parser.add_argument("--model", default="", help="被测模型(默认跟随 .env 的 CUSTOM_MODELS)")
     parser.add_argument("--provider", default="custom", help="provider(中转模型用 custom)")
     parser.add_argument("--judge", action="store_true", help="启用 LLM-as-judge 评测器")
     parser.add_argument("--dataset-only", action="store_true", help="只同步数据集,不跑实验")
     parser.add_argument("--only", default="", help="只跑某个样本 id")
-    parser.add_argument("--concurrency", type=int, default=2, help="并发样本数(默认 2)")
+    parser.add_argument(
+        "--concurrency", type=int, default=4,
+        help=f"并发样本数(默认 4,硬上限 {MAX_LIVE_CONCURRENCY})",
+    )
     args = parser.parse_args()
 
     loaded = load_dotenv(_BACKEND / ".env")
-    print(f"[langsmith] 已从 .env 载入 {loaded} 个环境变量")
+    # .env 载入之后才能解析默认模型(它读的是 CUSTOM_MODELS)。
+    args.model = args.model or default_live_model()
+    print(f"[langsmith] 已从 .env 载入 {loaded} 个环境变量;模型={args.model}")
     if not os.environ.get("LANGSMITH_API_KEY"):
         print("缺少 LANGSMITH_API_KEY(写进 backend/.env 即可)。")
         return 1
@@ -189,7 +199,8 @@ def main() -> int:
         data=data,
         evaluators=build_evaluators(ctx),
         experiment_prefix=f"slotflow-{args.model}",
-        max_concurrency=args.concurrency,
+        # 中转超过这个并发就开始回空补全(不报 429),硬夹住。
+        max_concurrency=max(1, min(args.concurrency, MAX_LIVE_CONCURRENCY)),
         metadata={"model": args.model, "provider": args.provider, "judge": args.judge},
     )
     print(f"\n实验已提交 LangSmith:{getattr(results, 'experiment_name', '(见 UI)')}")
