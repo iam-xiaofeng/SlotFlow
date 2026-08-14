@@ -235,7 +235,8 @@ export async function listThreadMessages(
   });
 }
 
-export type ThreadContextUsageRecord = {
+// 只作为 getThreadContextUsage 的返回类型在本模块内使用,不对外导出(knip 死代码检查会抓)。
+type ThreadContextUsageRecord = {
   thread_id: string;
   run_id: string | null;
   context_tokens: number | null;
