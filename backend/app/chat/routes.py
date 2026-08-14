@@ -32,6 +32,7 @@ from app.chat.models import (
     ModelProvider,
     ThreadSearchResultRecord,
     ThreadCreateRequest,
+    ThreadContextUsageRecord,
     ThreadRecord,
     UploadedFileContext,
 )
@@ -119,6 +120,45 @@ async def list_messages(thread_id: str, request: Request) -> list[MessageRecord]
         return await run_in_threadpool(repo.list_messages, thread_id)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail="thread not found") from exc
+
+
+@router.get(
+    "/threads/{thread_id}/context-usage",
+    response_model=ThreadContextUsageRecord,
+)
+async def get_thread_context_usage(
+    thread_id: str,
+    request: Request,
+) -> ThreadContextUsageRecord:
+    """返回该 thread 最近一次可用的上下文占用。
+
+    `run_metrics` 一直在写,但之前没有任何读口——于是 composer 的 token 仪表只在"本次页面会话里
+    真的跑过一轮"时才有数,刷新或切会话就空了。这里补上读口。
+    """
+
+    repo = get_chat_repo(request)
+    try:
+        runs = await run_in_threadpool(repo.list_runs, thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="thread not found") from exc
+
+    for run in reversed(runs):
+        metrics = await run_in_threadpool(repo.get_run_metrics, run.id)
+        if not isinstance(metrics, dict) or not metrics:
+            continue
+        # 只认真的量到过窗口的那次 run:失败得太早的 run 里这些字段全是 None,
+        # 拿它覆盖会让仪表显示成空的。
+        if metrics.get("context_window_tokens") is None:
+            continue
+        return ThreadContextUsageRecord(
+            thread_id=thread_id,
+            run_id=run.id,
+            context_tokens=metrics.get("context_tokens"),
+            context_window_tokens=metrics.get("context_window_tokens"),
+            context_input_budget_tokens=metrics.get("context_input_budget_tokens"),
+            context_window_source=metrics.get("context_window_source"),
+        )
+    return ThreadContextUsageRecord(thread_id=thread_id)
 
 
 @router.post("/threads/{thread_id}/runs/stream")
@@ -239,16 +279,29 @@ async def stream_thread_run(
                     snapshot_reasoning_content = latest_assistant_reasoning_content(event)
 
                 if event.event == "clarification.requested" and not clarification_saved:
+                    # 澄清消息同样要带上本轮已经产生的思考内容。
+                    #
+                    # 这条路径 `clarification_saved=True` 之后会跳过 run.finished 的正常保存,
+                    # 所以它是这条消息**唯一**的落库点。曾经这里只写 clarification 本身,结果是:
+                    # 直播时前端内存里还留着 reasoning、看起来正常,一旦刷新/切换会话按 DB 重建,
+                    # 思考框就整个消失——模型并没有"重新思考",是这段文本从来没被存下来。
+                    # (interrupt 停在 tools 节点,agent 节点的输出早已进 state,resume 不会重跑它。)
+                    clarification_metadata = assistant_message_metadata(
+                        select_assistant_reasoning_content(
+                            snapshot_reasoning_content=snapshot_reasoning_content,
+                            streamed_reasoning_content="".join(assistant_reasoning_parts),
+                        ),
+                        thinking_enabled=bundle.context.thinking_enabled,
+                    )
+                    clarification_metadata["source"] = "clarification"
+                    clarification_metadata["clarification"] = dict(event.data)
                     await run_in_threadpool(
                         repo.add_message,
                         thread_id,
                         role="assistant",
                         content=format_clarification_content(event.data),
                         run_id=run.id,
-                        metadata={
-                            "source": "clarification",
-                            "clarification": dict(event.data),
-                        },
+                        metadata=clarification_metadata,
                     )
                     clarification_saved = True
 

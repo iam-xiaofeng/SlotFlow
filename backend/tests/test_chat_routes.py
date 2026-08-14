@@ -319,6 +319,10 @@ class ClarificationAgentAdapter:
         bundle: RunConfigBundle,
     ) -> AsyncIterator[AgentEvent]:
         _ = request
+        yield AgentEvent(
+            event="message.delta",
+            data={"delta": "先看看用户昨天提到过哪些币种…", "channel": "reasoning"},
+        )
         payload = {
             "type": "clarification",
             "id": "clarification:call_route",
@@ -735,6 +739,7 @@ def test_stream_run_persists_clarification_request() -> None:
 
     assert response.status_code == 200
     assert [event["event"] for event in events] == [
+        "message.delta",
         "clarification.requested",
         "run.finished",
     ]
@@ -745,4 +750,8 @@ def test_stream_run_persists_clarification_request() -> None:
         "id": "A",
         "label": "BTC",
     }
+    # 澄清消息是这条 assistant 消息**唯一**的落库点(它之后会跳过 run.finished 的正常保存),
+    # 所以本轮已经产生的思考内容必须一起存下来。否则直播时前端内存里还有、一刷新就永久丢失,
+    # 看起来像"模型重新思考了",实际是这段文本从来没被持久化。
+    assert messages[1].metadata["reasoning_content"] == "先看看用户昨天提到过哪些币种…"
     assert runs[0].status == "completed"
