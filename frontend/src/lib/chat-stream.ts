@@ -235,6 +235,26 @@ export async function listThreadMessages(
   });
 }
 
+export type ThreadContextUsageRecord = {
+  thread_id: string;
+  run_id: string | null;
+  context_tokens: number | null;
+  context_window_tokens: number | null;
+  context_input_budget_tokens: number | null;
+  context_window_source: string | null;
+};
+
+export async function getThreadContextUsage(
+  threadId: string,
+  options: ChatRequestOptions = {},
+): Promise<ThreadContextUsageRecord> {
+  return requestJson<ThreadContextUsageRecord>(
+    "load context usage failed",
+    `/api/chat/threads/${threadId}/context-usage`,
+    { signal: options.signal },
+  );
+}
+
 export async function uploadFile(
   file: File,
   options: ChatRequestOptions = {},

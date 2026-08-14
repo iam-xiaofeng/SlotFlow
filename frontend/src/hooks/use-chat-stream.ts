@@ -8,6 +8,7 @@ import {
   type ThreadRecord,
   type WorkspaceEntryRecord,
   createThread,
+  getThreadContextUsage,
   listThreadMessages,
   streamThreadRun,
 } from "@/lib/chat-stream";
@@ -391,6 +392,21 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           ...current,
           [targetThread.id]: storedMessages.map(messageRecordToUiMessage),
         }));
+        // token 仪表之前只活在内存里：只有"本次页面会话真的跑过一轮"才有数，刷新或切走再切回
+        // 就整个消失。后端一直在写 run_metrics，这里把它读回来。失败不影响会话打开。
+        void getThreadContextUsage(targetThread.id)
+          .then((usage) => {
+            if (usage.context_window_tokens === null) {
+              return;
+            }
+            updateContextUsage(targetThread.id, {
+              usedTokens: usage.context_tokens,
+              windowTokens: usage.context_window_tokens,
+              budgetTokens: usage.context_input_budget_tokens,
+              source: usage.context_window_source,
+            });
+          })
+          .catch(() => undefined);
         return true;
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : "load thread failed";
@@ -398,7 +414,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         return false;
       }
     },
-    [setThreadError],
+    [setThreadError, updateContextUsage],
   );
 
   const sendMessage = useCallback(

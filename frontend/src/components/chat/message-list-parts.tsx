@@ -21,6 +21,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { type ChatToolActivity, type ChatUiMessage } from "@/hooks/use-chat-stream";
+import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
 import {
   type ClarificationOptionRecord,
   type ClarificationRequestRecord,
@@ -85,9 +86,14 @@ function MessageBubbleImpl({
   // <slotflow-*> 是注入给模型的内部上下文协议;模型偶尔复读,渲染前一律剥离。
   const content = isUser ? message.content : stripSlotflowBlocks(message.content);
   const clarification = getClarificationRequest(message);
-  const assistantContent =
-    isUser || clarification
-      ? { thought: "", body: content }
+  // 澄清消息**也要显示它自己的思考框**。它是模型「想了一大堆 → 决定问一句」的产物,
+  // 那段思考正是它为什么要问的理由;之前这里把 thought 强制清空,于是澄清一出现思考框就整块消失,
+  // 看起来像模型把想过的东西忘了。现在每条 assistant 消息都保留自己的思考,
+  // 一轮澄清对话在页面上就是「思考框 → 澄清框 → 思考框」的连续记录。
+  const assistantContent = isUser
+    ? { thought: "", body: content }
+    : clarification
+      ? { thought: (message.reasoningContent ?? "").trim(), body: content }
       : splitAssistantContent(
           content,
           message.reasoningContent,
@@ -103,13 +109,12 @@ function MessageBubbleImpl({
     !isUser && !clarification && message.status === "streaming"
       ? message.toolStatus
       : undefined;
-  const toolActivities =
-    !isUser && !clarification ? message.toolActivities ?? [] : [];
+  const toolActivities = !isUser ? message.toolActivities ?? [] : [];
   const shouldShowThinkingCard =
     !isUser &&
-    !clarification &&
     (hasAssistantThought ||
-      (message.status === "streaming" &&
+      (!clarification &&
+        message.status === "streaming" &&
         message.thinkingStarted === true &&
         !hasAssistantBody &&
         !isCompressingContext));
@@ -157,13 +162,25 @@ function MessageBubbleImpl({
             {isUser ? (
               <p className="whitespace-pre-wrap">{content}</p>
             ) : clarification ? (
-              <ClarificationRequestPanel
-                clarification={clarification}
-                disabled={!canAnswerClarification}
-                onSelect={(selectedClarification, option) =>
-                  onSelectClarification(message.id, selectedClarification, option)
-                }
-              />
+              <>
+                {/* 思考 → 工具 → 提问：按模型实际发生的顺序渲染，澄清框不再吃掉前面的思考。 */}
+                {shouldShowThinkingCard ? (
+                  <AssistantThinkingSummary
+                    content={assistantContent.thought}
+                    isStreaming={false}
+                  />
+                ) : null}
+                {toolActivities.length > 0 ? (
+                  <ToolActivityTimeline activities={toolActivities} isStreaming={false} />
+                ) : null}
+                <ClarificationRequestPanel
+                  clarification={clarification}
+                  disabled={!canAnswerClarification}
+                  onSelect={(selectedClarification, option) =>
+                    onSelectClarification(message.id, selectedClarification, option)
+                  }
+                />
+              </>
             ) : isCompressingContext ? (
               <ContextCompressingIndicator />
             ) : (
@@ -875,6 +892,11 @@ function AssistantThinkingSummary({
   const displayContent = content.trim();
   const hasContent = Boolean(displayContent.trim());
   const steps = splitThinkingSteps(displayContent);
+  // 思考框和主消息列表同一套语义：贴着底就跟着新内容走，用户往上滚就停住，滚回底再恢复。
+  const thinkingScrollRef = useStickToBottom<HTMLDivElement>(
+    isStreaming ? displayContent.length : null,
+    { enabled: isStreaming },
+  );
 
   return (
     <details
@@ -890,7 +912,10 @@ function AssistantThinkingSummary({
         )}
       </summary>
       <div className="px-4 pb-4 pt-1">
-        <div className="max-h-[30rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]">
+        <div
+          ref={thinkingScrollRef}
+          className="max-h-[30rem] overflow-y-auto overscroll-contain pr-3 [scrollbar-gutter:stable]"
+        >
           {hasContent ? (
             <ol className="space-y-3">
               {steps.map((step, index) => (

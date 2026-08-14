@@ -56,7 +56,6 @@ export function MessageList({
   const newTurnAnchoredUserIdsRef = useRef(new Set<string>());
   const autoFollowLatestAssistantRef = useRef(true);
   const userScrollIntentRef = useRef(false);
-  const programmaticScrollUntilRef = useRef(0);
   const [activeUserIndex, setActiveUserIndex] = useState(0);
   const [isNavigatorOpen, setIsNavigatorOpen] = useState(false);
   const [editingUserMessageId, setEditingUserMessageId] = useState<string | null>(null);
@@ -131,7 +130,6 @@ export function MessageList({
 
       const frame = window.requestAnimationFrame(() => {
         const endElement = messagesEndRef.current;
-        programmaticScrollUntilRef.current = performance.now() + 700;
         if (!endElement) {
           viewport.scrollTo({ top: viewport.scrollHeight, behavior });
           return;
@@ -192,7 +190,6 @@ export function MessageList({
             return;
           }
 
-          programmaticScrollUntilRef.current = performance.now() + 700;
           const viewportRect = currentViewport.getBoundingClientRect();
           const elementRect = currentElement.getBoundingClientRect();
           const elementTop =
@@ -244,7 +241,6 @@ export function MessageList({
           autoFollowLatestAssistantRef.current ||
           endRect.bottom > viewportRect.bottom - 24;
 
-        programmaticScrollUntilRef.current = performance.now() + 700;
         if (shouldFollowLatestOutput) {
           autoFollowLatestAssistantRef.current = true;
           const endTop =
@@ -349,9 +345,15 @@ export function MessageList({
 
     const handleScroll = () => {
       updateActiveUserMessage();
-      if (performance.now() <= programmaticScrollUntilRef.current) {
-        return;
-      }
+      // ⚠️ 这里**不能**用"程序滚动时间窗"来提前 return。流式期间每来一批 token 就会调一次
+      // scrollViewportToBottom，而它每次都把时间窗往后推 700ms —— 于是整个流式过程时间窗永远
+      // 有效，用户往上滚的那次 scroll 事件被直接吞掉，autoFollow 永远保持 true，页面被死死钉在
+      // 底部（用户报告的"流式时滑不上去"就是这个）。
+      //
+      // 正确的判据本来就不需要"谁触发的"：
+      //   · 在底部  → 一定该跟随（无论这次滚动来自谁）；
+      //   · 不在底部 + 有真实手势（wheel/touch/键盘/指针）→ 用户明确要看历史，立刻停住跟随。
+      // 程序滚动不会产生手势，所以不会误伤。
       if (isViewportNearBottom(viewport)) {
         autoFollowLatestAssistantRef.current = true;
         userScrollIntentRef.current = false;
@@ -491,7 +493,6 @@ export function MessageList({
       top: targetTop,
       behavior: "smooth",
     });
-    programmaticScrollUntilRef.current = performance.now() + 700;
   }
 
   async function submitUserMessageEdit(messageId: string, content: string) {
