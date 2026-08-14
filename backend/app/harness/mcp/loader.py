@@ -16,6 +16,9 @@ from app.harness.mcp.config import SlotFlowMcpConfig
 
 _logger = logging.getLogger(__name__)
 
+# 打在 `tool.metadata` 上的来源 server 标签(见 `_tag_server`)。
+MCP_SERVER_METADATA_KEY = "slotflow_mcp_server"
+
 
 class McpToolProvider(Protocol):
     """Source that converts MCP server config into LangChain tools."""
@@ -99,7 +102,7 @@ class MultiServerMcpToolProvider:
                         )
                         continue
 
-                    loaded_tools.extend(server_tools)
+                    loaded_tools.extend(_tag_server(server_tools, server.name))
                     if server.stateful:
                         stack.push_async_callback(server_stack.aclose)
             except BaseException:
@@ -162,6 +165,22 @@ def _first_exception_leaf(error: BaseException) -> BaseException:
     if isinstance(error, BaseExceptionGroup) and error.exceptions:
         return _first_exception_leaf(error.exceptions[0])
     return error
+
+
+def _tag_server(tools: list[BaseTool], server_name: str) -> list[BaseTool]:
+    """给刚加载的 MCP 工具打上来源 server 标签。
+
+    `langchain_mcp_adapters` 只把 MCP 自己的 annotations/_meta 写进 `tool.metadata`,不写
+    server 名(见其 `convert_mcp_tool_to_langchain_tool`)。而我们是**逐 server** 加载的,
+    这里正好知道来源。下游的 `mcp_docs` / `mcp_call` 代理靠这个标签把工具归到对应 server,
+    否则同名工具跨 server 撞车时无法区分。
+    """
+
+    for tool in tools:
+        metadata = dict(tool.metadata) if isinstance(tool.metadata, dict) else {}
+        metadata[MCP_SERVER_METADATA_KEY] = server_name
+        tool.metadata = metadata
+    return tools
 
 
 def _exception_summary(error: BaseException) -> str:

@@ -160,6 +160,21 @@ class UploadedFileContext(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ThreadContextUsageRecord(BaseModel):
+    """一个 thread 当前的上下文占用（给 composer 的 token 仪表用）。
+
+    值取自最近一次**产生过可用指标**的 run（`run_metrics` 表），所以刷新页面或切走再切回来，
+    仪表都还在——之前它只活在前端内存里，一刷新就整个消失。
+    """
+
+    thread_id: str
+    run_id: str | None = None
+    context_tokens: int | None = None
+    context_window_tokens: int | None = None
+    context_input_budget_tokens: int | None = None
+    context_window_source: str | None = None
+
+
 class RunRecord(BaseModel):
     """thread 里的一次执行记录。
 

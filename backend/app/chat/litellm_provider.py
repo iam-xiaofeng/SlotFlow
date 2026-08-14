@@ -210,8 +210,8 @@ def repair_streamed_tool_call_names(message: BaseMessage) -> BaseMessage:
     Some OpenAI-compatible relays (observed live: grok-4.5 via a custom relay) stream tool-call
     deltas such that langchain's parsed ``message.tool_calls[i]["name"]`` comes out EMPTY while the
     raw ``additional_kwargs["tool_calls"][j]["function"]["name"]`` still carries the real name. An
-    empty name makes the ToolNode unable to dispatch the call — it fails closed and every tool
-    (core ones too) surfaces as ``tool_not_activated``/unknown. Recover the name by matching call
+    empty name makes the ToolNode unable to dispatch the call — it fails closed and the call
+    surfaces as an unknown-tool error. Recover the name by matching call
     ``id`` (with a strict positional fallback only when every name is missing and counts line up),
     so the model's intended tool actually runs. No-op when names are already present.
     """

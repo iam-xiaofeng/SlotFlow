@@ -9,7 +9,7 @@
 - ``env_overrides``:该条 live 运行前临时设置的环境变量(例如把压缩阈值调小以复现 Issue-2);
 - ``stub`` / ``stub_note``:离线(offline)模式下用来喂给评测器的**虚构** transcript
   ——用于确定性地证明"评测器 + 打分 + 报表"这条流水线本身工作正常。其中 1、10 号
-  故意造成红项,演示评测器能真的抓到 Issue-1(tool_not_activated)与思考回灌膨胀。
+  故意造成红项,演示评测器能真的抓到工具执行失败与思考回灌膨胀。
 
   ⚠️ 离线 transcript 是人工编造的,不代表真实 agent 行为;真实分数请看 ``--live``。
 """
@@ -43,16 +43,16 @@ def tool(name: str, content: str, cid: str, *, status: str = "success") -> ToolM
 
 
 # 供 offline 演示"红项"用的两个失败样式:
-#   1) 直接调用未激活的工作工具 -> ToolNode 回 tool_not_activated(正是 Issue-1 的现象)
+#   1) 工具调用本身失败 -> ToolNode 回 tool_execution_error(status=error)
 #   2) assistant 消息把思考回灌进 content/reasoning_content(正是要防的膨胀)
-_NOT_ACTIVATED = "tool_not_activated: workspace_read 未激活,请先通过 workspace_tools 载入"
+_TOOL_FAILED = "tool_execution_error: workspace_read 打不开 README.md(FileNotFoundError)"
 
 
 DATASET: list[dict[str, Any]] = [
-    # 1) 读文件 —— 故意演示 Issue-1 失败:模型跳过 loader 直接调用被 gate 的工具
+    # 1) 读文件 —— 故意演示一次工具执行失败(红项),验证评测器抓得到
     {
         "id": "read-file",
-        "tags": ["tool", "issue-1"],
+        "tags": ["tool", "tool-error"],
         "desc": "读取工作区文件并回答标题",
         "turns": ["读取工作区里的 README.md,告诉我它的一级标题是什么。"],
         "evaluators": [
@@ -61,18 +61,18 @@ DATASET: list[dict[str, Any]] = [
             ("no_reasoning_bloat", {}),
         ],
         "reference": "标题是 SlotFlow。",
-        "stub_note": "故意演示 Issue-1:直接调 workspace_read → tool_not_activated(红)",
+        "stub_note": "故意演示红项:workspace_read 执行失败(status=error)",
         "stub": [
             human("读取工作区里的 README.md,告诉我它的一级标题是什么。"),
             ai(tools=[call("workspace_read", {"path": "README.md"}, "c1")]),
-            tool("workspace_read", _NOT_ACTIVATED, "c1", status="error"),
+            tool("workspace_read", _TOOL_FAILED, "c1", status="error"),
             ai("抱歉,我没能读到这个文件。"),
         ],
     },
-    # 2) 写文件 —— 正确走 loader→promote→work 两步链(绿)
+    # 2) 写文件 —— 工具集恒定后一步直达,不再有 loader 往返(绿)
     {
         "id": "write-file",
-        "tags": ["tool", "issue-1"],
+        "tags": ["tool"],
         "desc": "在工作区新建文件并写入",
         "turns": ["在工作区新建 notes.txt,写入一行:hello slotflow。"],
         "evaluators": [
@@ -82,17 +82,15 @@ DATASET: list[dict[str, Any]] = [
         "reference": "已创建 notes.txt。",
         "stub": [
             human("在工作区新建 notes.txt,写入一行:hello slotflow。"),
-            ai(tools=[call("workspace_tools", {"names": ["workspace_write"]}, "c1")]),
-            tool("workspace_tools", "已激活工具:workspace_write", "c1"),
-            ai(tools=[call("workspace_write", {"path": "notes.txt", "content": "hello slotflow"}, "c2")]),
-            tool("workspace_write", "写入成功:notes.txt (13 bytes)", "c2"),
+            ai(tools=[call("workspace_write", {"path": "notes.txt", "content": "hello slotflow"}, "c1")]),
+            tool("workspace_write", "写入成功:notes.txt (13 bytes)", "c1"),
             ai("已创建 notes.txt,写入了一行 hello slotflow。"),
         ],
     },
     # 3) 联网检索(绿)
     {
         "id": "web-search",
-        "tags": ["tool", "issue-1", "network"],
+        "tags": ["tool", "network"],
         "desc": "联网检索事实",
         "turns": ["联网搜索一下:LangGraph 的 checkpointer 是做什么的?给我一句话结论。"],
         "evaluators": [

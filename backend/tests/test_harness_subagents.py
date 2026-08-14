@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import tool
 
 from app.chat.models import ChatStreamRequest
 from app.chat.run_config import build_run_config
@@ -17,9 +19,14 @@ from app.harness.middleware import SlotFlowMiddlewareConfig
 from app.harness.subagents import (
     SlotFlowSubagentConfig,
     SlotFlowSubagentProfile,
+    build_subagent_catalog_prompt,
     build_subagent_tools,
     default_role_catalog,
 )
+from app.harness.mcp import SlotFlowMcpConfig, SlotFlowMcpServerConfig
+import app.harness.subagents.tools as subagent_tools_module
+from app.harness.subagents.tools import filter_tools_for_spaces, resolve_subagent_tool_spaces
+import app.harness.tools.registry as registry_module
 from app.harness.tools.registry import build_harness_tools
 
 
@@ -63,7 +70,7 @@ def test_subagent_tools_are_registered_only_when_feature_is_enabled() -> None:
             model=model,
             run_context=ultra_bundle.context,
         )
-    ] == ["subagent_list", "subagent_role_search", "task_tool"]
+    ] == ["task_tool"]  # 父 agent 侧只剩一个委派入口
 
 
 @pytest.mark.asyncio
@@ -100,79 +107,49 @@ async def test_task_tool_runs_real_subagent_and_returns_result() -> None:
     assert result["source"] == "slotflow_subagent_task_tool"
 
 
-@pytest.mark.asyncio
-async def test_subagent_list_returns_profile_capabilities() -> None:
-    bundle = _bundle(mode="ultra")
-    tool = next(
-        item
-        for item in build_subagent_tools(
-            features=features_from_run_context(bundle.context),
-            model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
-            run_context=bundle.context,
-        )
-        if item.name == "subagent_list"
+def test_subagent_catalog_is_static_prompt_text_not_a_tool_call() -> None:
+    """曾经的 subagent_list 返回值是恒定的,那就该进可缓存的 system 前缀而不是换一次往返。"""
+
+    catalog = build_subagent_catalog_prompt()
+
+    assert catalog.startswith("<slotflow-subagents>")
+    for name in ("researcher", "analyst", "planner", "coder", "reviewer", "writer", "browser"):
+        assert f"- {name}: " in catalog
+    # 只有画像与领域摘要,绝不含任何角色模板正文。
+    assert "engineering: " in catalog
+    assert "Agent Personality" not in catalog
+
+
+def test_browser_is_the_only_vertical_profile_and_owns_the_browser_space() -> None:
+    """浏览器自动化(schema 多 × 轮数长 × 产物脏)收进垂类子代理;搜索类工具保持直绑。"""
+
+    spaces, error = resolve_subagent_tool_spaces("browser", None)
+
+    assert error is None
+    assert spaces == ("browser", "workspace")
+    assert resolve_subagent_tool_spaces("researcher", None)[0] == (
+        "network",
+        "documents",
+        "workspace",
     )
 
-    result = json.loads(await tool.ainvoke({}))
 
-    assert result["source"] == "slotflow_subagent_list"
-    assert [item["name"] for item in result["subagents"]] == [
-        "researcher",
-        "analyst",
-        "planner",
-        "coder",
-        "reviewer",
-        "writer",
-    ]
-    assert result["subagents"][0]["capabilities"]
-    assert result["subagents"][0]["output_contract"]
-    assert [item["slug"] for item in result["role_domains"]] == [
-        "engineering",
-        "design",
-        "finance",
-        "market",
-        "sales",
-        "product",
-        "research",
-        "specialized",
-    ]
-    assert result["role_domains"][0]["role_count"] > 0
-    for domain in result["role_domains"]:
-        assert "prompt" not in domain
-        for role in domain["sample_roles"]:
-            assert "prompt" not in role
+def test_role_query_resolves_a_role_without_a_search_round_trip() -> None:
+    """subagent_role_search 的检索下沉进 task_tool:自由文本直接解析到唯一角色模板。"""
+
+    catalog = default_role_catalog()
+
+    role = catalog.resolve(role_query="penetration tester security audit")
+
+    assert role is not None
+    assert "penetration" in role.id or "security" in role.division
+    assert role.prompt
 
 
-@pytest.mark.asyncio
-async def test_subagent_role_search_returns_short_metadata_only() -> None:
-    bundle = _bundle(mode="ultra")
-    tool = next(
-        item
-        for item in build_subagent_tools(
-            features=features_from_run_context(bundle.context),
-            model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
-            run_context=bundle.context,
-        )
-        if item.name == "subagent_role_search"
-    )
+def test_role_query_that_matches_nothing_injects_no_role_template() -> None:
+    """查不到就不塞:一段不相干的领域指令比没有指令更容易把子代理带偏。"""
 
-    result = json.loads(
-        await tool.ainvoke(
-            {
-                "query": "frontend react component",
-                "domain": "engineering",
-                "max_results": 3,
-            }
-        )
-    )
-
-    assert result["source"] == "slotflow_subagent_role_search"
-    assert result["roles"]
-    assert len(result["roles"]) <= 3
-    assert any(role["id"] == "engineering-frontend-developer" for role in result["roles"])
-    for role in result["roles"]:
-        assert role["domain"] == "engineering"
-        assert "prompt" not in role
+    assert default_role_catalog().resolve(role_query="zzzzz-not-a-profession") is None
 
 
 def test_default_role_catalog_resolves_one_concrete_agency_role() -> None:
@@ -189,19 +166,6 @@ def test_default_role_catalog_resolves_one_concrete_agency_role() -> None:
     assert role.domain == "engineering"
     assert role.path == "engineering/engineering-frontend-developer.md"
     assert "Frontend Developer Agent Personality" in role.prompt
-
-
-def test_role_search_falls_back_to_domain_shortlist_for_non_matching_query() -> None:
-    result = default_role_catalog().search(
-        query="做一个地图交互界面",
-        domain="engineering",
-        max_results=4,
-    )
-
-    assert result
-    assert len(result) <= 4
-    assert all(role["domain"] == "engineering" for role in result)
-    assert all("prompt" not in role for role in result)
 
 
 @pytest.mark.asyncio
@@ -290,7 +254,7 @@ async def test_task_tool_injects_selected_agency_role(monkeypatch) -> None:
     assert "Selected role: Frontend Developer" in payload["messages"][0]["content"]
 
 
-def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary() -> None:
+def test_build_harness_tools_exposes_exactly_one_delegation_tool() -> None:
     bundle = _bundle(mode="ultra")
     tools = build_harness_tools(
         features=features_from_run_context(bundle.context),
@@ -299,9 +263,8 @@ def test_build_harness_tools_adds_task_tool_between_workspace_and_mcp_boundary()
     )
 
     names = [tool.name for tool in tools]
-    # Subagent tools sit after the workspace/customization tools (the task-tool boundary).
-    assert {"subagent_list", "subagent_role_search", "task_tool"} <= set(names)
-    assert names.index("subagent_role_search") < names.index("task_tool")
+    assert "task_tool" in names
+    assert not [name for name in names if name.startswith("subagent_")]
     assert names.index("task_tool") > names.index("artifact_write")
     assert names.index("task_tool") > names.index("skill_match")
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
@@ -356,7 +319,7 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
         run_context=bundle.context,
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试 subagent 的助手。",
-            middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
+            middleware_config=SlotFlowMiddlewareConfig(),
         ),
     )
 
@@ -379,3 +342,52 @@ async def test_harness_graph_can_execute_subagent_task_tool() -> None:
     assert tool_result["expected_output"] == "返回工具顺序和风险"
     assert tool_result["result"] == "真实 coder 子任务结果。"
     assert result["messages"][-1].content == "子任务结果已经收到。"
+
+
+@tool("browser_navigate")
+def _fake_browser_tool(url: str) -> str:
+    """Fake playwright-style browser tool."""
+
+    return url
+
+
+class _FakeBrowserMcpProvider:
+    def load_tools(self, config):
+        return [_fake_browser_tool]
+
+
+def test_browser_tools_reach_the_browser_subagent_but_never_the_parent() -> None:
+    """browser_* 只在子代理的环境工具里出现;父 agent 一个都不绑。"""
+
+    bundle = _bundle(mode="ultra")
+    captured: dict[str, Any] = {}
+    original = subagent_tools_module.build_subagent_tools
+
+    def spy(**kwargs):
+        captured["environment_tools"] = list(kwargs.get("environment_tools") or [])
+        return original(**kwargs)
+
+    registry_module.build_subagent_tools = spy
+    try:
+        tools = build_harness_tools(
+            features=features_from_run_context(bundle.context),
+            model=ToolAwareFakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
+            run_context=bundle.context,
+            mcp_config=SlotFlowMcpConfig(
+                enabled=True,
+                servers=(SlotFlowMcpServerConfig(name="playwright"),),
+            ),
+            mcp_tool_provider=_FakeBrowserMcpProvider(),
+        )
+    finally:
+        registry_module.build_subagent_tools = original
+
+    parent_names = {tool.name for tool in tools}
+    assert "browser_navigate" not in parent_names
+    assert "task_tool" in parent_names
+
+    child_tools = captured["environment_tools"]
+    assert "browser_navigate" in {tool.name for tool in child_tools}
+    # browser 画像默认拿到的正是 browser + workspace 两个空间。
+    granted = filter_tools_for_spaces(child_tools, resolve_subagent_tool_spaces("browser", None)[0])
+    assert "browser_navigate" in {tool.name for tool in granted}

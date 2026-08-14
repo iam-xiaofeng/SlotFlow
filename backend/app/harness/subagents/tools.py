@@ -22,6 +22,7 @@ from app.harness.subagents.role_catalog import (
     SubagentRoleTemplate,
     default_role_catalog,
 )
+from app.harness.tool_spaces import tool_space_for_name as shared_tool_space_for_name
 from app.harness.utils import message_role, model_supports_tools
 
 
@@ -38,6 +39,7 @@ class SubagentTaskResult:
     result: str
     domain: str = ""
     role_name: str = ""
+    role_query: str = ""
     role_id: str = ""
     role_path: str = ""
     tool_spaces: tuple[str, ...] = ()
@@ -54,6 +56,7 @@ class SubagentTaskResult:
                 "priority": self.priority,
                 "domain": self.domain,
                 "role_name": self.role_name,
+                "role_query": self.role_query,
                 "role_id": self.role_id,
                 "role_path": self.role_path,
                 "tool_spaces": list(self.tool_spaces),
@@ -97,26 +100,6 @@ class SubagentTaskRunner:
 
         return list(self._profiles.values())
 
-    def role_domains(self) -> list[dict[str, Any]]:
-        """Return compact Layer-2 role-domain summaries."""
-
-        return self._role_catalog.domains()
-
-    def search_roles(
-        self,
-        *,
-        query: str = "",
-        domain: str = "",
-        max_results: int = 8,
-    ) -> list[dict[str, Any]]:
-        """Return compact Layer-3 role candidates without prompt bodies."""
-
-        return self._role_catalog.search(
-            query=query,
-            domain=domain,
-            max_results=max_results,
-        )
-
     async def arun(
         self,
         *,
@@ -127,6 +110,7 @@ class SubagentTaskRunner:
         priority: str = "normal",
         domain: str = "",
         role_name: str = "",
+        role_query: str = "",
         tool_spaces: list[str] | None = None,
         runnable_config: RunnableConfig | None = None,
     ) -> SubagentTaskResult:
@@ -137,6 +121,7 @@ class SubagentTaskRunner:
         clean_priority = normalize_priority(priority)
         clean_domain = domain.strip()
         clean_role_name = role_name.strip()
+        clean_role_query = role_query.strip()
         resolved_tool_spaces, tool_space_error = resolve_subagent_tool_spaces(
             clean_agent_name,
             tool_spaces,
@@ -151,6 +136,7 @@ class SubagentTaskRunner:
                 priority=clean_priority,
                 domain=clean_domain,
                 role_name=clean_role_name,
+                role_query=clean_role_query,
                 tool_spaces=resolved_tool_spaces,
                 result=tool_space_error,
             )
@@ -165,6 +151,7 @@ class SubagentTaskRunner:
                 priority=clean_priority,
                 domain=clean_domain,
                 role_name=clean_role_name,
+                role_query=clean_role_query,
                 result="task must not be blank",
             )
 
@@ -179,12 +166,14 @@ class SubagentTaskRunner:
                 priority=clean_priority,
                 domain=clean_domain,
                 role_name=clean_role_name,
+                role_query=clean_role_query,
                 result=f"unknown subagent: {clean_agent_name}",
             )
 
         role_template = self._role_catalog.resolve(
             domain=clean_domain,
             role_name=clean_role_name,
+            role_query=clean_role_query,
             task=clean_task,
             context=clean_context,
             expected_output=clean_expected_output,
@@ -199,6 +188,7 @@ class SubagentTaskRunner:
                 priority=clean_priority,
                 domain=clean_domain,
                 role_name=clean_role_name,
+                role_query=clean_role_query,
                 result=f"unknown subagent role: {clean_role_name}",
             )
 
@@ -236,8 +226,6 @@ class SubagentTaskRunner:
                     artifact_discovery_enabled=False,
                     summarization_enabled=False,
                     long_term_memory_enabled=False,
-                    skills_preflight_enabled=False,
-                    clarify_gate_enabled=False,
                     uploads_enabled=False,
                     todo_enabled=False,
                     subagent_limit_enabled=False,
@@ -275,6 +263,7 @@ class SubagentTaskRunner:
                 priority=clean_priority,
                 domain=clean_domain,
                 role_name=clean_role_name,
+                role_query=clean_role_query,
                 role_id=role_template.id if role_template is not None else "",
                 role_path=role_template.path if role_template is not None else "",
                 result=f"subagent execution failed: {exc.__class__.__name__}: {exc}",
@@ -289,6 +278,7 @@ class SubagentTaskRunner:
             priority=clean_priority,
             domain=clean_domain,
             role_name=role_template.name if role_template is not None else clean_role_name,
+            role_query=clean_role_query,
             role_id=role_template.id if role_template is not None else "",
             role_path=role_template.path if role_template is not None else "",
             tool_spaces=resolved_tool_spaces,
@@ -312,6 +302,9 @@ DEFAULT_PROFILE_TOOL_SPACES = {
     "coder": ("workspace", "sandbox"),
     "reviewer": ("workspace", "sandbox"),
     "writer": ("workspace", "documents"),
+    # browser 垂类的默认工具面就是它存在的理由:整组 browser_* 归它,外加 workspace 用来
+    # 落地抓到的内容。父 agent 不绑这些。
+    "browser": ("browser", "workspace"),
 }
 
 
@@ -332,21 +325,9 @@ def resolve_subagent_tool_spaces(
 
 
 def tool_space_for_name(name: str) -> str | None:
-    if name.startswith(("workspace_", "artifact_", "context_archive_")):
-        return "workspace"
-    if name.startswith(("sandbox_", "docker_")):
-        return "sandbox"
-    if name.startswith("browser_"):
-        return "browser"
-    if name.startswith(("web_", "agent_reach_")):
-        return "network"
-    if name.startswith(("convert_", "markitdown_", "view_image")):
-        return "documents"
-    if name.startswith(("skill_", "find_skills", "search_skill", "mcp_")):
-        return "extensions"
-    if name.startswith("memory_"):
-        return "memory"
-    return None
+    """子代理工具面按空间切分;分类规则与主 agent 共用一份实现。"""
+
+    return shared_tool_space_for_name(name)
 
 
 def filter_tools_for_spaces(
@@ -366,7 +347,14 @@ def build_subagent_tools(
     environment_tools: Sequence[BaseTool] = (),
     role_catalog: SubagentRoleCatalog | None = None,
 ) -> list[BaseTool]:
-    """Build subagent tools only when the current run enables subagents."""
+    """Build subagent tools only when the current run enables subagents.
+
+    父 agent 只拿到 **一个** 工具 `task_tool`。曾经的 `subagent_list` / `subagent_role_search`
+    已经删掉:前者的内容是静态的(画像 + 领域),现在直接写进 system prompt 随前缀一起被缓存
+    (`build_subagent_catalog_prompt`);后者的检索下沉成 `task_tool` 的 `role_query` 参数,由
+    宿主在本地角色库里匹配。父 agent 侧因此从 "3 个 schema + 最多 2 次工具往返" 变成
+    "1 个 schema + 0 次往返"——少的那两跳正是模型最容易半途放弃的地方。
+    """
 
     if not features.subagent_enabled:
         return []
@@ -383,60 +371,6 @@ def build_subagent_tools(
     if not runner.has_profiles():
         return []
 
-    @tool("subagent_list")
-    async def subagent_list() -> str:
-        """List enabled SlotFlow subagent profiles and their capabilities."""
-
-        return json.dumps(
-            {
-                "source": "slotflow_subagent_list",
-                "subagents": [
-                    {
-                        "name": profile.name,
-                        "description": profile.description,
-                        "capabilities": list(profile.capabilities),
-                        "output_contract": profile.output_contract,
-                    }
-                    for profile in runner.profiles()
-                ],
-                "role_domains": runner.role_domains(),
-                "usage": (
-                    "Use agent_name for the Layer-1 functional role. Pass a Layer-2 "
-                    "domain to task_tool when domain guidance is enough. When a precise "
-                    "Layer-3 role matters, call subagent_role_search(query, domain) for "
-                    "a short candidate list, then pass role_name to task_tool."
-                ),
-            },
-            ensure_ascii=False,
-        )
-
-    @tool("subagent_role_search")
-    async def subagent_role_search(
-        query: str = "",
-        domain: str = "",
-        max_results: int = 8,
-    ) -> str:
-        """Search the file-backed Layer-3 subagent role catalog.
-
-        Returns compact role metadata only, never full role prompts. Use this after
-        subagent_list when a delegated task needs a precise professional role_name.
-        """
-
-        return json.dumps(
-            {
-                "source": "slotflow_subagent_role_search",
-                "query": query,
-                "domain": domain,
-                "roles": runner.search_roles(
-                    query=query,
-                    domain=domain,
-                    max_results=max_results,
-                ),
-                "usage": "Pass a returned role name or id as task_tool.role_name.",
-            },
-            ensure_ascii=False,
-        )
-
     @tool("task_tool")
     async def task_tool(
         agent_name: str,
@@ -446,14 +380,26 @@ def build_subagent_tools(
         priority: str = "normal",
         domain: str = "",
         role_name: str = "",
+        role_query: str = "",
         tool_spaces: list[str] | None = None,
         config: RunnableConfig | None = None,
     ) -> str:
-        """Delegate a focused task to a named SlotFlow subagent profile.
+        """Delegate one focused task to a SlotFlow sub-agent (see <slotflow-subagents>).
 
-        `agent_name` selects the Layer-1 functional subagent. `domain` optionally selects
-        a Layer-2 role category, and `role_name` optionally selects one concrete Layer-3
-        agency role template to inject into only this child run.
+        `agent_name` picks the functional sub-agent and is the only required choice; the
+        catalog is in your system prompt, so no lookup call is needed first. Use
+        agent_name='browser' for anything requiring a real browser — those tools exist only
+        inside that child.
+
+        Optional targeting, in increasing precision: `domain` scopes SlotFlow's local role
+        library to one area, `role_query` is free text matched against that library, and
+        `role_name` names one role exactly. The library is written in English, so query it in
+        English by profession ('penetration tester', 'tax accountant', 'technical writer') even
+        when the conversation is in another language. At most ONE role template is injected into
+        the child; leave all three empty when the functional sub-agent alone is enough.
+
+        The child runs in its own context and returns only its result — that isolation is the
+        point for long, noisy work. It has no todo, clarification, memory, or nested delegation.
         """
 
         result = await runner.arun(
@@ -464,12 +410,51 @@ def build_subagent_tools(
             priority=priority,
             domain=domain,
             role_name=role_name,
+            role_query=role_query,
             tool_spaces=tool_spaces,
             runnable_config=config,
         )
         return result.to_json()
 
-    return [subagent_list, subagent_role_search, task_tool]
+    return [task_tool]
+
+
+def build_subagent_catalog_prompt(config: SlotFlowSubagentConfig | None = None) -> str:
+    """把子代理目录渲染成**静态** system prompt 段。
+
+    内容(画像名/描述/输出契约 + 角色领域)在一次运行里不会变,所以它属于可缓存前缀,而不是
+    一个每次都要调用的工具。这正是删掉 `subagent_list` 的理由:一个返回值恒定的工具,等于
+    用一次往返换一段本来就能白送的文本。
+    """
+
+    resolved = config or SlotFlowSubagentConfig()
+    profiles = resolved.enabled_profiles()
+    if not profiles:
+        return ""
+
+    lines = [
+        "<slotflow-subagents>",
+        "Sub-agents you can delegate to with task_tool(agent_name=...):",
+    ]
+    for profile in profiles:
+        capabilities = ", ".join(profile.capabilities) if profile.capabilities else "general"
+        lines.append(
+            f"- {profile.name}: {profile.description} | capabilities: {capabilities} "
+            f"| returns: {profile.output_contract}"
+        )
+    domains = default_role_catalog().domains()
+    if domains:
+        lines.append(
+            "Role library domains for the optional `domain` argument. When you know the "
+            "profession, pass `role_query` in ENGLISH instead (the library is English-only), "
+            "e.g. 'penetration tester', 'tax accountant':"
+        )
+        for domain in domains:
+            lines.append(
+                f"- {domain['slug']}: {domain['description']} ({domain['role_count']} roles)"
+            )
+    lines.append("</slotflow-subagents>")
+    return "\n".join(lines)
 
 
 def build_subagent_system_prompt(

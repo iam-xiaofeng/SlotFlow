@@ -17,7 +17,13 @@ from app.chat.runtime import (
     load_runtime_config_from_env,
 )
 from app.harness.config import SlotFlowHarnessConfig
-from app.harness.skills import build_skills_prompt, load_enabled_skills, parse_skill_file
+from app.harness.skills import (
+    build_skills_prompt,
+    load_enabled_skills,
+    parse_skill_file,
+    read_skill,
+)
+from app.harness.tools.customization import build_customization_tools
 
 
 def _write_skill(
@@ -170,3 +176,117 @@ def test_runtime_passes_skills_config_to_harness(monkeypatch, tmp_path: Path) ->
         skills_root=tmp_path,
         enabled_skills={"alpha"},
     )
+
+
+def _write_skill_with_body(root: Path, name: str, *, body: str, extra: dict[str, str] | None = None) -> Path:
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {name} skill\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+    for relative, content in (extra or {}).items():
+        target = skill_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return skill_dir
+
+
+def test_skills_prompt_lists_only_the_catalog_and_points_at_skill_read(tmp_path: Path) -> None:
+    """system 前缀里只有目录:正文按需经 skill_read 进上下文,装再多 Skill 也不撑前缀。"""
+
+    _write_skill_with_body(tmp_path, "alpha", body="# Alpha\n第一步:绝密操作流程")
+    prompt = build_skills_prompt(load_enabled_skills(skills_root=tmp_path))
+
+    assert "- alpha: alpha skill" in prompt
+    assert "skill_read(name)" in prompt
+    assert "绝密操作流程" not in prompt  # 正文绝不进 system 前缀
+
+
+def test_read_skill_returns_body_without_frontmatter_and_lists_bundled_files(tmp_path: Path) -> None:
+    _write_skill_with_body(
+        tmp_path,
+        "report",
+        body="# Report\n1. 先跑 scripts/build.py\n2. 再写结论",
+        extra={"scripts/build.py": "print('hi')\n", "reference/style.md": "# style\n"},
+    )
+
+    result = read_skill(skills_root=tmp_path, name="report")
+
+    assert result["skill"] == "report"
+    assert result["content"].startswith("# Report")
+    assert "name: report" not in result["content"]  # frontmatter 已剥掉
+    assert result["truncated"] is False
+    assert {entry["path"] for entry in result["files"]} == {"scripts/build.py", "reference/style.md"}
+
+
+def test_read_skill_reads_a_bundled_file_and_refuses_to_escape_the_skill_dir(tmp_path: Path) -> None:
+    _write_skill_with_body(tmp_path, "report", body="body", extra={"reference/style.md": "# style guide\n"})
+    (tmp_path / "secret.txt").write_text("do not leak", encoding="utf-8")
+
+    inside = read_skill(skills_root=tmp_path, name="report", path="reference/style.md")
+    assert inside["content"].strip() == "# style guide"
+
+    escaped = read_skill(skills_root=tmp_path, name="report", path="../secret.txt")
+    assert escaped["error"] == "path_outside_skill_dir"
+    assert "do not leak" not in str(escaped)
+
+
+def test_read_skill_truncates_long_bodies_with_a_resume_offset(tmp_path: Path) -> None:
+    _write_skill_with_body(tmp_path, "long", body="x" * 500)
+
+    first = read_skill(skills_root=tmp_path, name="long", max_chars=100)
+
+    assert first["truncated"] is True
+    assert len(first["content"]) == 100
+    rest = read_skill(skills_root=tmp_path, name="long", offset=first["next_offset"], max_chars=1000)
+    assert rest["truncated"] is False
+    assert first["content"] + rest["content"] == "x" * 500 + "\n"
+
+
+def test_read_skill_reports_an_unknown_name_with_candidates(tmp_path: Path) -> None:
+    _write_skill_with_body(tmp_path, "alpha", body="body")
+
+    result = read_skill(skills_root=tmp_path, name="alpah")
+
+    assert result["error"] == "skill_not_found"
+    assert result["available_skills"] == ["alpha"]
+
+
+def test_skill_read_tool_records_the_skill_in_the_compaction_ledger(tmp_path: Path) -> None:
+    """读过的 Skill 要进 used_skills 台账:压缩会折叠正文,台账让模型知道该重读谁。"""
+
+    _write_skill_with_body(tmp_path, "alpha", body="# Alpha\nstep one")
+    tool = next(
+        item
+        for item in build_customization_tools(
+            skills_root=tmp_path,
+            skills_config_store=None,
+            mcp_config_store=None,
+        )
+        if item.name == "skill_read"
+    )
+
+    command = tool.invoke({"name": "alpha", "id": "call-1", "type": "tool_call", "args": {"name": "alpha"}})
+
+    assert command.update["used_skills"] == ["alpha"]
+    message = command.update["messages"][0]
+    assert message.status == "success"
+    assert "step one" in message.content
+
+
+def test_skill_read_tool_does_not_record_a_failed_read(tmp_path: Path) -> None:
+    tool = next(
+        item
+        for item in build_customization_tools(
+            skills_root=tmp_path,
+            skills_config_store=None,
+            mcp_config_store=None,
+        )
+        if item.name == "skill_read"
+    )
+
+    command = tool.invoke({"name": "missing", "id": "call-2", "type": "tool_call", "args": {"name": "missing"}})
+
+    assert "used_skills" not in command.update
+    assert command.update["messages"][0].status == "error"

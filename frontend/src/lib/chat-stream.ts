@@ -235,6 +235,27 @@ export async function listThreadMessages(
   });
 }
 
+// 只作为 getThreadContextUsage 的返回类型在本模块内使用,不对外导出(knip 死代码检查会抓)。
+type ThreadContextUsageRecord = {
+  thread_id: string;
+  run_id: string | null;
+  context_tokens: number | null;
+  context_window_tokens: number | null;
+  context_input_budget_tokens: number | null;
+  context_window_source: string | null;
+};
+
+export async function getThreadContextUsage(
+  threadId: string,
+  options: ChatRequestOptions = {},
+): Promise<ThreadContextUsageRecord> {
+  return requestJson<ThreadContextUsageRecord>(
+    "load context usage failed",
+    `/api/chat/threads/${threadId}/context-usage`,
+    { signal: options.signal },
+  );
+}
+
 export async function uploadFile(
   file: File,
   options: ChatRequestOptions = {},

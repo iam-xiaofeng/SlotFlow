@@ -3274,6 +3274,8 @@ Subagent 的 `task_tool.tool_spaces` 最多接受三个 workspace/sandbox/browse
 
 **根因 B：渐进式工具空间把日常工具全 gate 在 loader 后。** 原设计 gate 了所有非核心工具(workspace/artifact/web/sandbox/memory/documents),模型必须先调用 `*_tools` loader 才能用,弱/中转模型很少这么做。改为**默认只 gate `browser,extensions`**(schema 最臃肿、最少用),其余日常工具默认进入 `initial_names`、turn-1 直接可调用;`SLOTFLOW_TOOL_SPACES_GATED` 可调。loader→promote→可调用链本身正确(确定性测试 `test_gated_space_becomes_callable_after_loader_promotes_it` 固定)。`tool_spaces.py::assemble_tool_spaces(gated_spaces=...)` + `builder.py` 读 env + prompt 只列被 gate 的空间。
 
+> ⚠️ **后续(2026-08-14,§59)**:整套渐进式披露连同 `SLOTFLOW_TOOL_SPACES_GATED` 已删除——把 provider 前缀缓存算进来之后它是净负收益。本段保留作为历史记录。
+
 **根因 C：context epoch 每轮被重置 → 反复摘要 → keep 窗口滑走旧消息。** epoch 的 `source_signature/source_message_count` 在 `make_summarization_node` 用**原始** `state["messages"]` 计算,而 `pre_model` 用 `repair_dangling_tool_calls(messages)` 复算——历史里只要有 dangling tool call,两者视图不同 → 签名必失配 → epoch 每轮重置 → summarization 每轮重触发 → 固定"keep 最近 20 条"窗口滑动,把更早的用户轮次(如"A")挤掉。修复:两处都用 repaired 视图;投影逻辑抽成纯函数 `graph.py::project_with_context_epoch` 并测试(`test_context_epoch_is_reused_across_appended_turns_not_reset` / `..._resets_when_prefix_signature_changes`)。
 
 **旁证:issue3(注释 DeepSeek 仍可用)非代码 bug**——磁盘 `.env` 第 12 行 `DEEPSEEK_API_KEY=` 当时并未真正注释,进程据此加载;真正注释保存后完整 `make kill && make dev` 即消失。
@@ -3526,3 +3528,316 @@ demo 关键路径 `sandbox_exec` 的执行模型，测试面大、回归风险�
 是这轮最容易出洞的地方。因此:点开头的目录(`.uploads`/`.slotflow_offload`/`.playwright-mcp`)一律拒绝,
 `work/` scratch 不可见,`..` 直接拒,且 `resolve_path` 的越界防护仍是第二道闸。
 `test_workspace_layout.py` 把这些边界逐条钉住。
+
+## 59. 迭代 50(2026-08-14):工具集恒定 —— 删掉渐进式披露,Skills 改两段式,MCP 收敛成两个工具
+
+### 59.0 起因:一句话——**动态改工具 schema 会打掉提示词缓存**
+
+上一版(§26 引入、后来退成"部分 gate")的思路是:把重工具空间藏在 `*_tools` 加载器后面,模型要用时
+先调加载器把工具"提升"进 `promoted_tool_names`,下一步才能真正调用。省 schema token。
+
+问题出在**省错了地方**。provider 的可缓存前缀是 `tools → system → messages`,三段里 `tools` 排在最前:
+
+- 模型一旦调 `extensions_tools(["skill_match"])`,下一步 `bind_tools` 的工具数组就变了 →
+  **整段前缀缓存从第一个 token 起全部作废**,不只是变化的那部分;
+- 而为了让模型知道能激活什么,加载器又把整个空间的工具目录(名字 + 前 120 字描述)内联进了自己的
+  `description` —— 这段 description 本身就在 `tools` 里。MCP 接多了之后,"省下的 schema"以
+  description 的形式原样回到前缀,净收益进一步变负;
+- 代价还不止一次:一次会话里模型可能激活好几轮,每轮赔一次全量缓存。
+
+结论写成一句话:**模型侧的工具数量必须收敛,MCP / Skills / 角色的数量才可以发散。** 收敛的手段不是
+"动态加载",而是"换一种承载":重工具交给子代理,发散内容交给"代理函数 + 本地检索"。
+
+### 59.1 三处改动
+
+**① 工具集恒定(删掉渐进式披露)。** `_GraphInputs` 现在在构造时 `bind_tools` 一次,`agent` 节点每步复用同一个
+bound model;`make_tools_node` 不再有 `active()` 失败关闭。整套 `assemble_tool_spaces` / `_build_space_loader` /
+`promoted_tool_names` / `tool_not_activated` / `SLOTFLOW_TOOL_SPACES_GATED` 删干净,`tool_spaces.py` 只留分类
+函数(子代理切工具面还要用,原先 `subagents/tools.py` 里那份重复实现也合并过来了)。主 agent 工具面因此是
+**31 个、全程一个字节不变**。
+
+**② Skills 两段式:目录进前缀,正文进工具结果。** 之前 system prompt 里只有 `name: description`,正文唯一的
+读取路径是 `sandbox_exec` 去 `cat /skills/<name>/SKILL.md` —— 也就是说 **Docker 不可用时 Skills 正文完全读不到**,
+而 SlotFlow 本来就有一整套 Docker 降级路径。把 Skill 绑死在容器上是设计错误。现在:
+
+- `skill_read(name)`(`skills/reader.py`,宿主侧纯文件读)把 SKILL.md 正文作为**工具结果**返回;
+  `path=` 读附属文件(带目录穿越防护),`offset=` 续读被 `MAX_SKILL_READ_CHARS` 截断的长正文;
+- 正文**刻意不做**超长卸载。`steps/tool_output_offload.py` 只处理 `ToolMessage`,而 `skill_read` 返回
+  `Command`,天然绕过——把操作步骤挪去文件再让模型回读是本末倒置,模型需要的就是这段文本在上下文里;
+- 每次成功读取写进 `used_skills` 通道(reducer 见 ③)。
+
+**③ MCP 收敛成 `mcp_docs` + `mcp_call`。** `mcp/proxy.py`:手册由已连接 server 的工具定义**自动生成**
+(名字/描述/参数名/类型/必填),`mcp_docs` 在本地做关键词检索(不走大模型、不发网络),`mcp_call` 在宿主侧直调
+真实工具。接 1 个还是 100 个 server,模型看到的都是这两个。
+
+### 59.2 为什么 MCP 不放进沙箱(评估过,否掉了)
+
+"在容器里跑 MCP 客户端、让模型写代码调用"是另一种常见解法,在 SlotFlow 落不了地:
+
+- 默认 MCP 是 playwright(stdio + pnpm + Chromium),`python:3.12` 容器里根本起不来;
+- MCP 凭证要注入容器;
+- MCP 从此依赖 Docker——**这正是 ② 刚修掉的错误**,不能一边修一边再犯一次。
+
+宿主侧我们已经持有 `MultiServerMcpToolProvider` 的活 session(§45 的 stateful 会话),直接 `ainvoke` 即可。
+
+一个必须补的细节:`langchain_mcp_adapters` 转换出的工具**不记来源 server**(只写 MCP 自己的
+annotations/`_meta`,见其 `convert_mcp_tool_to_langchain_tool`)。而我们是逐 server 加载的,所以在
+`loader._tag_server` 里补一个 `slotflow_mcp_server` 标签——否则两个 server 出现同名工具时无法区分。
+
+### 59.3 垂类子代理:只开 browser,判据是什么
+
+用户最初的想法是"把重工具都改成垂类子代理,比如上网搜索"。**上网搜索被否掉了**,判据写死成三条乘积:
+`schema 数 × 交互轮数 × 中间产物脏度`。
+
+| | schema 数 | 典型轮数 | 中间产物 | 结论 |
+|---|---|---|---|---|
+| `web_search` / `web_fetch` | 2 | 1 | 结果要被父 agent 直接引用带链接 | **直绑** |
+| playwright `browser_*` | ~21 | 10+ | 每轮回大段 DOM/快照 | **垂类子代理** |
+| MCP(用户自加) | 不定,可能上百 | 1-3 | 结构化数据 | **通用代理函数** |
+
+给 web 搜索开子代理 = 多跑一遍 system prompt、结果被二次转述、来源链接大概率丢失,纯亏。子代理的价值是
+隔离"脏且长"的上下文,不是隔离"小而常用"的 schema。
+
+**降级路径**:子代理未启用时(flash 模式)`browser_*` 回落进 MCP 代理,而不是整块消失——否则 flash 用户
+会突然打不开浏览器,这是静默的能力回退。
+
+### 59.4 Subagent:3 个工具 → 1 个,2 次往返 → 0 次
+
+角色库 235 份 md 其实**从来没有撑爆上下文**(父 agent 只看到 8 个领域摘要),真正的问题是**选择成本**:
+模型要依次决定 `agent_name`(6 选 1)→ `domain`(8 选 1)→ 可能还要 `subagent_role_search` → `role_name`,
+三层选择两次工具往返,很容易在第二跳就放弃。所以:
+
+- `subagent_list` 删掉 —— 它的返回值在一次运行里**恒定**,那就该是可缓存的 system 文本
+  (`build_subagent_catalog_prompt` → `<slotflow-subagents>`),而不是拿一次往返去换一段本来白送的文本;
+- `subagent_role_search` 删掉 —— 检索下沉成 `task_tool(role_query=...)`,宿主在本地角色库里匹配。
+
+顺带修掉一个**假阳性**:原来的 `_score_role` 用**子串**匹配,`"not"` 会命中 `annotation`、`"can"` 会命中
+`candidate`,在 235 份角色里几乎任何查询都能捞到东西。而 `role_query` 的命中结果会被整段(最长 12000 字符)
+注入子代理 system prompt,假阳性代价极高。改成:**整词**匹配 + 停用词 + 身份字段(id/name/division)权重 3、
+描述权重 1,且 `role_query` 这条路径要求至少一次身份命中(`_ROLE_QUERY_MIN_SCORE=3`)。**查不到就不注入**——
+让子代理用功能画像跑,好过被一段错的领域指令带偏。
+
+### 59.5 顺手修掉的真 bug:skills preflight 一直在污染 system 前缀
+
+`state.py` 的注释早就写清楚了"易变内容必须走尾部 `model_input_suffix`,保住 `tools→system→messages` 前缀
+逐字节稳定",长期记忆和 todo 也确实搬走了——**唯独 skills preflight 还留在 `system_prompt` 通道里**
+(`pre_model` 里 `system_sections = [base, format_preflight(...)]`)。而 preflight 每个新用户轮都会重算,
+其 JSON 里就带着用户原话:于是**每开一个新话题就自己打掉一次前缀缓存**。这轮一并搬到尾部。
+
+`test_system_prefix_stays_byte_identical_across_turns` 钉住两件事:两轮之间 system 文本完全相同,
+且两轮的 preflight 确实各不相同地出现在尾部(反过来证明它留在 system 里必然会改写前缀)。
+
+### 59.6 压缩台账:压缩之后不能"忘了自己在用 Skill"
+
+Skill 正文是几 KB 的工具结果,压缩时会被整段折叠。折叠之后模型只知道"聊过很多",不知道自己已经在按某个
+Skill 的流程做事——这正是一次运行半途悄悄放弃 Skill 的方式。所以做了**双保险**:
+
+1. 摘要 prompt 里注入台账(`SKILLS_LEDGER_PROMPT_BLOCK`),让摘要模型把它写进摘要正文;
+2. 压缩视图末尾再追加一条**确定性**的 `<slotflow-skills-ledger>`(`SKILLS_LEDGER_MESSAGE`),不依赖模型听话,
+   明确写清:要么 `skill_read(name)` 重读,要么 `context_archive_search/read` 回溯原始工具结果,**不要凭记忆
+   复述 Skill 的流程**。
+
+台账消息只进 `llm_input_messages` / `context_epoch`,不进 `messages` 通道——既不会流式泄漏给用户,也不会被
+checkpointer 回放(与 §29 / 2026-07-15 泄漏修复同一条边界)。
+
+`used_skills` 通道复用了原先 `promoted_tool_names` 的有序并集 reducer(改名 `merge_ordered_unique`):模型完全
+可以在一步里并行 `skill_read` 多个 Skill,每个返回一个 `Command(update=...)`,没有 reducer 就会撞
+`INVALID_CONCURRENT_GRAPH_UPDATE`。
+
+### 59.7 验证
+
+- `uv run pytest -q -k "not live"`:475 通过。
+- 新增/改写的行为钉子:
+  - `test_context_runtime.py::test_every_bound_tool_is_callable_without_any_activation_step`(没有激活步)、
+    `::test_used_skills_reducer_is_ordered_union`、`::test_concurrent_skill_reads_do_not_raise_invalid_update`;
+  - `test_harness_skills.py`:正文不进 system 前缀、frontmatter 剥离、附属文件清单、目录穿越拒绝、
+    截断续读、台账只记成功读取;
+  - `test_harness_mcp.py`:原生 schema 不绑而 `mcp_docs`/`mcp_call` 绑、手册→调用闭环、瞎编工具名被拒、
+    被过滤的宿主执行工具不能从手册后门暴露、browser 在无子代理时回落进代理、loader 打 server 标签;
+  - `test_harness_subagents.py`:工具面只剩 `task_tool`、目录是静态文本、`role_query` 直接解析、
+    查不到不注入、`browser_*` 只出现在子代理环境工具里;
+  - `test_harness_graph_integration.py`:压缩台账进 epoch、system 前缀跨轮逐字节相同。
+- **尚未做真机验证**:以上都是单测/集成测。缓存命中率的真实收益(前缀稳定 → provider cache hit)需要在真机
+  多轮会话里用 `run.usage` 的 cache 字段核对,这一步还没跑。
+
+## 60. 迭代 51(2026-08-14 续):砍掉两个"替模型做决定"的前置步骤 + 澄清丢思考的真 bug
+
+### 60.0 删 skills preflight
+
+§59 把它从 system 前缀搬到了尾部,这一轮直接删掉整个 `steps/skills_preflight.py`。理由是它已经没有
+存在价值了:
+
+- §59 之后 system 前缀里本来就有 Skills 目录(`name: description`)+ 一句"看着相关就 `skill_read`",
+  preflight 那段"STRONG hint: PREFER a Skill" 是在重复同一件事;
+- 它的实际内容不是目录,是 `find_relevant_skills()` 的返回 JSON,**第一个字段就是用户这一轮的原话**
+  (实测 1283 字符)。哪怕搬到尾部,也是每步重发、永不复用的净开销;
+- 它跑在 `prepare` 节点,**卡在第一个 token 之前**要扫一遍磁盘上所有 SKILL.md(有缓存,但冷启动仍是
+  首字延迟)。
+
+删掉之后 Skills 链路是纯粹的两段式:目录常驻前缀 → 模型自己判断 → `skill_read` 取正文。
+
+### 60.1 删强制澄清门(`triage_gate`)
+
+同一类问题:它在**每个新用户轮**额外跑一次模型,去判断"这个请求够不够清楚"。代价是每轮的首字延迟,
+收益是偶尔拦住一个含糊请求——而模型自己判断该不该问(`<slotflow-operating-procedure>` 里已经写了
+"blocking 的模糊点先调 `ask_clarification`")已经够用,强制门更多是在打断本来就明确的请求。
+
+删除范围:`steps/clarify_gate.py`、`triage_gate` 节点与两条边、`clarify_gate_enabled` 开关、
+`SLOTFLOW_CLARIFY_GATE` 环境变量、`tests/test_clarify_gate.py`。**HITL 本身没删**:自愿路径
+(`ask_clarification` 工具 → `interrupt()` → `Command(resume=...)`)完整保留,它才是真正在用的那条。
+
+拓扑因此少一个节点:`START → prepare → pre_model → 压缩 → agent → post_model → …`。
+
+### 60.2 ⭐ 真 bug:澄清消息把本轮思考内容整个丢了
+
+**现象**(用户真机报告):模型思考了一大段之后决定问澄清问题,思考框里的内容"找不回了",看起来像
+resume 之后模型从头重新思考。
+
+**先澄清一个误解**:模型**没有**重新思考。`interrupt()` 是在 `ask_clarification` 工具里调的,图暂停在
+`tools` 节点;`agent` 节点早已执行完、它产出的 AIMessage(含 `reasoning_content` 和 tool_calls)已经写进
+`messages` 并进了 checkpoint。resume 只重放 `tools` 节点,不会重跑 `agent`。**图状态里一直是全的。**
+
+**真正的根因在另一个存储**:聊天库(前端读的那个 SQLite)和 graph checkpoint 是两套。
+`chat/routes.py` 在 `clarification.requested` 上落库时只写了:
+
+```python
+metadata={"source": "clarification", "clarification": dict(event.data)}
+```
+
+**没有 `reasoning_content`**。而紧接着 `clarification_saved = True` 会让 `run.finished` 的正常保存被跳过
+(`if content and not clarification_saved`)——**所以这一次写入是这条 assistant 消息唯一的落库点**。
+
+于是表现极具迷惑性:直播时前端内存里的 `ChatUiMessage` 还带着 `reasoningContent`,思考框正常显示;
+一旦刷新页面或切走再切回,消息按 DB 记录重建(`messageRecordToUiMessage` → `parseReasoningContent(metadata)`),
+思考框就整块消失。看起来像"模型重新想了一遍",实际是**这段文本从来没被存下来**。
+
+**修复**:澄清落库改用与正常路径同一个 `assistant_message_metadata(...)`,把已累积的
+`select_assistant_reasoning_content(snapshot / streamed)` 一起写进去,再补上 `source`/`clarification` 两个字段。
+钉子:`test_stream_run_persists_clarification_request` 现在会先吐一段 reasoning delta,再断言它进了 metadata。
+
+### 60.3 前端:流式期间滚不上去(粘底逻辑被自己的时间窗吞掉)
+
+**现象**:流式输出时想往上滚看历史,页面被立刻拽回底部。
+
+**根因**在 `message-list.tsx` 的 `handleScroll`:
+
+```ts
+if (performance.now() <= programmaticScrollUntilRef.current) return;   // ← 元凶
+```
+
+这个"程序滚动时间窗"本意是别把自己触发的滚动误判成用户意图。但流式期间**每来一批 token 就调一次
+`scrollViewportToBottom`,而它每次都把窗口往后推 700ms** —— 于是整个流式过程窗口永远有效,用户往上滚
+产生的那次 scroll 事件被直接 return 掉,`autoFollowLatestAssistantRef` 永远保持 true。
+
+**修复**:删掉时间窗(以及现在无人读的 `programmaticScrollUntilRef`)。判据本来就不需要知道"谁触发的":
+
+- **在底部** → 一定该跟随(不管这次滚动来自谁);
+- **不在底部 + 有真实手势**(wheel/touchmove/pointerdown/keydown)→ 用户明确要看历史,立刻停住。
+
+程序滚动不产生手势,所以不会误伤——这比时间窗既简单又准确。
+
+### 60.4 前端:思考框也要粘底
+
+思考框是消息气泡内部的 `max-h-[30rem] overflow-y-auto` 小盒子,之前**完全没有自动滚动**:思考流式增长时
+它停在顶部,用户得手动往下拖才看得到最新一步。抽了 `hooks/use-stick-to-bottom.ts` 复用同一套语义
+(在底就跟、往上滚就停、滚回底再恢复),挂到思考框的滚动容器上。它和主列表**不共享滚动容器**,所以必须
+各挂一份,但判据是同一套。
+
+### 60.4b 前端第二处:澄清框把思考框吃掉了(和 60.2 是**两个独立 bug**)
+
+修完 60.2 的持久化之后,界面上思考框**还是**不出现。原因在 `message-list-parts.tsx`:
+
+```ts
+const assistantContent = isUser || clarification ? { thought: "", body: content } : split(...)
+const shouldShowThinkingCard = !isUser && !clarification && (...)
+```
+
+**只要这条消息带 clarification,就强制清空 thought、不渲染思考卡片。** 即使数据齐全也永远显示不出来。
+
+两个 bug 症状完全一样("思考框没了"),所以只修一个看不出任何变化——这也是最初判断成"模型重新思考了"
+的原因之一。现在澄清消息按模型实际发生的顺序渲染:**思考框 → 工具时间线 → 澄清卡片**,一轮澄清对话
+在页面上是「思考框 → 澄清框 → 思考框」的连续记录。
+
+顺带记一条**排查判据**:模型侧完全没有报错,本身就是线索。喂给模型的历史走 checkpointer
+(新一轮只送一条 user message,历史由 checkpointer 提供),那条路上 reasoning 一直是全的;真丢在模型侧
+DeepSeek 会直接回 `reasoning_content ... must be passed back`。所以"无报错 + 界面缺失" ⇒ 问题只可能在
+**聊天库/渲染**这一侧,不在模型链路上。
+
+### 60.5 验证
+
+- 后端 `uv run pytest -q -k "not live"`:461 通过;`ruff` 全绿。
+- 前端 `pnpm typecheck` + `pnpm build` 通过。
+- **未做真机验证**:滚动行为和澄清刷新后的思考框需要真机点一遍才算数,这一步还没跑。
+
+## 61. 迭代 52(2026-08-14 续):"上下文占用显示偏少" —— 仪表没骗人,历史真的丢了
+
+### 61.0 报告与第一反应
+
+用户:"聊了很久、模型干了很多活,上下文占用才显示 7k,是不是不准?"
+
+7k 这个数量级本身就是线索:它差不多正好等于 **system prompt + 31 个工具 schema + 一两条消息**。
+也就是说模型看到的可能真的就是一个近乎空白的会话。所以先别改显示,去读真实数据。
+
+### 61.1 证据:`run_metrics` 里的 message_count 时间线
+
+`run_metrics` 表一直在写每次模型调用的 `input_tokens` / `message_count`。同一个 thread 按时间排:
+
+| 时间 | message_count | context_tokens |
+|---|---|---|
+| 04:07 | 5 → 22 | 4481 → 11323 |
+| 04:22 | 24 | 13132 |
+| 04:24 | 26 → 30 | 17164 → 24780 |
+| 04:27 | 32 | 25180 |
+| 04:29 | 34 → 38 | 25192 → 35856 |
+| **04:55** | **3** | **4349 → 6972** |
+
+历史在稳步增长,然后**一次性跌回 3 条**。这不是计量口径问题,是会话历史真的没了。
+
+### 61.2 根因:模型侧历史**只**来自 checkpointer,而默认 checkpointer 是内存的
+
+两件事叠在一起:
+
+1. `build_agent_input` 每轮**只送一条新的 user message**,历史完全由 checkpointer 提供
+   (`agent_adapter/streaming.py` 用 `bundle.config` 的 `thread_id` 恢复)。
+2. `SLOTFLOW_CHECKPOINTER_BACKEND` 默认是 `memory`(`InMemorySaver`,进程内),而 `make dev` 跑的是
+   `uvicorn --reload --reload-dir app`。
+
+于是:**每改一次后端代码触发热重载,所有会话的模型侧历史就被清空一次。** 本机 `checkpoints.sqlite3`
+的 mtime 停在 7 月 16 日就是旁证——它根本没被写过。
+
+更隐蔽的是**前端完全看不出来**:消息列表读的是聊天库 SQLite(另一套存储,§60.2 那张表),
+所以界面上依然是一长串对话,只有 token 仪表会露馅。用户看到的"数字偏少"其实是**唯一**暴露这个
+严重问题的信号。
+
+### 61.3 修复
+
+- **默认 checkpointer 改成落盘 sqlite**(`config.py` 默认值 + `.env` + `.env_example`)。
+  异步工厂 `create_async_checkpointer` → `create_sqlite_checkpointer` 早就实现好了,只是默认没用它。
+- 回归钉子 `test_conversation_history_survives_a_backend_restart_with_sqlite_checkpointer`:
+  用**两个独立的 saver 实例**指向同一个文件模拟重启,断言第二个进程仍能看到第一轮消息。
+
+### 61.4 顺带修掉的计量归因错误(用户自己也怀疑到了)
+
+`context_tokens` 原本取"最近一次成功调用的 prompt tokens"。但一次 run 里的模型调用不止主 agent:
+**压缩节点**会调一次模型做摘要,**`task_tool` 子代理**在工具内部整跑一张子图(它复用父 run 的
+callbacks,所以每次调用也落进同一个 collector)。这两类调用的 prompt 与会话窗口占用毫无关系——
+一轮里只要末尾跑了子代理或触发了压缩,仪表就会瞬间跌到一个不相干的小数字。
+
+改成**只认主 agent 节点、且不在任何工具内部**的那次调用,两个判据都来自 callback 本身:
+
+- `metadata["langgraph_node"] == "agent"` 排除压缩节点(它叫 `SlotFlowSummarizationMiddleware`);
+- `on_tool_start`/`on_tool_end` 维护的嵌套深度排除子代理——**子图的节点也叫 `agent`,光看节点名分不出来**,
+  但它必然是在某个工具调用内部开始的。
+
+没有任何主 agent 调用时(非 graph 场景/单测桩)退回旧行为,而不是让仪表直接消失。
+
+### 61.5 仪表本身也修了一处:刷新/切会话就空
+
+`run_metrics` 一直在写,但**没有任何读口**——所以 composer 的 token 仪表只在"本次页面会话真的跑过一轮"
+时才有数。新增只读端点 `GET /api/chat/threads/{id}/context-usage`(取最近一次量到过窗口的 run),
+前端在打开会话时补拉一次,失败不影响会话打开。
+
+### 61.6 验证
+
+- 后端 464 通过;`ruff` 全绿;前端 `pnpm typecheck` + `pnpm build` 通过。
+- **未做真机验证**:切到 sqlite 后端之后的多轮真机会话需要点一遍确认历史确实连续。

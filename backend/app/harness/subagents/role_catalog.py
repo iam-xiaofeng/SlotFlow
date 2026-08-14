@@ -51,6 +51,48 @@ class SubagentRoleTemplate(SubagentRoleSummary):
     truncated: bool = False
 
 
+# 角色打分的停用词:这些词在 235 份角色描述里几乎人人都有,留着只会把噪声抬成"命中"。
+_ROLE_STOPWORDS = frozenset(
+    {
+        "and",
+        "the",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "not",
+        "you",
+        "your",
+        "who",
+        "can",
+        "use",
+        "using",
+        "need",
+        "want",
+        "task",
+        "tasks",
+        "agent",
+        "agents",
+        "role",
+        "roles",
+        "help",
+        "make",
+        "new",
+        "all",
+        "any",
+        "one",
+        "work",
+        "team",
+        "expert",
+        "specialist",
+        "professional",
+    }
+)
+# `role_query` 走自由文本检索,必须至少命中一次 id/name/division(权重 3)才算数。
+# 描述里蹭到一个词就注入一份最长 12000 字符的角色模板,比不注入更容易把子代理带偏。
+_ROLE_QUERY_MIN_SCORE = 3
+
 DEFAULT_ROLE_DOMAINS: tuple[SubagentRoleDomain, ...] = (
     SubagentRoleDomain(
         slug="engineering",
@@ -133,7 +175,7 @@ class SubagentRoleCatalog:
         }
 
     def domains(self) -> list[dict[str, Any]]:
-        """Return compact Layer-2 domain summaries for subagent_list."""
+        """Return compact domain summaries for the static <slotflow-subagents> prompt section."""
 
         summaries: list[dict[str, Any]] = []
         for domain in self._domains:
@@ -164,54 +206,23 @@ class SubagentRoleCatalog:
             )
         return summaries
 
-    def search(
-        self,
-        *,
-        query: str = "",
-        domain: str = "",
-        max_results: int = 8,
-    ) -> list[dict[str, Any]]:
-        """Return a compact role shortlist without loading role prompt bodies."""
-
-        clean_domain = _normalize_key(domain)
-        candidates = self._candidate_roles(clean_domain) if clean_domain else list(self._roles)
-        safe_max_results = max(1, min(max_results, 20))
-        clean_query = query.strip()
-        if clean_query:
-            scored = [
-                (_score_role(role, clean_query), role)
-                for role in candidates
-            ]
-            matches = [item for item in scored if item[0] > 0]
-            matches.sort(key=lambda item: (-item[0], item[1].id))
-            roles = [role for _score, role in matches[:safe_max_results]]
-            if not roles:
-                roles = sorted(candidates, key=lambda role: role.id)[:safe_max_results]
-        else:
-            roles = sorted(candidates, key=lambda role: role.id)[:safe_max_results]
-
-        return [
-            {
-                "id": role.id,
-                "name": role.name,
-                "domain": role.domain,
-                "division": role.division,
-                "description": role.description,
-                "path": role.path,
-            }
-            for role in roles
-        ]
-
     def resolve(
         self,
         *,
         domain: str = "",
         role_name: str = "",
+        role_query: str = "",
         task: str = "",
         context: str = "",
         expected_output: str = "",
     ) -> SubagentRoleTemplate | None:
-        """Resolve a concrete role from explicit role name or domain-scoped task terms."""
+        """Resolve one concrete role from an explicit name, a free-text query, or the task.
+
+        三条路径按精度递减:``role_name`` 精确命名;``role_query`` 是模型给的自由文本
+        (例如 "penetration tester" / "税务筹划"),在这里做本地检索——这一步过去是
+        ``subagent_role_search`` 工具,现在下沉进来,省掉父 agent 的一次工具往返;都没有时
+        才退回按 ``domain`` + 任务文本打分。
+        """
 
         clean_domain = _normalize_key(domain)
         candidates = self._candidate_roles(clean_domain)
@@ -229,16 +240,36 @@ class SubagentRoleCatalog:
                     return self._load_template(role)
             return None
 
+        clean_role_query = role_query.strip()
+        if clean_role_query:
+            best = self._best_match(
+                candidates or self._roles,
+                clean_role_query,
+                min_score=_ROLE_QUERY_MIN_SCORE,
+            )
+            if best is not None:
+                return self._load_template(best)
+            # 查询词没命中任何角色时,不硬塞一个不相关的模板:让子代理用功能画像跑,
+            # 好过被一段错的领域指令带偏。
+            return None
+
         if not clean_domain:
             return None
 
-        scored = [
-            (_score_role(role, f"{task}\n{context}\n{expected_output}"), role)
-            for role in candidates
-        ]
+        best = self._best_match(candidates, f"{task}\n{context}\n{expected_output}")
+        return self._load_template(best) if best is not None else None
+
+    def _best_match(
+        self,
+        candidates: list[SubagentRoleSummary],
+        query: str,
+        *,
+        min_score: int = 1,
+    ) -> SubagentRoleSummary | None:
+        scored = [(_score_role(role, query), role) for role in candidates]
         scored.sort(key=lambda item: (-item[0], item[1].id))
-        if scored and scored[0][0] > 0:
-            return self._load_template(scored[0][1])
+        if scored and scored[0][0] >= min_score:
+            return scored[0][1]
         return None
 
     def _candidate_roles(self, clean_domain: str) -> list[SubagentRoleSummary]:
@@ -347,14 +378,26 @@ def _normalize_key(value: str) -> str:
 
 
 def _score_role(role: SubagentRoleSummary, query: str) -> int:
-    terms = set(re.findall(r"[a-z0-9]+", query.lower()))
+    """按**整词**打分:身份字段(id/name/division)权重 3,描述权重 1。
+
+    这里刻意不用子串匹配。子串匹配下 "not" 会命中 "annotation"、"can" 会命中 "candidate",
+    在 235 份角色里几乎任何查询都能捞到东西——而 `role_query` 的命中结果会被整段注入子代理的
+    system prompt,假阳性的代价很高。
+    """
+
+    terms = {
+        term
+        for term in re.findall(r"[a-z0-9]+", query.lower())
+        if len(term) >= 3 and term not in _ROLE_STOPWORDS
+    }
     if not terms:
         return 0
-    haystack = f"{role.id} {role.name} {role.description} {role.division}".lower()
+    identity = set(re.findall(r"[a-z0-9]+", f"{role.id} {role.name} {role.division}".lower()))
+    described = set(re.findall(r"[a-z0-9]+", role.description.lower()))
     score = 0
     for term in terms:
-        if len(term) < 3:
-            continue
-        if term in haystack:
+        if term in identity:
+            score += 3
+        elif term in described:
             score += 1
     return score

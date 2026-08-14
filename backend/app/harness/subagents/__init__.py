@@ -16,6 +16,7 @@ from app.harness.subagents.role_catalog import (
 from app.harness.subagents.tools import (
     SubagentTaskResult,
     SubagentTaskRunner,
+    build_subagent_catalog_prompt,
     build_subagent_tools,
 )
 
@@ -30,6 +31,7 @@ __all__ = [
     "SlotFlowSubagentProfile",
     "SubagentTaskResult",
     "SubagentTaskRunner",
+    "build_subagent_catalog_prompt",
     "build_subagent_tools",
     "default_role_catalog",
 ]

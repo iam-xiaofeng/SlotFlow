@@ -98,7 +98,7 @@ class SlotFlowRuntimeConfig:
     """
 
     model_name: str = DEFAULT_CHAT_MODEL
-    checkpointer_backend: CheckpointerBackend = "memory"
+    checkpointer_backend: CheckpointerBackend = "sqlite"
     checkpointer_sqlite_path: Path = DEFAULT_CHECKPOINTER_SQLITE_PATH
     checkpointer_postgres_uri: str | None = None
     checkpointer_setup: bool = True
@@ -124,7 +124,7 @@ def load_runtime_config_from_env() -> SlotFlowRuntimeConfig:
     model，不再让生产配置携带测试模式。
     """
 
-    checkpointer_backend = os.environ.get("SLOTFLOW_CHECKPOINTER_BACKEND", "memory").strip().lower()
+    checkpointer_backend = os.environ.get("SLOTFLOW_CHECKPOINTER_BACKEND", "sqlite").strip().lower()
     if checkpointer_backend not in ("none", "memory", "sqlite", "postgres"):
         raise ValueError(
             "SLOTFLOW_CHECKPOINTER_BACKEND must be 'none', 'memory', 'sqlite', "
@@ -211,14 +211,6 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
         ),
         proactive_memory_extraction_enabled=load_bool_from_env(
             "SLOTFLOW_PROACTIVE_MEMORY_EXTRACTION",
-            default=True,
-        ),
-        skills_preflight_enabled=load_bool_from_env(
-            "SLOTFLOW_SKILLS_PREFLIGHT_MIDDLEWARE",
-            default=True,
-        ),
-        clarify_gate_enabled=load_bool_from_env(
-            "SLOTFLOW_CLARIFY_GATE",
             default=True,
         ),
         uploads_enabled=load_bool_from_env(

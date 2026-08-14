@@ -71,9 +71,13 @@ def iter_skill_files(skills_root: Path) -> Iterable[Skill | None]:
 def build_skills_prompt(skills: list[Skill]) -> str:
     """把 enabled skills 转成 system prompt 片段。
 
+    这里**只列目录**(name + description),绝不放正文:正文由模型自己判断需要时用
+    `skill_read(name)` 以工具结果的形式读进来(见 `skills/reader.py`)。装几十个 Skill 时,
+    system 前缀的开销仍然只有每个 Skill 一行。
+
     只列顶层 skill:分组(索引)skill 的成员物理上位于 ``<索引>/dependencies/`` 下,不单独
-    进 prompt——否则一个十几技能的包会挤占模型注意力。成员内容由模型经索引 skill 的
-    ``## Member skills`` 指引按需读取。
+    进 prompt——否则一个十几技能的包会挤占模型注意力。成员由索引 skill 正文里的
+    ``## Member skills`` 指引,同样用 `skill_read` 按需读取。
     """
 
     top_level = top_level_skills(skills)
@@ -82,11 +86,17 @@ def build_skills_prompt(skills: list[Skill]) -> str:
 
     lines = [
         "<slotflow-skills>",
-        "Enabled skills for this run:",
+        "Installed Skills for this run — names and one-line descriptions ONLY, not their instructions:",
     ]
     for skill in top_level:
         lines.append(f"- {skill.name}: {skill.description}")
-    lines.append("</slotflow-skills>")
+    lines.extend(
+        [
+            "To use one, call skill_read(name) to load its full SKILL.md body as a tool result, "
+            "then follow those instructions. Never infer a Skill's procedure from its description.",
+            "</slotflow-skills>",
+        ]
+    )
     return "\n".join(lines)
 
 

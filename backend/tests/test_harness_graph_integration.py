@@ -97,7 +97,7 @@ async def test_harness_graph_turns_tool_exception_into_error_tool_message(tmp_pa
         harness_config=SlotFlowHarnessConfig(
             system_prompt="你是测试 tool safety 的助手。",
             sandbox_config=SlotFlowSandboxConfig(workspace_root=tmp_path / "workspace"),
-            middleware_config=SlotFlowMiddlewareConfig(clarify_gate_enabled=False),
+            middleware_config=SlotFlowMiddlewareConfig(),
         ),
     )
 
@@ -148,7 +148,6 @@ def _summarization_harness_config() -> SlotFlowHarnessConfig:
     return SlotFlowHarnessConfig(
         system_prompt="你是测试摘要链路的助手。",
         middleware_config=SlotFlowMiddlewareConfig(
-            clarify_gate_enabled=False,
             summarization_trigger_tokens=80,
             summarization_keep_messages=2,
             summarization_trim_tokens=4000,
@@ -265,8 +264,7 @@ async def test_recalled_memory_rides_trailing_suffix_not_system_prefix(tmp_path)
             system_prompt="你是测试缓存契约的助手。",
             memory_store=store,
             middleware_config=SlotFlowMiddlewareConfig(
-                clarify_gate_enabled=False,
-                proactive_memory_extraction_enabled=False,
+                    proactive_memory_extraction_enabled=False,
             ),
         ),
     )
@@ -287,3 +285,87 @@ async def test_recalled_memory_rides_trailing_suffix_not_system_prefix(tmp_path)
     assert "<system-reminder>" in str(batch[-1].content)
     assert marker in str(batch[-1].content)
     assert "蓝色" in str(batch[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_summarization_carries_a_skills_ledger_into_the_compacted_view() -> None:
+    """压缩会把 skill_read 的正文整段折叠掉,台账必须留在压缩视图里。
+
+    否则模型压缩之后只知道"聊过很多",不知道自己已经在按某个 Skill 的流程做事——
+    这正是一次运行半途悄悄放弃 Skill 的方式。台账是确定性追加的,不依赖摘要模型听话。
+    """
+
+    bundle = _summarization_bundle("thread_summ_ledger", "run_summ_ledger")
+    model = _RecordingFakeChatModel(responses=["摘要：早前对话已压缩", "收到", "再收到"])
+    graph = build_slotflow_harness_graph(
+        model=model,
+        run_context=bundle.context,
+        harness_config=_summarization_harness_config(),
+    )
+
+    result = await graph.ainvoke(
+        {
+            "messages": [*_seed_history(), {"role": "user", "content": "现在回答我的新问题"}],
+            "used_skills": ["pdf-report", "charting"],
+        },
+        config=bundle.config,
+        context=bundle.context,
+    )
+
+    epoch_text = "\n".join(
+        str(message.content) for message in (result.get("context_epoch") or {}).get("messages") or []
+    )
+    assert "<slotflow-skills-ledger>" in epoch_text
+    assert "pdf-report" in epoch_text and "charting" in epoch_text
+    assert "skill_read(name)" in epoch_text
+    assert "context_archive_search" in epoch_text
+
+
+@pytest.mark.asyncio
+async def test_system_prefix_stays_byte_identical_across_turns() -> None:
+    """`tools → system → messages` 前缀逐字节恒定,否则 provider 的前缀缓存每轮清零。
+
+    易变内容(skills preflight / 召回记忆 / todo 控制)一律走尾部 <system-reminder>。
+    2026-08-14 之前 preflight 拼在 system 段里,每个新用户轮都会改写前缀。
+    """
+
+    checkpointer = InMemorySaver()
+    model = _RecordingFakeChatModel(responses=["第一轮回答", "第二轮回答", "备用回答"])
+    config = SlotFlowHarnessConfig(
+        system_prompt="你是测试前缀稳定性的助手。",
+        middleware_config=SlotFlowMiddlewareConfig(),
+    )
+
+    first = _summarization_bundle("thread_prefix_stable", "run_prefix_1")
+    graph = build_slotflow_harness_graph(
+        model=model,
+        run_context=first.context,
+        harness_config=config,
+        checkpointer=checkpointer,
+    )
+    await graph.ainvoke(
+        {"messages": [{"role": "user", "content": "请分析这批股票数据并生成可视化报告"}]},
+        config=first.config,
+        context=first.context,
+    )
+
+    second = _summarization_bundle("thread_prefix_stable", "run_prefix_2")
+    await graph.ainvoke(
+        {"messages": [{"role": "user", "content": "再帮我研究一下这份专利文献的分析方法"}]},
+        config=second.config,
+        context=second.context,
+    )
+
+    system_texts = {
+        str(batch[0].content)
+        for batch in model.received
+        if batch and isinstance(batch[0], SystemMessage)
+    }
+    assert len(system_texts) == 1, "system 前缀在多轮之间发生了变化"
+    system_text = system_texts.pop()
+    # 易变内容一律不得出现在 system 段:2026-08-14 之前 skills preflight 就漏在这里,
+    # 它每个新用户轮都带着用户原话重算,等于每开一个新话题就自己打掉一次前缀缓存。
+    # (preflight 已整体删除;召回记忆走尾部的正面证据见
+    #  test_recalled_memory_rides_trailing_suffix_not_system_prefix。)
+    for volatile_marker in ("skills-preflight", "slotflow-long-term-memory>", "todo-enforcer"):
+        assert volatile_marker not in system_text, volatile_marker
