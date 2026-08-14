@@ -24,7 +24,7 @@ from app.harness.tools import ask_clarification_tool
 from app.harness.tools.registry import build_harness_tools
 import app.harness.tools.sandbox as sandbox_tools_module
 import app.harness.tools.workspace as workspace_tools_module
-from app.harness.tools.workspace import build_workspace_tools
+from app.harness.tools.workspace import MAX_WORKSPACE_READ_CHARS, build_workspace_tools
 
 
 class ToolAwareFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -240,7 +240,45 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
         "size_bytes": 5,
         "source": "slotflow_workspace",
         "metadata": {"format": "txt"},
+        # 每次读取都带分页信息:没截断时也要说清楚"就这么多",模型才知道不用再翻页。
+        "read": {"truncated": False, "total_chars": 5, "offset": 0},
     }
+
+
+def test_workspace_read_caps_long_files_and_offers_the_next_offset(tmp_path: Path) -> None:
+    """大文件必须截断并给出续读位置。
+
+    2026-08-14 真机:`workspace_read` 是整个工具集里唯一没有任何上限的读口(工具结果卸载
+    还刻意跳过它),一个 446KB 的上传文件被整段内联成 373K 字符的 ToolMessage(≈166k token),
+    之后模型每次都返回空响应,thread 被永久毒化。见 HARNESS_NOTES §63。
+    """
+
+    root = tmp_path / "workspace"
+    (root / "docs").mkdir(parents=True)
+    body = "x" * (MAX_WORKSPACE_READ_CHARS + 500)
+    (root / "docs" / "big.txt").write_text(body, encoding="utf-8")
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=False)
+        )
+    }
+
+    first = json.loads(tools["workspace_read"].invoke({"path": "docs/big.txt"}))
+    assert len(first["content"]) == MAX_WORKSPACE_READ_CHARS
+    assert first["read"]["truncated"] is True
+    assert first["read"]["total_chars"] == len(body)
+    assert first["read"]["next_offset"] == MAX_WORKSPACE_READ_CHARS
+
+    rest = json.loads(
+        tools["workspace_read"].invoke(
+            {"path": "docs/big.txt", "offset": first["read"]["next_offset"]}
+        )
+    )
+    assert len(rest["content"]) == 500
+    assert rest["read"]["truncated"] is False
+    # 两段拼起来必须正好是原文,截断不能丢字符。
+    assert first["content"] + rest["content"] == body
 
 
 def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> None:

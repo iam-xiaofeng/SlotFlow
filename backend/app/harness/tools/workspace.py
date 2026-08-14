@@ -18,6 +18,61 @@ from app.harness.sandbox.layout import (
 )
 from app.harness.sandbox.readers import plain_text_excerpt
 
+# 单次读取的字符上限，与 `skill_read` 的 `MAX_SKILL_READ_CHARS` 同一套语义。
+#
+# 2026-08-14 补：这条上限以前根本不存在。`workspace_read` 恰恰是系统提示点名让模型用来读
+# 上传文件的工具，而工具结果卸载（`tool_output_offload`）又把它列在跳过名单里（把工作区文件
+# 卸载成工作区文件是循环，跳过本身是对的）——于是它成了整个工具集里唯一没有任何上限的读口。
+# 真机后果：一个 446KB 的 index.html 被整段内联成 373K 字符的 ToolMessage（≈166k token），
+# 之后模型每次都返回空响应，且空响应进了 checkpoint，整个对话被永久毒化。见 HARNESS_NOTES §63。
+MAX_WORKSPACE_READ_CHARS = 24_000
+
+
+def _with_capped_content(
+    result: dict[str, Any], *, offset: int, path: str
+) -> dict[str, Any]:
+    """按字符上限截断读取结果，并告诉模型怎么续读。
+
+    只截断字符串正文。图片这类 `content` 是 base64 的结果一旦截断就彻底损坏，
+    但它们走的是 `_assert_readable_file` 的字节上限，不会到这里；这里仍按"非 str 不碰"处理。
+    """
+
+    content = result.get("content")
+    if not isinstance(content, str):
+        return result
+
+    total = len(content)
+    start = max(0, offset)
+    if start >= total:
+        result["content"] = ""
+        result["read"] = {
+            "truncated": False,
+            "total_chars": total,
+            "offset": start,
+            "note": "offset is past the end of this file",
+        }
+        return result
+
+    chunk = content[start : start + MAX_WORKSPACE_READ_CHARS]
+    end = start + len(chunk)
+    result["content"] = chunk
+    if end >= total:
+        result["read"] = {"truncated": False, "total_chars": total, "offset": start}
+        return result
+
+    result["read"] = {
+        "truncated": True,
+        "total_chars": total,
+        "offset": start,
+        "next_offset": end,
+        "note": (
+            f"{total - end} more characters remain. Continue with "
+            f"workspace_read('{path}', offset={end}), or use "
+            f"workspace_grep('<keyword>', '{path}') to jump to the relevant part."
+        ),
+    }
+    return result
+
 
 def build_workspace_tools(
     config: SlotFlowSandboxConfig | None = None,
@@ -54,10 +109,18 @@ def build_workspace_tools(
             ensure_ascii=False,
         )
 
-    def workspace_read(path: str) -> str:
-        """Read a text, markdown, docx, PDF, or image file from the workspace."""
+    def workspace_read(path: str, offset: int = 0) -> str:
+        """Read a text, markdown, docx, PDF, or image file from the workspace.
 
-        return json.dumps(workspace.read_file(path).model_dump(), ensure_ascii=False)
+        Long files are truncated; use `offset` to continue reading, or
+        `workspace_grep` to jump straight to the part you need.
+        """
+
+        result = workspace.read_file(path).model_dump()
+        return json.dumps(
+            _with_capped_content(result, offset=offset, path=path),
+            ensure_ascii=False,
+        )
 
     def workspace_tree(path: str = ".", max_depth: int = 3, max_entries: int = 120) -> str:
         """List workspace files recursively with depth and result limits."""
