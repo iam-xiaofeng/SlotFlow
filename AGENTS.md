@@ -86,18 +86,17 @@ LiteLLM-backed multi-provider reasoning streaming plus an optional OpenAI-compat
 **Graph topology (node + edge):**
 
 ```
-START → prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model → route
+START → prepare → pre_model → SlotFlowSummarizationMiddleware → agent → post_model → route
                                                                                                     ├─ tools → pre_model   (ReAct loop; ask_clarification interrupts here)
                                                                                                     ├─ pre_model           (todo enforcement retry)
                                                                                                     └─ finalize → END
 ```
 
-- `prepare` (once/turn, all `before_agent`): runtime summary, uploads, skills preflight,
-  long-term-memory retrieval, artifact baseline.
-- `triage_gate` (first step only, pro/ultra): triage → `interrupt()` clarification; resume
-  injects the answer verbatim as a `HumanMessage`.
-- `pre_model` (every step): dynamic todo-state reminder, dangling-tool-call repair, skills-preflight
-  system-context injection, long-term-memory system-prompt injection.
+- `prepare` (once/turn, all `before_agent`): runtime summary, uploads, long-term-memory
+  retrieval, artifact baseline.
+- `pre_model` (every step): dangling-tool-call repair + model-input projection, a byte-stable
+  system prefix, and ALL volatile context (recalled long-term memory, todo-state
+  reminder/enforcement) appended as one trailing `<system-reminder>` via `model_input_suffix`.
 - `SlotFlowSummarizationMiddleware` (own node so the projection layer filters its internal
   summary stream by node name): compresses history when token threshold exceeded.
 - `agent`: `model.bind_tools(tools)` call; reads `llm_input_messages` + `system_prompt`.
@@ -264,7 +263,19 @@ frontend/src/
   relays without changing the user-selected model used by the main agent/subagents. `make dev` limits
   Uvicorn reload watching to `backend/app`, so files written under `.slotflow/workspace` cannot restart
   an active stream. The adapter suppresses only LangGraph's exact Pregel v3 experimental warning at
-  the `astream_events` boundary; unrelated warnings remain visible.- **Context epochs, local usage metrics, and progressive tool spaces**: every runtime run attaches a local `RunUsageCollector`; `run.usage` is persisted in SQLite `run_metrics` without prompt/tool content. Missing provider cache fields are `unknown`, never a fabricated miss. Context windows resolve from `SLOTFLOW_MODEL_CONTEXT_WINDOWS_JSON`, then LiteLLM's bundled metadata, then a conservative local default; input budget reserves `SLOTFLOW_CONTEXT_RESERVE_TOKENS`. The resolved window rides `run.prepared` (`context_window_tokens`/`context_input_budget_tokens`/`context_window_source`) so the UI knows the ceiling before any tokens are counted, and `run.usage` adds `context_tokens` (the most recent successful call's prompt size = current window occupancy, not the per-run token sum) plus the same window fields; the composer renders a live `ComposerContextMeter` (used / max tokens) from these two events. Summarization now stores a model-facing `context_epoch` while canonical `messages` remain intact in the checkpointer. Within an epoch the frozen compacted prefix is reused and new messages append; `context_archive_search/read` can inspect only the current graph state's canonical history. The epoch's `source_signature`/`source_message_count` are computed over the SAME `repair_dangling_tool_calls(messages)` view that `pre_model` re-derives each turn (`harness/graph.py::project_with_context_epoch`); computing it over the raw messages instead made the signature mismatch whenever history held a dangling tool call, so the epoch reset every turn, summarization re-fired every turn, and the fixed keep-window slid until earlier user turns were dropped (the 2026-07-18 "compression forgets earlier messages" fix). **Progressive tool disclosure is now partial**: only the heaviest/rarest spaces are gated behind loaders — `SLOTFLOW_TOOL_SPACES_GATED` (default `browser,extensions`) — while everyday spaces (workspace/file, network, sandbox, documents, memory) are bound and directly callable on turn 1. Gating ALL spaces (the original design) made the model unable to reach any everyday tool without a loader round-trip it rarely performed, so every direct call failed `tool_not_activated`; the loader→promote→call path itself is correct (`test_gated_space_becomes_callable_after_loader_promotes_it` pins it). Gated tools still fail closed until their `*_tools` loader promotes them. The `promoted_tool_names` state channel carries an **order-preserving union reducer** (`harness/state.py::merge_promoted_tool_names`) because the model can emit several `*_tools` loader calls in one step — ToolNode runs them concurrently and each returns a `Command(update={"promoted_tool_names": ...})`; without a reducer LangGraph rejects the second write with `INVALID_CONCURRENT_GRAPH_UPDATE` ("Can receive only one value per step"). Union is additive and idempotent, matching the tool-space model. Child agents have no recursive delegation/todo/HITL and receive at most three explicit tool spaces, with `all/*` rejected. Context-overflow BadRequest errors progressively shrink only model input before configurable retries; transient pre-response transport/rate failures use configurable exponential retry, while mid-stream/tool side effects are never replayed.
+  the `astream_events` boundary; unrelated warnings remain visible.
+- **Checkpointer must be persistent (2026-08-14)**: the model's view of a conversation comes ONLY
+  from the checkpointer — `build_agent_input` sends just the new user message each turn and
+  `agent_adapter/streaming.py` restores history by `thread_id`. The default was `memory`
+  (`InMemorySaver`) while `make dev` runs `uvicorn --reload`, so **every backend edit wiped every
+  thread's model-side history**; the UI kept showing the full conversation because messages live in
+  a different store (chat SQLite), and the only visible symptom was the composer's token meter
+  dropping from ~36k back to ~7k (= system prompt + tool schemas + one message). Default is now
+  `sqlite` (`SLOTFLOW_CHECKPOINTER_BACKEND`, path `SLOTFLOW_CHECKPOINTER_SQLITE_PATH`);
+  `create_async_checkpointer` already supported it. Pinned by
+  `tests/test_context_runtime.py::test_conversation_history_survives_a_backend_restart_with_sqlite_checkpointer`,
+  which uses two independent savers over one file to simulate a restart. See `HARNESS_NOTES.md` §61.
+- **Context epochs, local usage metrics, and a constant tool set**: every runtime run attaches a local `RunUsageCollector`; `run.usage` is persisted in SQLite `run_metrics` without prompt/tool content. Missing provider cache fields are `unknown`, never a fabricated miss. Context windows resolve from `SLOTFLOW_MODEL_CONTEXT_WINDOWS_JSON`, then LiteLLM's bundled metadata, then a conservative local default; input budget reserves `SLOTFLOW_CONTEXT_RESERVE_TOKENS`. The resolved window rides `run.prepared` (`context_window_tokens`/`context_input_budget_tokens`/`context_window_source`) so the UI knows the ceiling before any tokens are counted, and `run.usage` adds `context_tokens` (the **main agent node's** most recent successful prompt size = current window occupancy — NOT the per-run sum, and NOT simply the last call, because the summarization node and `task_tool` sub-agents share the run's callbacks and their prompts are unrelated to window occupancy; sub-agent child graphs also name their node `agent`, so attribution additionally requires the call to start outside any tool, tracked via `on_tool_start`/`on_tool_end` depth) plus the same window fields; the composer renders a live `ComposerContextMeter` (used / max tokens) from these two events, and restores it on thread open from `GET /api/chat/threads/{id}/context-usage` (previously the meter only existed in page-session memory and vanished on reload). Summarization now stores a model-facing `context_epoch` while canonical `messages` remain intact in the checkpointer. Within an epoch the frozen compacted prefix is reused and new messages append; `context_archive_search/read` can inspect only the current graph state's canonical history. The epoch's `source_signature`/`source_message_count` are computed over the SAME `repair_dangling_tool_calls(messages)` view that `pre_model` re-derives each turn (`harness/graph.py::project_with_context_epoch`); computing it over the raw messages instead made the signature mismatch whenever history held a dangling tool call, so the epoch reset every turn, summarization re-fired every turn, and the fixed keep-window slid until earlier user turns were dropped (the 2026-07-18 "compression forgets earlier messages" fix). **Progressive tool disclosure was removed on 2026-08-14; the model-facing tool set is now CONSTANT for a whole run** (`harness/graph.py::_GraphInputs.bound_model` binds once). The provider's cacheable prefix is `tools → system → messages`, so every loader-driven `bind_tools` change invalidated the entire prefix cache from the first token — the `*_tools` loaders, `promoted_tool_names` promotion, and the `tool_not_activated` fail-closed gate all paid a full cache reset per activation, and the loader description re-inlined the whole gated catalog into that same prefix anyway. What replaced it: everyday tools bind directly; browser automation (playwright's ~21 `browser_*` schemas) is owned by the `browser` vertical sub-agent and reached through `task_tool`; MCP collapses to the fixed `mcp_docs`/`mcp_call` pair (below). `harness/tool_spaces.py` keeps only the classification function, which sub-agent tool-face filtering still needs. The system prefix is likewise byte-stable: `pre_model` writes `inputs.system_prompt` verbatim, and ALL volatile context — recalled long-term memory, per-step todo control — rides the trailing `model_input_suffix` `<system-reminder>`; `tests/test_harness_graph_integration.py::test_system_prefix_stays_byte_identical_across_turns` pins both halves. The surviving order-preserving union reducer (`harness/state.py::merge_ordered_unique`) now serves the `used_skills` compaction ledger, which has the same concurrent-write shape: several `skill_read` calls can land in one step and each returns a `Command(update={"used_skills": [...]})`, which without a reducer trips `INVALID_CONCURRENT_GRAPH_UPDATE`. Child agents have no recursive delegation/todo/HITL and receive at most three explicit tool spaces, with `all/*` rejected. Context-overflow BadRequest errors progressively shrink only model input before configurable retries; transient pre-response transport/rate failures use configurable exponential retry, while mid-stream/tool side effects are never replayed.
 - **Agent Reach host bridge**: Agent Reach is installed/refreshed by `bootstrap.sh` with `uv tool`
   and initialized from `~/.agent-reach`; it is deliberately **not** installed or mounted into the
   Docker sandbox. `harness/tools/agent_reach.py` is the only model-facing boundary. It exposes five
@@ -280,6 +291,25 @@ frontend/src/
   `agent_reach_status` before multi-platform research and never pretend unavailable channels work.
   Rerunning `bootstrap.sh` is the only repository-provided refresh path; there is intentionally no
   maintenance command/tool, and optional cookie/login channels remain user-controlled.
+- **MCP boundary: two fixed tools, never N schemas (2026-08-14)**: MCP tools are no longer bound
+  individually. `harness/mcp/proxy.py` exposes exactly `mcp_docs(query, server)` and
+  `mcp_call(server, tool, arguments)` regardless of how many servers are configured, so the model's
+  tool array — and therefore the provider's cacheable prefix — does not change when a user adds a
+  server. `mcp_docs` searches a manual generated from the live tool definitions (name, description,
+  argument names/types/required), purely locally: no model call, no network. `mcp_call` invokes the
+  real tool host-side through the already-open `MultiServerMcpToolProvider` session; unknown
+  server/tool names return a structured error pointing back at `mcp_docs` instead of failing the
+  run, and oversized results are truncated with an explicit note. `MCP_SERVER_METADATA_KEY`
+  (`slotflow_mcp_server`) is stamped by the loader during its per-server load because
+  `langchain_mcp_adapters` records only MCP annotations/`_meta`, not the origin server — without it
+  same-named tools from different servers are indistinguishable. Unsafe host-execution tools are
+  filtered before the proxy is built, so they cannot reappear through the manual. The alternative
+  design (run MCP clients inside the Docker sandbox and let the model write code) was rejected for
+  SlotFlow specifically: the default server is playwright (stdio + pnpm + Chromium, which does not
+  run in `python:3.12`), it would require injecting MCP credentials into the container, and it would
+  make MCP depend on Docker. `build_mcp_status_prompt(..., proxy_available=...)` reflects whether
+  the pair was actually bound — describing a tool that is not bound is how a model gets told to call
+  something that does not exist.
 - **Built-in Playwright MCP**: `chat.runtime.config.build_playwright_mcp_server()` appends a
   protected/pinned `playwright` stdio preset by default. It launches the pnpm-locked upstream MCP
   through `frontend/scripts/playwright-mcp.mjs`; that silent fixed launcher resolves the matching
@@ -442,30 +472,33 @@ frontend/src/
   enough or `memory_list` is needed, then after work decide whether `memory_save`/`memory_update`/
   `memory_delete` is warranted for durable preferences/profile/project context. For non-trivial
   tasks: clarify first via
-  `ask_clarification` (interactive picker, not plain-text questions), `skill_match` before
-  specialized work, then (gated on `subagent_enabled`) split INDEPENDENT parts to `task_tool`
-  sub-agents. When role fit matters, the prompt tells the model to call `subagent_list` first,
-  choose a Layer-1 functional `agent_name`, and usually pass only a Layer-2 `domain` into
-  `task_tool`. If a precise professional role matters, it calls `subagent_role_search(query,
-  domain)` for a short metadata-only Layer-3 shortlist, then passes one returned `role_name`/id into
-  `task_tool`; the full role prompt is loaded only inside that delegated child.
+  `ask_clarification` (interactive picker, not plain-text questions), `skill_match` +
+  `skill_read` before specialized work, then (gated on `subagent_enabled`) split INDEPENDENT parts
+  to `task_tool` sub-agents. The sub-agent catalog is static prompt text (`<slotflow-subagents>`),
+  so delegation is a single `task_tool` call with no lookup round-trip; an optional `role_query`
+  loads one professional role template inside the delegated child only. Browser work is delegated
+  to `agent_name='browser'` because those tools exist only in that child.
   Todo creation/update is enforced by the graph's `post_model` node instead of this
   prompt. These fire far more reliably with
   **thinking ON**; with thinking off DeepSeek tends to one-shot.
 - **HITL clarification = LangGraph native `interrupt()`/resume** (rewired 2026-06-21, see
-  `HARNESS_NOTES.md` §12). There are two clarification entry points, both pausing the graph the
-  same way — no separate `SlotFlowClarificationMiddleware` anymore (it was deleted):
+  `HARNESS_NOTES.md` §12). **As of 2026-08-14 there is exactly ONE entry point** — the model asks
+  for itself:
   - **Voluntary (the model asks)**: `tools/builtins.py::ask_clarification_tool` calls
     `interrupt(build_clarification_payload(...))` and returns the resume value as its result.
-  - **Forced gate (pro + ultra)**: the `triage_gate` graph node (logic in
-    `harness/steps/clarify_gate.py`) runs one cheap structured **triage** on the **first model
-    step** of a fresh user turn; if not actionable, it calls `interrupt(payload)` and,
-    on resume, injects the user's answer **verbatim** as a `HumanMessage` so the model proceeds.
-    Prompts alone't stop a model from one-shot-guessing, so this moves the decision into the graph.
-    To protect first-token latency, `should_skip_triage_model_call` bypasses this extra triage
-    LLM call for long, already-detailed requests, explicit "don't ask / just do it" wording, and
-    ordinary short messages that are not clearly underspecified creation/output tasks; short
-    underspecified prompts such as "做个表格" still go through the gate.
+  - ~~**Forced gate (pro + ultra)**~~ — the `triage_gate` node and `harness/steps/clarify_gate.py`
+    were **deleted on 2026-08-14**. It spent one extra model call on every fresh user turn to judge
+    "is this request clear enough", which is first-token latency on every turn plus an interruption
+    on requests that were already specific; the model deciding for itself (prompted in
+    `<slotflow-operating-procedure>`) is good enough. `SLOTFLOW_CLARIFY_GATE` is gone.
+  - **A clarification message MUST persist the turn's reasoning** (`chat/routes.py`): on the
+    `clarification.requested` path `clarification_saved=True` suppresses the normal `run.finished`
+    save, so that write is the message's ONLY persistence point. It originally stored just
+    `{source, clarification}` — the live UI still had `reasoningContent` in memory so it looked
+    fine, but any reload rebuilt the message from the DB and the whole thinking block vanished.
+    That reads as "the model re-thought after resume"; it did not (the interrupt pauses at the
+    `tools` node, the `agent` node's output is already in state and is not re-run). Pinned by
+    `tests/test_chat_routes.py::test_stream_run_persists_clarification_request`.
   - The user's answer arrives via `Command(resume=<answer>)` and **is** the tool result / user
     message — no "rewrite the answered tool message" step. `build_clarification_payload` (now in
     `app/harness/clarification.py`) always appends a free-text `其他（自己输入）` option LAST; the
@@ -483,20 +516,13 @@ frontend/src/
   - Skill-first / plan-first / delegate guidance lives in the `<slotflow-operating-procedure>`
     prompt, NOT in the gate (removed 2026-06: on DeepSeek thinking such directives are necessarily
     soft, so it only duplicated the prompt and added conflict surface).
-  - **Hard-won provider rules (DeepSeek thinking-mode, live-verified — do NOT regress)**: (1) the
-    triage `ainvoke` MUST pass `config={"callbacks": []}` or its tokens pollute the user stream;
-    (2) NEVER force `tool_choice` (`"Thinking mode does not support this tool_choice"`); (3) prefer
-    `interrupt()`/resume over any synthesized-response-then-continue scheme — `interrupt` pauses at
-    tool execution with the model's REAL tool call (real `reasoning_content`), sidestepping the
-    `"reasoning_content ... must be passed back"` trap that killed the old `wrap_model_call` path.
-  - The `triage_gate` node MUST let `interrupt()`'s `GraphBubbleUp`/`GraphInterrupt` (an
-    `Exception` subclass) propagate — never swallow it in a fail-open `except Exception`, or the
-    pause is defeated. On resume LangGraph replays the node, so triage runs once more (cheap,
-    benign). Only the first step is constrained; never gates twice in a thread (anti-loop).
-    Gated by `clarify_gate_enabled` (default on; env `SLOTFLOW_CLARIFY_GATE=false`) +
-    `run_context.mode in {pro, ultra}`. Scripted-model graph tests set `clarify_gate_enabled=False`.
-    Live-validated against `deepseek-v4-pro`:
-    underspecified requests clarify, the answer resumes the run, and the clarification does not re-pop.
+  - **Hard-won provider rules (DeepSeek thinking-mode, live-verified — do NOT regress)**: (1) any
+    side-channel `ainvoke` (e.g. the proactive memory extractor) MUST pass `config={"callbacks": []}`
+    or its tokens pollute the user stream; (2) NEVER force `tool_choice` (`"Thinking mode does not
+    support this tool_choice"`); (3) prefer `interrupt()`/resume over any
+    synthesized-response-then-continue scheme — `interrupt` pauses at tool execution with the
+    model's REAL tool call (real `reasoning_content`), sidestepping the `"reasoning_content ...
+    must be passed back"` trap that killed the old `wrap_model_call` path.
   - **The same `GraphBubbleUp`-propagation rule applies to the ToolNode path**: the SlotFlow
     tool-safety wrappers (`harness/graph.py::_slotflow_tool_safety_wrapper` /
     `_slotflow_async_tool_safety_wrapper`) that wrap every ToolNode call MUST re-raise
@@ -537,31 +563,50 @@ frontend/src/
   `SLOTFLOW_SUBAGENT_RECURSION_LIMIT=<positive-int>` overrides it. This limit applies only to the
   child `task_tool` graph, so multi-tool/reflection loops get room without changing the main graph's
   default recursion limit.
-- **Sub-agent role routing**: SlotFlow delegation is three-layered. Layer 1 remains the six
-  built-in functional profiles from `harness/subagents/config.py` (`researcher`, `analyst`,
-  `planner`, `coder`, `reviewer`, `writer`). Layer 2 is the compact domain catalog in
-  `harness/subagents/role_catalog.py` (`engineering`, `design`, `finance`, `market`, `sales`,
-  `product`, `research`, `specialized`). Layer 3 is the file-backed local agency-agents role
-  library under `harness/subagents/agency_agents/roles/` (220 markdown role prompts copied with
-  the upstream MIT license and `divisions.json`). `subagent_list` exposes only functional
-  profiles, domain summaries, counts, and sample role metadata; it does NOT dump all role prompts
-  into the parent model context. `subagent_role_search(query, domain, max_results)` is the narrow
-  lookup path when sample roles are not enough; it returns a bounded metadata-only shortlist and
-  falls back to a stable domain shortlist when a query has no keyword hits, so non-English tasks do
-  not produce an empty role-selection dead end. `task_tool(agent_name, task, ..., domain, role_name)`
-  resolves at most one concrete role template and injects it into the child subagent's system prompt
-  inside `<slotflow-agency-role>`, preserving the parent model's context budget.
-- **Skill discovery (cross-tool, cached)**: `skill_match` → `find-skills` → `search_skill_repos`.
-  Skills use the open **SKILL.md** standard shared by Claude Code, OpenAI Codex (`.agents/skills`)
-  and GitHub Copilot, so a Skill written for any of them installs into SlotFlow unchanged — there
-  is no Codex-specific tool; `search_skill_repos` returns GitHub matches plus authoritative
-  `ecosystem_sources` (Anthropic / Codex / skills.sh) to browse. Local installed-skill matching
-  (`match_installed_skills` in `tools/customization.py`) is memoized with a short TTL so the skills
-  preflight and a later `skill_match` in the same turn don't re-scan disk; `skill_install` calls
-  `invalidate_skill_match_cache()`. The prepare-node skills preflight stores its result only in
-  `state.slotflow.skills_preflight`; `pre_model` formats that state into internal system context.
-  It must not prepend `installed_matches` / search metadata to `HumanMessage.content`, because user
-  messages are later consumed by explicit/background memory extraction.
+- **Sub-agent delegation (one tool, 2026-08-14)**: the parent agent sees exactly ONE delegation
+  schema, `task_tool`. `subagent_list` and `subagent_role_search` were deleted: the former returned
+  a value that never changes within a run, so it is now static system text
+  (`harness/subagents/tools.py::build_subagent_catalog_prompt`, rendered as `<slotflow-subagents>`
+  and cached with the prefix); the latter's lookup sank into `task_tool`'s `role_query` argument, so
+  the parent no longer spends two tool round-trips before delegating anything — those were the hops
+  the model most often abandoned. Profiles (`harness/subagents/config.py`) are the six functional
+  ones plus `browser`, the only **vertical** profile: it exists to carry a heavy tool space, not a
+  persona, and owns playwright's `browser_*` tools so page snapshots never enter the parent context.
+  `web_search`/`web_fetch` deliberately stay bound on the parent (2 schemas, single round-trip,
+  source links must be cited by the parent) — the decision rule is `schema count × interaction depth
+  × intermediate-output noise`. The file-backed role library under
+  `harness/subagents/agency_agents/roles/` (235 markdown prompts with the upstream MIT license and
+  `divisions.json`) is never listed to the parent; `task_tool` resolves at most one template
+  (`role_name` exact → `role_query` free text → `domain`+task scoring) and injects it into the child
+  system prompt inside `<slotflow-agency-role>`. Role scoring matches **whole tokens** with a
+  stopword list and weights identity fields (id/name/division) 3× over descriptions, and the
+  `role_query` path additionally requires an identity hit (`_ROLE_QUERY_MIN_SCORE`): substring
+  matching made almost any query hit something across 235 roles, and a false positive there injects
+  up to 12000 chars of the wrong domain instructions. No match → no template, which beats a wrong one.
+  When sub-agents are disabled (flash mode) `browser_*` falls back into the MCP proxy rather than
+  vanishing.
+- **Skills are two-step: discover, then read (2026-08-14)**: `build_skills_prompt` puts ONLY the
+  catalog (`name: description`, top-level skills) in the system prefix — never a Skill body. The
+  model decides what is relevant and calls `skill_read(name)`, which returns the SKILL.md body as a
+  **tool result** (`harness/skills/reader.py`, host-side). Before this, a Skill body was reachable
+  only via `sandbox_exec cat /skills/...`, so Skills silently died whenever Docker was unavailable —
+  even though SlotFlow has a full Docker-degraded path. `skill_read(name, path=...)` reads the
+  Skill's bundled files (the body's file list comes back with it, path traversal is rejected), and
+  `offset` resumes a body truncated at `MAX_SKILL_READ_CHARS`. Skill bodies are deliberately NOT
+  subject to tool-output offload (`skill_read` returns a `Command`, which
+  `steps/tool_output_offload.py` passes through): moving instructions to a file the model must read
+  back defeats the purpose. Every successful read appends to the `used_skills` state channel — the
+  **compaction ledger**: `make_summarization_node` injects those names into the summary prompt AND
+  appends a deterministic `<slotflow-skills-ledger>` block to the compacted view, telling the model
+  to re-`skill_read` or use `context_archive_search/read` rather than reconstruct a Skill's procedure
+  from memory. Discovery is unchanged (`skill_match` → `find-skills` → `search_skill_repos`, open
+  SKILL.md standard shared with Claude Code / OpenAI Codex `.agents/skills` / GitHub Copilot;
+  `match_installed_skills` memoized with a short TTL, invalidated by `skill_install`), but every
+  match now ends in "call `skill_read`", never "act on the description". The prepare-node skills
+  **preflight was deleted on 2026-08-14** (`harness/steps/skills_preflight.py` is gone): the catalog
+  plus the `skill_read` instruction already tell the model everything the preflight was hinting at,
+  while the preflight itself cost a disk scan before the first token and dumped the user's raw query
+  back into the prompt every turn — the last volatile block breaking prefix caching.
 - **Skill management UI/API**: multi-skill installs group dependency skills under a parent via
   `SkillRecord.parent`. Deleting a parent skill from `/api/skills/{name}` must delete the whole
   skill tree: the parent directory, any nested `dependencies/*` child directories, legacy
@@ -625,8 +670,10 @@ follow-ups, roughly ordered:
    already clean; this can be simplified once the extractor is the primary path.
 5. **Sub-agent live test** — the concurrency cap is unit-tested only; add an end-to-end live check
    that real parallel `task_tool` delegation is capped and synthesized correctly.
-6. **MCP context bloat** — consider DeerFlow's `tool_search` deferred-schema pattern (inject tool
-   names, load full schemas on demand) when many MCP tools are configured.
+6. ~~**MCP context bloat**~~ — done (2026-08-14). Deferred/dynamic schema injection was
+   evaluated and rejected: changing the tool array at all invalidates the provider prefix cache,
+   which costs more than the schemas save. Shipped instead: fixed `mcp_docs`/`mcp_call` proxy pair
+   + the `browser` vertical sub-agent. See `HARNESS_NOTES.md` §59.
 7. **Ship it** — the refactor branch is unpushed; open a PR (required check: `Verify`).
 
 - **Python runtime**: backend model integration uses `langchain-litellm==0.7.0` / LiteLLM and
@@ -662,7 +709,7 @@ LANGSMITH_PROJECT=slotflow-dev  # 按环境/分支区分,便于筛选
 **怎么用它审查各链路:**
 
 - 一次 chat 请求 = 一条 root trace;按 `thread_id` / run 时间定位后展开,能逐节点看到
-  `prepare → triage_gate → pre_model → SlotFlowSummarizationMiddleware → agent → post_model
+  `prepare → pre_model → SlotFlowSummarizationMiddleware → agent → post_model
   → route → tools → …` 的输入/输出 state、耗时与报错;并发/工具报错(例如本次
   `INVALID_CONCURRENT_GRAPH_UPDATE`)会精确落在触发它的节点/工具 span 上。
 - `agent` 节点 span 上能看到最终 `bind_tools` 的工具集、system_prompt、`llm_input_messages`
@@ -672,7 +719,7 @@ LANGSMITH_PROJECT=slotflow-dev  # 按环境/分支区分,便于筛选
 - 排查用量/缓存请以 `run.usage`(`RunUsageCollector`,持久化在 SQLite `run_metrics`)为准;
   LangSmith 的 token/时延是交叉验证。
 
-**重要:trace 隔离约定不要破坏。** triage(`clarify_gate`)与 proactive memory extractor 的
+**重要:trace 隔离约定不要破坏。** proactive memory extractor 的
 模型调用刻意使用 `config={"callbacks": []}`,以免它们的 token 污染用户流;这同样会让它们**不**
 出现在主 run 的 LangSmith trace 里——这是有意的,排查这两条子链路时单独跑或临时放开 callbacks,
 不要为了"看得见"就把它们并回主流(参见 `HARNESS_NOTES.md` 的 provider 规则)。
