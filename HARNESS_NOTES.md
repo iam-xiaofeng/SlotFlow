@@ -3841,3 +3841,75 @@ callbacks,所以每次调用也落进同一个 collector)。这两类调用的 p
 
 - 后端 464 通过;`ruff` 全绿;前端 `pnpm typecheck` + `pnpm build` 通过。
 - **未做真机验证**:切到 sqlite 后端之后的多轮真机会话需要点一遍确认历史确实连续。
+
+## 62. 迭代 53(2026-08-14 续):澄清丢思考的**第三、第四个** bug —— 答完就删气泡 + 快照扫过界
+
+### 62.0 报告
+
+> 当模型思考一堆调用澄清 之前思考的内容框就看不到了 应该要保留
+
+§60.2(后端补落库 reasoning)和 §60.4b(前端强制清空 thought)都已经修完并合并,症状**依然存在**。
+这已经是同一句现象("思考框没了")背后的第三个独立 bug 了——同症状多根因是这条链路的固有特征:
+思考内容要经过 *落库 → 重建 → 渲染 → 存活* 四道关,任何一道断掉,用户看到的都是"思考框没了"。
+
+### 62.1 第三个 bug:回答澄清 = 删掉整条气泡
+
+`chat-app.tsx`:
+
+```ts
+async function handleSelectClarification(messageId, clarification, option) {
+  removeMessage(messageId);                      // ← 元凶
+  await submitMessage(option.label, { ... });
+}
+```
+
+那条被删掉的消息,**正是承载"想了一大堆 → 决定问一句"的那条**:思考框 + 工具时间线 + 问题本身,
+全在它身上。所以时序是:
+
+1. 模型思考一大堆 → 思考框正常显示;
+2. 模型调 `ask_clarification` → interrupt → 思考框 + 澄清框(§60.4b 修好的部分,**这一步是对的**);
+3. **用户一点选项 → 整条气泡被 `removeMessage` 抹掉** → 思考框和澄清框一起消失;
+4. 新一轮开始 → 只剩一个新的思考框。
+
+这就是为什么前两个 bug 修完"看起来没变化":修好的那一帧(第 2 步)存在的时间,只有用户点选项之前那几秒。
+
+**修复**:不删。留下之后页面上就是「思考框 → 澄清框 →(用户答案)→ 新思考框」的连续记录。
+选项按钮不需要额外处理——`canAnswerClarification = clarification && isLatestAssistant && !isStreaming`,
+新 assistant 消息一建出来,旧澄清框就自动禁用成历史。
+
+顺带修掉一处**存储不一致**:这条消息后端本来就落库(§60.2),前端却把它从内存里删了。于是
+"直播视图"和"刷新后按 DB 重建的视图"长期不一致——刷新一下澄清框又回来了。现在两边对齐。
+
+`removeMessage` 自此无人使用,连同 hook 里的定义一起删掉;`onSelectClarification` 的 `messageId`
+形参也随之从三处签名里去掉。
+
+### 62.2 第四个 bug:快照反向扫描会扫进上一条气泡
+
+这个是**修 62.1 时顺出来的**:留下旧气泡之后,同一段思考会在新旧两个气泡里各出现一次。
+
+`state.snapshot` 带的是 `state["messages"]` 全量历史,不是本轮新增。而两侧的取值函数
+(后端 `latest_assistant_message_field`、前端 `latestAssistant{Content,ReasoningContent}`)
+都是**无边界地反向扫描**,取"最后一条 assistant 的 content / reasoning_content"。
+
+于是在"本轮还没产出正文/思考"的那一小段时间里(values projection 在 `agent` 之前的每个节点后都会发),
+扫描一路退到上一条气泡,把上一轮的内容当成本轮的。更糟的是两侧的合并策略都是**取较长者**
+(`mergeReasoningContent` / `select_assistant_reasoning_content`),所以上一轮更长时,污染不会被后续
+正常输出冲掉,而是**一直留着**,甚至跟着 `run.finished` 落库。
+
+边界有两个,缺一不可:
+
+- **用户消息** —— 普通一轮的起点;
+- **`ask_clarification` 的工具结果** —— 澄清 resume 的起点。resume 走 `Command(resume=...)`,
+  答案是写成**工具结果**的,state 里**不会新增 user message**,所以光看 role 拦不住。不拦的话,
+  澄清前那一大段思考正好会被算成 resume 这一轮的 —— 也就是上面说的"同一段思考出现两次"。
+
+钉子(三个,都先在旧实现上验证过会失败):
+`test_snapshot_scan_stops_at_the_user_message`、
+`test_snapshot_scan_stops_at_the_clarification_tool_result`、
+`test_snapshot_scan_still_sees_this_turn_across_tool_steps`(反向保证:本轮内部的普通工具往返照常扫得到)。
+
+### 62.3 验证
+
+- 后端 467 通过、1 skipped;`ruff` 全绿。
+- 前端 `pnpm test` / `typecheck` / `check:dead-code`(knip) / `build` 全绿。
+- **未做真机验证**:「思考框 → 澄清框 → 新思考框」这条连续记录需要真机点一遍澄清才算数。

@@ -145,50 +145,59 @@ export function mergeAssistantContent(current: string, incoming: string): string
 }
 
 export function latestAssistantContent(event: ChatStreamEvent): string | null {
-  const messages = event.data.messages;
-  if (!Array.isArray(messages)) {
-    return null;
-  }
-
-  for (const message of [...messages].reverse()) {
-    if (
-      typeof message === "object" &&
-      message !== null &&
-      "role" in message &&
-      "content" in message
-    ) {
-      const role = message.role;
-      const content = message.content;
-      if (role === "assistant" || role === "ai") {
-        if ((message as Record<string, unknown>).has_tool_calls === true) {
-          continue;
-        }
-        if (typeof content === "string") {
-          return content;
-        }
-      }
+  return latestAssistantField(event, (record) => {
+    if (record.has_tool_calls === true) {
+      return null;
     }
-  }
-
-  return null;
+    const content = record.content;
+    return typeof content === "string" ? content : null;
+  });
 }
 
 export function latestAssistantReasoningContent(event: ChatStreamEvent): string | null {
+  return latestAssistantField(event, (record) => {
+    const reasoningContent = record.reasoning_content;
+    return typeof reasoningContent === "string" && reasoningContent.trim()
+      ? reasoningContent
+      : null;
+  });
+}
+
+/**
+ * 反向扫描快照里的消息，取当前这条气泡对应的字段。
+ *
+ * 快照带的是**整段对话历史**，不是本轮新增。所以扫描必须停在气泡边界上，否则本轮还没产出
+ * 正文/思考的那一小段时间里，会一路退到上一轮，把上一轮的内容灌进新气泡（`merge*` 取较长者，
+ * 上一轮更长时就一直留着不走）。边界与后端 `is_ui_message_boundary` 一致：用户消息，
+ * 以及 `ask_clarification` 的工具结果——澄清 resume 不新增 user message，答案是写成工具结果的。
+ */
+function latestAssistantField(
+  event: ChatStreamEvent,
+  pick: (record: Record<string, unknown>) => string | null,
+): string | null {
   const messages = event.data.messages;
   if (!Array.isArray(messages)) {
     return null;
   }
 
   for (const message of [...messages].reverse()) {
-    if (typeof message === "object" && message !== null && "role" in message) {
-      const record = message as Record<string, unknown>;
-      const role = record.role;
-      if (role === "assistant" || role === "ai") {
-        const reasoningContent = record.reasoning_content;
-        if (typeof reasoningContent === "string" && reasoningContent.trim()) {
-          return reasoningContent;
-        }
-      }
+    if (typeof message !== "object" || message === null) {
+      continue;
+    }
+    const record = message as Record<string, unknown>;
+    const role = record.role;
+    if (role === "human" || role === "user") {
+      return null;
+    }
+    if (role === "tool" && record.name === "ask_clarification") {
+      return null;
+    }
+    if (role !== "assistant" && role !== "ai") {
+      continue;
+    }
+    const value = pick(record);
+    if (value !== null) {
+      return value;
     }
   }
 

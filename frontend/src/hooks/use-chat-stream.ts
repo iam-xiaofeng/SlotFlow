@@ -357,16 +357,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     return true;
   }, []);
 
-  const removeMessage = useCallback((messageId: string) => {
-    setMessagesByThread((current) => {
-      const next: Record<string, ChatUiMessage[]> = {};
-      for (const [threadId, threadMessages] of Object.entries(current)) {
-        next[threadId] = threadMessages.filter((message) => message.id !== messageId);
-      }
-      return next;
-    });
-  }, []);
-
   const loadThread = useCallback(
     async (targetThread: ThreadRecord): Promise<boolean> => {
       // 查看即消费提醒徽标;生成中的线程保留转圈。
@@ -817,7 +807,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     sendMessage,
     cancelStream,
     resetThread,
-    removeMessage,
     loadThread,
     clearError,
   };
