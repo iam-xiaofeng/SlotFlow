@@ -49,6 +49,25 @@ def _provider_of(model_name: str) -> str:
     return "deepseek" if "deepseek" in model_name.lower() else "custom"
 
 
+def _provision_workspace(item: dict[str, Any]) -> None:
+    """把样本声明的 ``workspace_files`` 写进评测工作区。
+
+    旧数据集的 ``read-file`` 恒红,原因不是 agent 不会读文件,而是**工作区里根本没有那个文件**
+    (README 里记作"环境缺口")。评测环境没准备好就去量 agent,量到的是环境不是能力。
+    """
+
+    files = item.get("workspace_files") or {}
+    if not files:
+        return
+    from app.harness.sandbox import build_slotflow_workspace
+
+    root = build_slotflow_workspace(None).root
+    for rel_path, content in files.items():
+        target = root / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # 真图运行(smoke 用 FakeModel;live 用真模型)——两者只差一个 model 参数
 # --------------------------------------------------------------------------- #
@@ -96,6 +115,7 @@ async def _run_live_item(item: dict[str, Any], model_name: str, provider: str) -
     saved = {k: os.environ.get(k) for k in overrides}
     os.environ.update({k: str(v) for k, v in overrides.items()})
     try:
+        _provision_workspace(item)
         return await _run_graph(item, model=None, model_name=model_name, provider=provider)
     finally:
         for k, old in saved.items():
@@ -212,8 +232,9 @@ def main() -> None:
     scores = run_offline(items)
     print_scorecard(scores, title="offline(桩 transcript,确定性)")
     print("\n注:offline 的 transcript 是人工编造的,只证明评测器/打分/报表本身正确;")
-    print("    1 号(工具执行失败)与 10 号(回灌思考)是故意造的红项,演示评测器确实抓得到。")
-    print("    真实 agent 分数请跑 --live。")
+    print("    reasoning-roundtrip 是**故意造的红项**(content 里塞了 thinking 块),")
+    print("    用来演示评测器确实抓得到——一套全绿的评测集是证明不了自己有效的。")
+    print("    真实 agent 分数请跑 --live 或 python -m evals.langsmith_eval。")
 
 
 if __name__ == "__main__":
