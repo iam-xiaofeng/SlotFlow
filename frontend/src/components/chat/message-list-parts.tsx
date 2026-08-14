@@ -75,7 +75,6 @@ function MessageBubbleImpl({
   onSubmitEdit: (content: string) => Promise<boolean>;
   onRetryLatestAssistantMessage: () => void;
   onSelectClarification: (
-    messageId: string,
     clarification: ClarificationRequestRecord,
     option: ClarificationOptionRecord,
   ) => void;
@@ -176,9 +175,7 @@ function MessageBubbleImpl({
                 <ClarificationRequestPanel
                   clarification={clarification}
                   disabled={!canAnswerClarification}
-                  onSelect={(selectedClarification, option) =>
-                    onSelectClarification(message.id, selectedClarification, option)
-                  }
+                  onSelect={onSelectClarification}
                 />
               </>
             ) : isCompressingContext ? (

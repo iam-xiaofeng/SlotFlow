@@ -31,7 +31,6 @@ type MessageListProps = {
   onEditLatestUserMessage: (messageId: string, content: string) => Promise<boolean>;
   onRetryLatestAssistantMessage: () => void;
   onSelectClarification: (
-    messageId: string,
     clarification: ClarificationRequestRecord,
     option: ClarificationOptionRecord,
   ) => void;

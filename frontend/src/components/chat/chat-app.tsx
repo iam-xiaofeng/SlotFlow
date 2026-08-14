@@ -152,7 +152,6 @@ export function ChatApp() {
     cancelStream,
     loadThread,
     resetThread,
-    removeMessage,
     clearError,
   } = useChatStream({
     defaultThreadTitle: "New chat",
@@ -845,14 +844,18 @@ export function ChatApp() {
   }
 
   async function handleSelectClarification(
-    messageId: string,
     clarification: ClarificationRequestRecord,
     option: ClarificationOptionRecord,
   ) {
     if (isConversationBusy) {
       return;
     }
-    removeMessage(messageId);
+    // 回答澄清**不删这条消息**。它承载的是模型「想了一大堆 → 决定问一句」的完整记录:
+    // 思考框 + 工具时间线 + 问题本身。之前这里 removeMessage 把整条气泡抹掉,于是用户一选完
+    // 选项,前面那一大段思考就跟着消失了——看起来像模型把想过的东西忘了。
+    // 留下它之后,页面上就是「思考框 → 澄清框 → (用户答案) → 新思考框」的连续记录;
+    // 选项按钮会因为它不再是最新 assistant 消息而自动禁用(见 canAnswerClarification)。
+    // 顺带把直播视图和刷新后按 DB 重建的视图对齐了:这条消息本来就是落库的。
     await submitMessage(option.label, {
       files: [],
       metadata: {
@@ -1006,8 +1009,8 @@ export function ChatApp() {
                     handleEditLatestUserMessage(messageId, content)
                   }
                   onRetryLatestAssistantMessage={() => void handleRetryLatestAssistantMessage()}
-                  onSelectClarification={(messageId, clarification, option) =>
-                    void handleSelectClarification(messageId, clarification, option)
+                  onSelectClarification={(clarification, option) =>
+                    void handleSelectClarification(clarification, option)
                   }
                 />
                 <div className="shrink-0 px-3 pb-5 pt-3 sm:px-6">
