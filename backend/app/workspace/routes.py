@@ -26,6 +26,33 @@ from app.workspace.models import (
 
 router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
 
+# 产物视图里要挡掉的目录:它们是构建/依赖噪音,不是模型交付给用户的东西。
+#
+# 2026-08-15 真机:一次 React 重构在 `artifacts/` 下 `npm install` 出 2660 个
+# node_modules 文件,产物列表接口一口气返回 2814 条、394 KB JSON,面板被彻底淹掉,
+# 真正的交付物(那 4 个 md、一个 dist/)反而找不着。
+HIDDEN_ARTIFACT_DIRS = frozenset(
+    {"node_modules", ".git", ".vite", "__pycache__", ".cache", ".next", "dist-ssr"}
+)
+
+
+def _is_hidden_artifact(relative_path: str) -> bool:
+    return bool(HIDDEN_ARTIFACT_DIRS.intersection(relative_path.split("/")))
+
+
+# 产物原件的响应头。
+#
+# `Access-Control-Allow-Origin: *` 是**预览必需**,不是图省事:产物面板的 iframe 带
+# `sandbox` 且刻意不给 `allow-same-origin`(产物是模型生成的内容,不能让它拿到本站同源
+# 权限去读 localStorage / 冒充用户调 API),于是它是个**不透明源**,发出的请求 `Origin: null`。
+# 而 `<script type="module">` 无论如何都以 CORS 模式抓取——少了这个头,任何带 JS 的
+# HTML 产物都只能白屏。
+#
+# 代价说清楚:带上这个头之后,别的网页上的脚本只要**猜中完整产物路径**、且你本机后端正在跑,
+# 就能读到该文件内容。SlotFlow 是本地开发工具、产物是用户自己的文件,这个交换是划算的;
+# 若要收紧,把这里换成 `"null"`(只放行不透明源)即可,浏览器一样接受。
+RAW_ARTIFACT_HEADERS = {"Access-Control-Allow-Origin": "*"}
+
 
 def _is_viewable_path(path: str) -> bool:
     """Read/preview is allowed only for generated artifacts and user uploads; other
@@ -98,6 +125,29 @@ async def raw_artifact(
 ) -> FileResponse:
     """Serve one generated artifact or user upload for browser preview."""
 
+    return await _serve_raw_artifact(request, path, download)
+
+
+@router.get("/artifacts/raw/{path:path}")
+async def raw_artifact_by_path(
+    request: Request,
+    path: str,
+    download: bool = False,
+) -> FileResponse:
+    """同一个文件，但走**路径式** URL —— 给带相对引用的 HTML 产物用。
+
+    2026-08-15 真机:产物面板预览 HTML 时注入 `<base href="<raw url>">`,而 `?path=` 形式的
+    URL 在做相对解析时**会丢掉 query string**:`./assets/index-x.js` 解析成
+    `/api/workspace/artifacts/assets/index-x.js`,必然 404,整页白屏。一个 Vite 构建产物
+    因此永远预览不了。改成路径式之后相对引用自然就落回同一棵目录树。
+    """
+
+    if not path:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return await _serve_raw_artifact(request, path, download)
+
+
+async def _serve_raw_artifact(request: Request, path: str, download: bool) -> FileResponse:
     if not _is_viewable_path(path):
         raise HTTPException(status_code=400, detail="path must be a file under an artifacts/ or uploads/ folder")
 
@@ -116,12 +166,13 @@ async def raw_artifact(
             media_type=media_type,
             filename=target.name,
             content_disposition_type="attachment",
+            headers=dict(RAW_ARTIFACT_HEADERS),
         )
 
     return FileResponse(
         target,
         media_type=media_type,
-        headers={"Content-Disposition": "inline"},
+        headers={"Content-Disposition": "inline", **RAW_ARTIFACT_HEADERS},
     )
 
 
@@ -252,6 +303,8 @@ def _list_workspace_files(
     entries: list[WorkspaceEntryRecord] = []
     for candidate in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if not candidate.is_file():
+            continue
+        if _is_hidden_artifact(candidate.relative_to(root).as_posix()):
             continue
         try:
             resolved = workspace.resolve_path(candidate.relative_to(workspace.root).as_posix())
