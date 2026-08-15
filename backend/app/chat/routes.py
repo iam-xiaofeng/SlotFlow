@@ -253,6 +253,8 @@ async def stream_thread_run(
         snapshot_reasoning_content: str | None = None
         clarification_saved = False
         completed = False
+        # 用户在这一轮看到过的工具时间线,跟着 assistant 消息一起落库(见 collect_tool_activity)。
+        tool_activities: list[dict] = []
 
         try:
             events = adapter.stream_events(request=body, bundle=bundle)
@@ -275,6 +277,9 @@ async def stream_thread_run(
                     text_break_pending = True
                     reasoning_break_pending = True
 
+                if event.event == "tool.status":
+                    collect_tool_activity(tool_activities, dict(event.data))
+
                 if event.event == "state.snapshot":
                     snapshot_message_content = latest_assistant_content(event)
                     snapshot_reasoning_content = latest_assistant_reasoning_content(event)
@@ -293,6 +298,7 @@ async def stream_thread_run(
                             streamed_reasoning_content="".join(assistant_reasoning_parts),
                         ),
                         thinking_enabled=bundle.context.thinking_enabled,
+                        tool_activities=tool_activities,
                     )
                     clarification_metadata["source"] = "clarification"
                     clarification_metadata["clarification"] = dict(event.data)
@@ -342,6 +348,7 @@ async def stream_thread_run(
                             metadata=assistant_message_metadata(
                                 reasoning_content,
                                 thinking_enabled=bundle.context.thinking_enabled,
+                                tool_activities=tool_activities,
                             ),
                         )
                         await update_thread_title_after_first_exchange(
@@ -501,13 +508,49 @@ def assistant_message_metadata(
     reasoning_content: str | None,
     *,
     thinking_enabled: bool = False,
+    tool_activities: list[dict] | None = None,
 ) -> dict:
     metadata = {"source": "agent"}
     if thinking_enabled:
         metadata["thinking_enabled"] = True
     if isinstance(reasoning_content, str) and reasoning_content.strip():
         metadata["reasoning_content"] = reasoning_content
+    if tool_activities:
+        metadata["tool_activities"] = tool_activities
     return metadata
+
+
+def collect_tool_activity(activities: list[dict], payload: dict) -> None:
+    """把一条 ``tool.status`` 事件并进落库用的工具时间线。
+
+    合并规则和前端 ``upsertToolActivity`` 保持一致:同名工具还在 starting/running 就就地更新,
+    否则新增一行——这样刷新后重建出来的时间线,和流式当时看到的是同一条。
+
+    **为什么要存**:工具时间线原来是纯流式状态(只由 ``tool.status`` 事件驱动),从不落库。
+    于是刷新页面或切走再切回来,「这一轮到底跑了哪些工具」就全没了,只剩正文和思考框——
+    连着好几个思考框却看不出中间发生过什么。工具消息本身确实不该进聊天库(它们属于模型侧,
+    在 checkpoint 里),但**用户看到过的那条时间线**属于产品记录,该留下。
+    """
+
+    tool_name = payload.get("tool_name")
+    phase = payload.get("phase")
+    message = payload.get("message")
+    if not isinstance(tool_name, str) or not isinstance(message, str):
+        return
+    if phase not in ("starting", "running", "completed", "error"):
+        return
+    entry = {"toolName": tool_name, "phase": phase, "message": message}
+    command = payload.get("command")
+    if isinstance(command, str):
+        entry["command"] = command
+    if (
+        activities
+        and activities[-1]["toolName"] == tool_name
+        and activities[-1]["phase"] in ("starting", "running")
+    ):
+        activities[-1] = entry
+        return
+    activities.append(entry)
 
 
 def format_clarification_content(payload: dict) -> str:

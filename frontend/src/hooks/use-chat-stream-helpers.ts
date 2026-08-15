@@ -16,7 +16,7 @@ export type ChatUiMessage = {
   thinkingStarted?: boolean;
   compressionStarted?: boolean;
   toolStatus?: ChatToolStatus;
-  /** 本次 run 的工具调用时间线,按发生顺序累积;不持久化,仅活跃会话内可见。 */
+  /** 工具调用时间线,按发生顺序累积。流式期间实时累积,并随 assistant 消息落库,刷新后可恢复。 */
   toolActivities?: ChatToolActivity[];
   status: ChatUiMessageStatus;
   runId?: string;
@@ -87,11 +87,43 @@ export function messageRecordToUiMessage(record: MessageRecord): ChatUiMessage {
     content: record.content,
     reasoningContent,
     thinkingStarted,
+    toolActivities: parseToolActivities(record.metadata),
     status: "done",
     runId: record.run_id ?? undefined,
     createdAt: record.created_at,
     metadata: record.metadata,
   };
+}
+
+/**
+ * 从落库的 metadata 里恢复工具时间线。
+ *
+ * 工具时间线原来是**纯流式状态**:只由 `tool.status` 事件驱动,从不落库。于是刷新页面、
+ * 或者切走再切回来,"这一轮到底跑了哪些工具"就全没了——只剩正文和思考框,连着好几个思考框
+ * 却看不出中间发生过什么。后端现在把用户看到过的这条时间线跟着 assistant 消息一起存
+ * (`chat/routes.py` 的 `collect_tool_activity`),这里读回来。
+ *
+ * 注意工具**消息**本身仍然不进聊天库——那属于模型侧,在 checkpoint 里。存下来的只是
+ * 「用户当时看到的那条时间线」,属于产品记录。
+ */
+function parseToolActivities(
+  metadata: Record<string, unknown> | undefined,
+): ChatToolActivity[] | undefined {
+  const raw = metadata?.tool_activities;
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const activities: ChatToolActivity[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const status = parseToolStatus(entry as Record<string, unknown>);
+    if (status) {
+      activities.push({ ...status, id: activities.length });
+    }
+  }
+  return activities.length > 0 ? activities : undefined;
 }
 
 function parseReasoningContent(metadata: Record<string, unknown> | undefined): string | undefined {

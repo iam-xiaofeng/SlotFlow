@@ -833,3 +833,56 @@ def test_stream_run_persists_clarification_request() -> None:
     # 看起来像"模型重新思考了",实际是这段文本从来没被持久化。
     assert messages[1].metadata["reasoning_content"] == "先看看用户昨天提到过哪些币种…"
     assert runs[0].status == "completed"
+
+
+def test_collect_tool_activity_merges_like_the_frontend() -> None:
+    """落库的工具时间线必须和流式当时看到的是同一条。
+
+    合并规则与前端 `upsertToolActivity` 对齐:同名工具还在 starting/running 就就地更新,
+    否则新增一行。不对齐的话,刷新后重建出来的时间线和用户当时看到的会不一样。
+    """
+
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "starting", "message": "启动"})
+    collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "running", "message": "执行中"})
+    collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "completed", "message": "完成"})
+    collect_tool_activity(activities, {"tool_name": "workspace_read", "phase": "completed", "message": "读完"})
+
+    assert [(a["toolName"], a["phase"]) for a in activities] == [
+        ("sandbox_exec", "completed"),
+        ("workspace_read", "completed"),
+    ]
+
+
+def test_collect_tool_activity_ignores_malformed_events() -> None:
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(activities, {"tool_name": "x", "phase": "bogus", "message": "m"})
+    collect_tool_activity(activities, {"phase": "completed", "message": "缺工具名"})
+    collect_tool_activity(activities, {"tool_name": "y", "phase": "completed"})
+
+    assert activities == []
+
+
+def test_assistant_metadata_carries_the_tool_timeline() -> None:
+    """工具时间线跟着 assistant 消息落库,前端 messageRecordToUiMessage 据此恢复。
+
+    工具**消息**本身仍然不进聊天库(那属于模型侧,在 checkpoint 里);
+    存的只是「用户当时看到的那条时间线」。
+    """
+
+    from app.chat.routes import assistant_message_metadata
+
+    metadata = assistant_message_metadata(
+        "想了想",
+        thinking_enabled=True,
+        tool_activities=[{"toolName": "web_search", "phase": "completed", "message": "搜完了"}],
+    )
+
+    assert metadata["reasoning_content"] == "想了想"
+    assert metadata["tool_activities"][0]["toolName"] == "web_search"
+    # 没有工具的那一轮不该塞一个空数组进去。
+    assert "tool_activities" not in assistant_message_metadata("x", tool_activities=[])
