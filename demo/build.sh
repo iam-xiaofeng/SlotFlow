@@ -30,8 +30,13 @@ restore_config() {
 trap restore_config EXIT
 
 echo "[demo] 1/3 生成静态 API 数据"
-THREAD="${SLOTFLOW_DEMO_THREAD:-thread_d130690e7771}"
-(cd "$ROOT/backend" && uv run python -m evals.export_demo_api --thread "$THREAD")
+# 默认取聊天库里**最新**那条会话——跑完一段真实对话直接重跑本脚本即可,不用抄 id。
+# 想指定:SLOTFLOW_DEMO_THREAD=thread_xxx bash demo/build.sh
+THREAD="${SLOTFLOW_DEMO_THREAD:-latest}"
+# 置顶产物:产物面板默认预览列表第一条,而导出是按路径字典序排的,
+# 第一条常常是某个 .md。指定一下,让人一打开就看到那个能跑的页面。
+FEATURED="${SLOTFLOW_DEMO_FEATURED:-cybervault-react/dist/index.html}"
+(cd "$ROOT/backend" && uv run python -m evals.export_demo_api --thread "$THREAD" --feature "$FEATURED")
 
 echo "[demo] 2/3 静态导出真前端"
 cp -f "$CONFIG" "$BACKUP"
@@ -61,7 +66,18 @@ echo "[demo] 3/3 组装站点"
 rm -rf "$OUT"
 cp -r "$FRONTEND/out" "$OUT"
 cp -r "$ROOT/demo/api" "$OUT/api"
-[[ -f "$ROOT/demo/_redirects" ]] && cp -f "$ROOT/demo/_redirects" "$OUT/_redirects"
+# 产物按原目录结构的镜像。产物面板预览 HTML 时相对引用要靠它才解析得到
+# (原因见 export_demo_api.py 的 ASSET_MOUNT 注释)。放站点根,避开 _redirects 的 /api/* 改写。
+if [[ -d "$ROOT/demo/artifact-assets" ]]; then
+  cp -r "$ROOT/demo/artifact-assets" "$OUT/artifact-assets"
+fi
+# Cloudflare Pages 的路由适配器(advanced mode)。本地预览用 demo/serve.py,规则一致。
+# 没有它的话:静态站点表达不了 `?path=` → slug 这条规则,产物面板在 Pages 上全 404。
+# 注意别再加 _redirects:它在 advanced mode 下**依然生效**,和这里的改写叠加会双重拼接
+# index.json,导致首页正常但 /api 全线 404。详见 _worker.js 顶部注释。
+if [[ -f "$ROOT/demo/_worker.js" ]]; then
+  cp -f "$ROOT/demo/_worker.js" "$OUT/_worker.js"
+fi
 
 # 展示页专用补丁:展开工具时间线 + 自动打开产物面板。
 # 只注入到静态产物里,**不进产品源码**——真实产品那两个默认值是对的,展示页的诉求不一样。

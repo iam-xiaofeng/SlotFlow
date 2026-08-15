@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
+import re
 import shutil
 import sqlite3
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _BACKEND = Path(__file__).resolve().parent.parent
@@ -39,6 +41,19 @@ _ROOT = _BACKEND.parent
 DEFAULT_OUT = _ROOT / "demo" / "api"
 CHAT_DB = _BACKEND / ".slotflow" / "chat.sqlite3"
 WORKSPACE = _BACKEND / ".slotflow" / "workspace"
+
+# 产物里这些目录是构建/依赖噪音,不是模型的交付物。
+# 真实案例:一次 React 重构会往 artifacts/ 里装出 2600+ 个 node_modules 文件、87 MB——
+# 全导出去的话产物面板会被淹掉,静态站点也会膨胀成一堆碎文件。
+EXCLUDED_ARTIFACT_DIRS = {"node_modules", ".git", ".vite", "__pycache__", ".cache"}
+
+# 产物按**原目录结构**另外镜像一份到站点根的这个路径下。
+# 为什么需要:`dist/index.html` 里是 `./assets/index-xxx.js` 这种相对引用,而产物读取接口是
+# `?path=` 形式——相对 URL 解析会丢掉 query string,浏览器就会去敲一个并不存在的路径。
+# 镜像成真实目录后,HTML 里的引用改写成绝对路径,JS 里的动态 import(Vite 按模块 URL 解析)
+# 也能顺着同一棵目录树自动找到,不用改产品代码。
+# 放站点根而不是 `/api/` 下:`demo/_redirects` 把 `/api/*` 整个改写到 `.../index.json`。
+ASSET_MOUNT = "/artifact-assets"
 
 
 def path_slug(path: str) -> str:
@@ -61,6 +76,30 @@ def write_json(path: Path, payload: Any) -> None:
     target = path / "index.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def resolve_thread_id(db: Path, requested: str) -> str:
+    """`latest` = 聊天库里最新那条会话。
+
+    这样"跑完一段真实对话 → 换进展示站点"就不需要手抄 thread id。
+    """
+
+    if requested != "latest":
+        return requested
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = list(
+            conn.execute(
+                "select t.id from threads t "
+                "join messages m on m.thread_id = t.id "
+                "group by t.id order by max(m.sequence) desc limit 1"
+            )
+        )
+    finally:
+        conn.close()
+    if not rows:
+        raise SystemExit("聊天库里还没有任何会话")
+    return rows[0][0]
 
 
 def load_thread(db: Path, thread_id: str) -> tuple[dict, list[dict]]:
@@ -109,13 +148,74 @@ def thread_artifacts(thread_id: str) -> list[dict[str, Any]]:
         }
         for item in sorted(root.rglob("*"))
         if item.is_file()
+        and not EXCLUDED_ARTIFACT_DIRS.intersection(item.relative_to(root).parts)
     ]
 
 
 _TEXT_SUFFIXES = {".md", ".txt", ".py", ".json", ".html", ".css", ".js", ".ts", ".csv", ".yaml", ".yml"}
 
+# `src="..."` / `href="..."`,单双引号都吃。
+_HTML_REF = re.compile(r"""(?P<head>\b(?:src|href)\s*=\s*)(?P<q>["'])(?P<url>[^"']+)(?P=q)""")
+_EXTERNAL_PREFIXES = ("http://", "https://", "//", "data:", "blob:", "#", "mailto:", "javascript:")
 
-def export_artifacts(api: Path, thread_id: str, artifacts: list[dict[str, Any]]) -> None:
+
+def resolve_local_ref(url: str, html_path: str, known: set[str]) -> str | None:
+    """把 HTML 里的一个引用解析成产物路径;不是站内产物就返回 None。
+
+    先按 HTML 自己所在目录解析(`./assets/x.js`、`../y.css`);解析不中且是 `/` 开头的,
+    再逐级往上拿祖先目录当根试一遍——Vite 源码入口里的 `/src/main.tsx` 就是这种写法。
+    """
+
+    base = PurePosixPath(html_path).parent
+    candidates = [posixpath.normpath(f"{base}/{url}")]
+    if url.startswith("/"):
+        stripped = url.lstrip("/")
+        ancestor = base
+        while str(ancestor) not in (".", "/"):
+            candidates.append(posixpath.normpath(f"{ancestor}/{stripped}"))
+            ancestor = ancestor.parent
+    for candidate in candidates:
+        if candidate in known:
+            return f"{ASSET_MOUNT}/{candidate}"
+    return None
+
+
+def rewrite_html_refs(content: str, html_path: str, known: set[str]) -> str:
+    """把 HTML 里指向同批产物的相对引用改写成站点绝对路径。
+
+    产物面板预览时会注入 `<base href="/api/workspace/artifacts/raw?path=...">`,而相对 URL
+    解析**会丢掉 query string**——`./assets/a.js` 于是变成 `/api/workspace/artifacts/a.js`,404。
+    改成绝对路径后 `<base>` 就影响不到它了。
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        url = match.group("url").strip()
+        if not url or url.startswith(_EXTERNAL_PREFIXES):
+            return match.group(0)
+        resolved = resolve_local_ref(url, html_path, known)
+        if resolved is None:
+            return match.group(0)
+        return f"{match.group('head')}{match.group('q')}{resolved}{match.group('q')}"
+
+    return _HTML_REF.sub(replace, content)
+
+
+def mirror_artifacts(mirror_root: Path, artifacts: list[dict[str, Any]]) -> None:
+    """按**原目录结构**把产物再落一份真实文件。
+
+    这样 `dist/assets/index-xxx.js` 里的动态 import(Vite 按模块 URL 解析相对路径)能顺着
+    同一棵树自己找到兄弟 chunk,不用逐个改写 JS。
+    """
+
+    for artifact in artifacts:
+        target = mirror_root / artifact["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(artifact["_source"], target)
+
+
+def export_artifacts(
+    api: Path, mirror_root: Path, thread_id: str, artifacts: list[dict[str, Any]]
+) -> None:
     listing = [{k: v for k, v in a.items() if not k.startswith("_")} for a in artifacts]
     write_json(api / "workspace" / "artifacts", listing)
     write_json(
@@ -131,6 +231,8 @@ def export_artifacts(api: Path, thread_id: str, artifacts: list[dict[str, Any]])
         if listing
         else [],
     )
+    known = {a["path"] for a in artifacts}
+    mirror_artifacts(mirror_root, artifacts)
     for artifact in artifacts:
         source: Path = artifact["_source"]
         rel = artifact["path"]
@@ -145,15 +247,48 @@ def export_artifacts(api: Path, thread_id: str, artifacts: list[dict[str, Any]])
             "source": "slotflow_workspace",
             "metadata": {"format": suffix.lstrip(".")},
         }
+        text: str | None = None
         if is_text:
-            payload["content"] = source.read_text(encoding="utf-8", errors="replace")
+            text = source.read_text(encoding="utf-8", errors="replace")
+            if suffix == ".html":
+                text = rewrite_html_refs(text, rel, known)
+            payload["content"] = text
         write_json(api / "workspace" / "artifacts" / "read" / slug, payload)
         raw_dir = api / "workspace" / "artifacts" / "raw" / slug
         raw_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, raw_dir / "index.json")  # serve.py 按原样回内容
+        raw_target = raw_dir / "index.json"  # serve.py 按原样回内容
+        if suffix == ".html" and text is not None:
+            raw_target.write_text(text, encoding="utf-8")
+        else:
+            shutil.copyfile(source, raw_target)
 
 
-def export(out_dir: Path, thread_id: str, db: Path) -> None:
+def order_artifacts(artifacts: list[dict[str, Any]], featured: str) -> list[dict[str, Any]]:
+    """把指定产物挪到第一条。
+
+    产物面板打开时默认预览的就是列表第一条(`chat-app.tsx` 的
+    `activeThreadArtifactFiles[0]`,中间那层只过滤、不排序)。而导出是按路径字典序排的,
+    第一条往往是某个 `audit/*.md`——展示页更想让人一眼看到那个能跑的页面。
+
+    `featured` 按**后缀匹配**,所以写 `cybervault-react/dist/index.html` 就够,
+    不用带 `<thread>/artifacts/` 前缀。
+    """
+
+    needle = featured.strip().strip("/")
+    if not needle:
+        return artifacts
+    index = next(
+        (i for i, item in enumerate(artifacts) if item["path"].endswith(needle)), None
+    )
+    if index is None:
+        print(f"警告:--feature 没匹配到任何产物,保持原顺序:{featured!r}")
+        return artifacts
+    return [artifacts[index], *artifacts[:index], *artifacts[index + 1 :]]
+
+
+def export(
+    out_dir: Path, mirror_root: Path, thread_id: str, db: Path, featured: str = ""
+) -> None:
     thread, messages = load_thread(db, thread_id)
     model = "deepseek-v4-pro"
     for message in messages:
@@ -202,28 +337,50 @@ def export(out_dir: Path, thread_id: str, db: Path) -> None:
         },
     )
 
-    artifacts = thread_artifacts(thread_id)
-    export_artifacts(api, thread_id, artifacts)
+    artifacts = order_artifacts(thread_artifacts(thread_id), featured)
+    export_artifacts(api, mirror_root, thread_id, artifacts)
 
     # 环境类读口:展示页不暴露本机的技能 / MCP / 记忆。
-    for rel in ("chat/skills", "chat/mcp/servers", "chat/memories"):
+    # 路径要和真实后端的路由前缀逐字一致(app/skills/routes.py 等),否则前端启动时
+    # 这三个请求会失败,控制台里挂着三条红色 —— 展示页第一眼就掉价。
+    for rel in ("skills", "mcp/servers", "memory"):
         write_json(api / rel, [])
 
     print(
         f"已导出会话 {thread_id}:{len(messages)} 条消息、{len(artifacts)} 个产物 → {out_dir}"
     )
+    print(f"产物镜像(供 HTML 相对引用解析)→ {mirror_root}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--thread", required=True, help="要导出的 thread id")
+    parser.add_argument(
+        "--thread", default="latest",
+        help="要导出的 thread id;`latest`(默认)= 聊天库里最新那条会话",
+    )
     parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument(
+        "--assets",
+        default="",
+        help=f"产物镜像目录(默认 <out 的同级>/artifact-assets,对应站点 {ASSET_MOUNT}/)",
+    )
     parser.add_argument("--db", default=str(CHAT_DB))
+    parser.add_argument(
+        "--feature",
+        default="",
+        help="把匹配这个后缀的产物挪到列表第一条(产物面板默认预览第一条)",
+    )
     args = parser.parse_args()
+    db = Path(args.db)
+    thread_id = resolve_thread_id(db, args.thread)
     out = Path(args.out).resolve()
-    if out.exists():
-        shutil.rmtree(out)
-    export(out, args.thread, Path(args.db))
+    mirror_root = (
+        Path(args.assets).resolve() if args.assets else out.parent / "artifact-assets"
+    )
+    for stale in (out, mirror_root):
+        if stale.exists():
+            shutil.rmtree(stale)
+    export(out, mirror_root, thread_id, db, args.feature)
     return 0
 
 

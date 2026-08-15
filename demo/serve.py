@@ -31,14 +31,26 @@ def _path_slug(value: str) -> str:
 
 class DemoHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
-        # 产物读取接口是 `?path=a/b/c.md` 形式的 query string,静态文件服务器路由不了。
-        # 导出时已按 slug 建好目录,这里把 query 翻译成同一个 slug。
-        if "?" in path:
-            head, _, query = path.partition("?")
-            params = parse_qs(query)
-            target = (params.get("path") or [""])[0]
-            if target and head.rstrip("/").endswith(("/artifacts/read", "/artifacts/raw")):
-                path = f"{head.rstrip('/')}/{_path_slug(unquote(target))}"
+        # 产物读取有两种入口,导出时都落在同一个 slug 目录下:
+        #   ?path=a/b/c.md            —— 老形式,query string 静态服务器路由不了
+        #   /artifacts/raw/a/b/c.md   —— 路径式,带相对引用的 HTML 产物必须用这个
+        #                                (`<base href>` 做相对解析时会丢掉 query string)
+        head, _, query = path.partition("?")
+        head = head.rstrip("/")
+        for prefix in ("/artifacts/read", "/artifacts/raw"):
+            if head.endswith(prefix):
+                target = (parse_qs(query).get("path") or [""])[0]
+                if target:
+                    path = f"{head}/{_path_slug(unquote(target))}"
+                break
+            marker = f"{prefix}/"
+            if marker in head:
+                cut = head.index(marker) + len(marker)
+                rest = head[cut:]
+                if rest:
+                    # slug 幂等:已经是 slug 的原样返回。
+                    path = f"{head[:cut]}{_path_slug(unquote(rest))}"
+                break
         resolved = Path(super().translate_path(path))
         if resolved.is_dir():
             # API 端点:目录里放的是 index.json;页面:Next 导出的是 index.html。

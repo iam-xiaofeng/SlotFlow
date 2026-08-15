@@ -26,3 +26,8 @@ scratch/
 # 展示站点的构建产物(由 demo/build.sh 生成,不进仓库)
 demo/site/
 demo/api/
+demo/artifact-assets/
+frontend/out/
+
+# wrangler 的本地状态与缓存(部署凭据不在这里,但也没有进仓库的理由)
+.wrangler/
