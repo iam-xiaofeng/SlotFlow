@@ -13,6 +13,12 @@
  *   4. 打开产物面板，并把对话滚到最后一条消息的末尾。
  *
  * 都要用 MutationObserver 盯着 —— React 会重渲染，一次性设置会被覆盖回去。
+ *
+ * **但盯归盯，只盯到用户接手为止。** 这条比"盯着"本身更要紧：补丁的职责是摆好首屏，
+ * 不是替用户一直操作页面。早先版本每次 DOM 变动都无条件重跑"开面板 + 压到底"，
+ * 结果是**面板折叠不了**（一收起 → DOM 变 → 下一帧又给点开）、**消息跳转用不了**
+ * （产品用的是 `behavior:"smooth"`，几十帧的平滑滚动被逐帧掐断，跳过去立刻弹回底部）。
+ * 所以两件事各有各的收手判据 —— 见 openArtifactPanel / tick。
  */
 (function () {
   "use strict";
@@ -28,9 +34,17 @@
   var CURTAIN_ID = "slotflow-demo-curtain";
   // 兜底:无论如何到点必须撤掉遮罩,任何判断失误都不能把页面永久盖成白屏。
   var CURTAIN_MAX_MS = 8000;
+  // 会话就绪之后还盯这么久的滚动位置:图片、代码块、面板挤占宽度都会把内容高度撑大,
+  // 压一次不够。过了这个窗口就撒手,剩下的交给产品自己的粘底逻辑。
+  var AUTO_SCROLL_SETTLE_MS = 2500;
 
   var threadOpened = false;
+  // 是否**观察到**面板真的开过一次(不是"点过一次")。见 openArtifactPanel 的注释。
+  var panelOpened = false;
+  // 用户有过真实手势 —— 从此不再碰滚动位置。
+  var userTookOver = false;
   var startedAt = Date.now();
+  var readyAt = 0;
 
   function curtain() {
     return document.getElementById(CURTAIN_ID);
@@ -101,7 +115,17 @@
     // 面板收起时这个按钮**仍然留在 DOM 里**,只是被折叠成 0×0(offsetParent 为 null)。
     // 早先版本用 querySelector 一存在就 return,于是每一轮都提前退出,
     // 打开按钮一次都没被点到,面板永远不开。
-    if (isVisible(document.querySelector(PANEL_IS_OPEN))) return;
+    if (isVisible(document.querySelector(PANEL_IS_OPEN))) {
+      // 关键区别:置位的条件是"**观察到**它开了",而不是"我点过了"。
+      //   · 按"点过了"置位 —— 点击可能没生效(会话还没加载完),一次性标志一置就再不重试,
+      //     面板永远不开;
+      //   · 完全不置位(旧版) —— 用户一折叠,关闭按钮变不可见,下一次 DOM 变动又给点开,
+      //     面板成了**关不掉的**。
+      // 观察到开过一次就撒手,两头都对:重试保留到真正生效为止,生效之后控制权归用户。
+      panelOpened = true;
+      return;
+    }
+    if (panelOpened) return;
     var button = document.querySelector(OPEN_PANEL_BUTTON);
     if (isVisible(button)) button.click();
   }
@@ -128,15 +152,35 @@
     openOnlyThread();
     expandToolTimelines();
     if (conversationReady()) {
+      if (!readyAt) readyAt = Date.now();
       openArtifactPanel();
-      scrollToLatest();
+      // 压到底只在"刚进页面"那一小段窗口里做。过了窗口、或用户有过任何手势,就彻底撒手:
+      // 产品的消息跳转用的是 `behavior:"smooth"`(平滑滚动要跑几十帧),每帧都被这里
+      // 改写 scrollTop 的话,跳过去会立刻弹回底部 —— 跳转按钮等于废掉。
+      if (!userTookOver && Date.now() - readyAt < AUTO_SCROLL_SETTLE_MS) {
+        scrollToLatest();
+      }
       dropCurtain();
     } else if (Date.now() - startedAt > CURTAIN_MAX_MS) {
       dropCurtain();
     }
   }
 
+  /**
+   * 用户接手的信号 —— 只认**真实手势**。
+   *
+   * `element.click()` 派发的是 isTrusted=false 的合成事件,所以我们自己点会话、点开面板
+   * 不会误判成"用户接手"把自己锁死。这和产品里 useStickToBottom 的判据是同一套思路:
+   * 程序滚动不产生 wheel/touch/键盘/指针手势。
+   */
+  function markUserTakeover(event) {
+    if (event.isTrusted) userTookOver = true;
+  }
+
   document.addEventListener("toggle", rememberManualCollapse, true);
+  ["pointerdown", "wheel", "touchstart", "keydown"].forEach(function (type) {
+    document.addEventListener(type, markUserTakeover, { capture: true, passive: true });
+  });
 
   var observer = new MutationObserver(function () {
     // 合并到下一帧，避免每条 DOM 变更都扫一遍。
@@ -153,7 +197,7 @@
     observer.observe(document.body, { childList: true, subtree: true });
     tick();
     // 首屏数据是异步拉的，会话/面板按钮可能还没渲染出来；退避重试几次。
-    // 末尾几次也负责在内容涨完之后把滚动位置再压到底。
+    // 靠后那几次只为"面板一直没开出来"兜底 —— 滚动早被 AUTO_SCROLL_SETTLE_MS 关掉了。
     [150, 400, 800, 1600, 2600, 4000, 6000].forEach(function (delay) {
       setTimeout(tick, delay);
     });
