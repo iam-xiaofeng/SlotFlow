@@ -823,3 +823,70 @@ async def test_async_tool_safety_classifies_errors() -> None:
     msg = await _slotflow_async_tool_safety_wrapper(_stub_tool_request(), permanent)
     assert msg.status == "error"
     assert json.loads(msg.content)["error"]["exception_type"] == "FileNotFoundError"
+
+
+def test_workspace_read_resolves_thread_relative_paths(tmp_path: Path) -> None:
+    """读侧要能理解 `artifacts/x`,不能只认宿主侧的完整前缀。
+
+    2026-08-15 真机:`artifact_write("cybervault/index.html")` 落到
+    `<thread>/artifacts/cybervault/index.html`,而 `workspace_read("artifacts/cybervault/index.html")`
+    按 workspace root 解析,撞上旧布局遗留的顶层 `artifacts/`,连报三次
+    "workspace path is not a file"。父代理把这种路径写进子代理任务描述时必踩。
+    """
+
+    root = tmp_path / "workspace"
+    thread = "thread_061a306f5d40"
+    (root / thread / "artifacts" / "cybervault").mkdir(parents=True)
+    (root / thread / "artifacts" / "cybervault" / "index.html").write_text(
+        "<h1>real</h1>", encoding="utf-8"
+    )
+    # 旧布局的顶层 artifacts/:存在,但**不该**盖住本对话刚写的同名产物。
+    (root / "artifacts" / "cybervault").mkdir(parents=True)
+    (root / "artifacts" / "cybervault" / "index.html").write_text(
+        "<h1>stale</h1>", encoding="utf-8"
+    )
+
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=True),
+            thread_id=thread,
+        )
+    }
+
+    result = json.loads(
+        tools["workspace_read"].invoke({"path": "artifacts/cybervault/index.html"})
+    )
+    assert result["content"] == "<h1>real</h1>"
+    # 回显解析后的路径,模型下一次就会直接用对的那个。
+    assert result["path"] == f"{thread}/artifacts/cybervault/index.html"
+
+    listing = json.loads(tools["workspace_list"].invoke({"path": "artifacts/cybervault"}))
+    assert listing["path"] == f"{thread}/artifacts/cybervault"
+
+    # 不带参数时只看本对话,不再把别的对话的目录暴露出去。
+    tree = json.loads(tools["workspace_tree"].invoke({}))
+    assert tree["path"] == thread
+    assert all(entry["path"].startswith(thread) for entry in tree["entries"])
+
+
+def test_workspace_read_still_serves_legacy_toplevel_paths(tmp_path: Path) -> None:
+    """本对话目录里没有的,仍按老路径读得到——旧布局的存量文件不能读不了。"""
+
+    root = tmp_path / "workspace"
+    thread = "thread_legacy0000"
+    (root / thread / "artifacts").mkdir(parents=True)
+    (root / "artifacts").mkdir(parents=True)
+    (root / "artifacts" / "old.md").write_text("legacy", encoding="utf-8")
+
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=False),
+            thread_id=thread,
+        )
+    }
+
+    result = json.loads(tools["workspace_read"].invoke({"path": "artifacts/old.md"}))
+    assert result["content"] == "legacy"
+    assert result["path"] == "artifacts/old.md"

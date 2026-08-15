@@ -74,6 +74,41 @@ def _with_capped_content(
     return result
 
 
+def resolve_thread_scoped_path(path: str, *, root: Path, thread_id: str | None) -> str:
+    """把模型给的工作区路径**优先按本对话目录**解释。
+
+    2026-08-15 真机 bug:写和读两侧对同一个字符串的理解不一致。
+    `artifact_write("cybervault/index.html")` 会规范化成 `<thread>/artifacts/cybervault/index.html`
+    (见 `normalize_artifact_path`),而 `workspace_read("artifacts/cybervault/index.html")`
+    直接按 **workspace root** 解析——落到了旧布局遗留的顶层 `artifacts/` 上,报
+    "workspace path is not a file"。父代理把 `artifacts/xxx` 写进子代理任务描述时必踩:
+    那一轮三个子代理里有两个连报三次读不到,其中一个绕了 30 分钟才以空响应失败。
+
+    模型这么写并不算错——沙箱容器的 cwd 就是 `<thread>/`,`ls` 看到的正是 `artifacts/`、
+    `work/`、`uploads/`。所以这里补上这层换算,而不是要求模型记住宿主侧的完整前缀。
+
+    顺序是"先本对话、再原样":反过来的话,顶层遗留的同名旧文件会盖掉本轮刚写的产物。
+    两个都不存在时返回本对话候选,好让报错信息指向真正该看的目录。
+    """
+
+    base = thread_dir_name(thread_id)
+    cleaned = (path or ".").strip().lstrip("/").strip()
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:].lstrip("/")
+    if cleaned in ("", "."):
+        # 不带参数的 `workspace_tree()` 以前列的是整个 workspace root,
+        # 也就是**别的对话的目录**;有 thread 时应当只看自己这一份。
+        return base if (root / base).is_dir() else "."
+    if cleaned == base or cleaned.startswith(f"{base}/"):
+        return cleaned
+    candidate = f"{base}/{cleaned}"
+    if (root / candidate).exists():
+        return candidate
+    if (root / cleaned).exists():
+        return cleaned  # 旧布局的顶层 artifacts/ 与 .uploads/ 原件仍照旧可读
+    return candidate
+
+
 def build_workspace_tools(
     config: SlotFlowSandboxConfig | None = None,
     *,
@@ -83,19 +118,24 @@ def build_workspace_tools(
 
     `thread_id` namespaces generated artifacts under `<thread_id>/artifacts/`, so each
     conversation gets one folder holding everything the user can open (uploads staged
-    by the run plus files the agent generates).
+    by the run plus files the agent generates). 读侧工具也按它换算路径,详见
+    `resolve_thread_scoped_path`。
     """
 
     workspace = build_slotflow_workspace(config)
     artifact_root = artifact_dir_for_thread(thread_id)
 
+    def scoped(path: str) -> str:
+        return resolve_thread_scoped_path(path, root=workspace.root, thread_id=thread_id)
+
     def workspace_list(path: str = ".") -> str:
         """List immediate files and directories under a SlotFlow workspace path."""
 
-        entries = workspace.list_entries(path)
+        target = scoped(path)
+        entries = workspace.list_entries(target)
         return json.dumps(
             {
-                "path": path,
+                "path": target,
                 "entries": [
                     {
                         "path": entry.path,
@@ -116,24 +156,26 @@ def build_workspace_tools(
         `workspace_grep` to jump straight to the part you need.
         """
 
-        result = workspace.read_file(path).model_dump()
+        target = scoped(path)
+        result = workspace.read_file(target).model_dump()
         return json.dumps(
-            _with_capped_content(result, offset=offset, path=path),
+            _with_capped_content(result, offset=offset, path=target),
             ensure_ascii=False,
         )
 
     def workspace_tree(path: str = ".", max_depth: int = 3, max_entries: int = 120) -> str:
         """List workspace files recursively with depth and result limits."""
 
+        target = scoped(path)
         entries = list_workspace_tree(
             workspace=workspace,
-            path=path,
+            path=target,
             max_depth=max_depth,
             max_entries=max_entries,
         )
         return json.dumps(
             {
-                "path": path,
+                "path": target,
                 "entries": entries,
                 "source": "slotflow_workspace",
             },
@@ -143,16 +185,17 @@ def build_workspace_tools(
     def workspace_search(query: str, path: str = ".", max_results: int = 20) -> str:
         """Search readable workspace files for a literal text query."""
 
+        target = scoped(path)
         matches = search_workspace_text(
             workspace=workspace,
             query=query,
-            path=path,
+            path=target,
             max_results=max_results,
         )
         return json.dumps(
             {
                 "query": query,
-                "path": path,
+                "path": target,
                 "matches": matches,
                 "source": "slotflow_workspace",
             },
@@ -162,16 +205,17 @@ def build_workspace_tools(
     def workspace_grep(pattern: str, path: str = ".", max_results: int = 20) -> str:
         """Grep readable SlotFlow workspace files for a literal pattern without Docker."""
 
+        target = scoped(path)
         matches = search_workspace_text(
             workspace=workspace,
             query=pattern,
-            path=path,
+            path=target,
             max_results=max_results,
         )
         return json.dumps(
             {
                 "pattern": pattern,
-                "path": path,
+                "path": target,
                 "matches": matches,
                 "source": "slotflow_workspace",
             },
