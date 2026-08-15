@@ -18,10 +18,22 @@ the agent should not only answer, but also read files, call tools, remember usef
 context, ask for clarification, and produce durable outputs that can be previewed in the
 workspace panel.
 
+### Live transcripts (read-only demo)
+
+**[▶ Browse real conversation transcripts](#)** — replace this link with your deployed URL.
+
+A static, no-backend page showing 10 real SlotFlow runs: long tool results offloaded and
+retrieved again, context compaction with later recall, sandboxed code execution, HITL
+clarification, Skills two-step loading, plus two long multi-step tasks (a generated landing
+page you can preview inline, and a 19-tool research session). Thinking, tool timelines, todo
+panels, clarification cards and artifacts are all rendered. See [`demo/`](./demo) to
+regenerate or self-host it.
+
 ---
 
 ## Contents
 
+- [Live transcripts](#live-transcripts-read-only-demo)
 - [What You Get](#what-you-get)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
