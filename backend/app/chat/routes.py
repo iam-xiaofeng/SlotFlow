@@ -305,7 +305,7 @@ async def stream_thread_run(
                             streamed_reasoning_content="".join(assistant_reasoning_parts),
                         ),
                         thinking_enabled=bundle.context.thinking_enabled,
-                        tool_activities=tool_activities,
+                        tool_activities=settle_tool_activities(tool_activities),
                         todos=todos_snapshot,
                     )
                     clarification_metadata["source"] = "clarification"
@@ -356,7 +356,7 @@ async def stream_thread_run(
                             metadata=assistant_message_metadata(
                                 reasoning_content,
                                 thinking_enabled=bundle.context.thinking_enabled,
-                                tool_activities=tool_activities,
+                                tool_activities=settle_tool_activities(tool_activities),
                                 todos=todos_snapshot,
                             ),
                         )
@@ -532,6 +532,22 @@ def assistant_message_metadata(
     return metadata
 
 
+def settle_tool_activities(activities: list[dict]) -> list[dict]:
+    """落库前把仍在 starting/running 的行收敛成 completed。
+
+    这一轮已经结束了(要么给出终答,要么停在澄清 interrupt 上),没有任何工具还在跑。
+    不收敛的话,重建出来的时间线会永远停在"运行中",界面上是一个转不完的圈——
+    前端在流式里靠 `settleRunningToolActivities` 做同样的事,落库这一侧也得做。
+    """
+
+    return [
+        {**activity, "phase": "completed"}
+        if activity.get("phase") in ("starting", "running")
+        else activity
+        for activity in activities
+    ]
+
+
 def collect_tool_activity(activities: list[dict], payload: dict) -> None:
     """把一条 ``tool.status`` 事件并进落库用的工具时间线。
 
@@ -555,13 +571,17 @@ def collect_tool_activity(activities: list[dict], payload: dict) -> None:
         return
     if phase not in ("starting", "running", "completed", "error"):
         return
-    entry = {"toolName": tool_name, "phase": phase, "message": message}
+    # 字段名必须和 `tool.status` 事件**逐字一致**(tool_name / phase / message / command):
+    # 前端读回时走的是同一个 `parseToolStatus`,它认的是事件的字段名。
+    # 2026-08-15 踩到:这里先写成了驼峰 `toolName`,parseToolStatus 拿不到 tool_name 直接返回
+    # null,于是时间线永远是空的——落库看着有数据、界面上什么都没有。
+    entry = {"tool_name": tool_name, "phase": phase, "message": message}
     command = payload.get("command")
     if isinstance(command, str):
         entry["command"] = command
     if (
         activities
-        and activities[-1]["toolName"] == tool_name
+        and activities[-1]["tool_name"] == tool_name
         and activities[-1]["phase"] in ("starting", "running")
     ):
         activities[-1] = entry

@@ -850,7 +850,7 @@ def test_collect_tool_activity_merges_like_the_frontend() -> None:
     collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "completed", "message": "完成"})
     collect_tool_activity(activities, {"tool_name": "workspace_read", "phase": "completed", "message": "读完"})
 
-    assert [(a["toolName"], a["phase"]) for a in activities] == [
+    assert [(a["tool_name"], a["phase"]) for a in activities] == [
         ("sandbox_exec", "completed"),
         ("workspace_read", "completed"),
     ]
@@ -879,11 +879,11 @@ def test_assistant_metadata_carries_the_tool_timeline() -> None:
     metadata = assistant_message_metadata(
         "想了想",
         thinking_enabled=True,
-        tool_activities=[{"toolName": "web_search", "phase": "completed", "message": "搜完了"}],
+        tool_activities=[{"tool_name": "web_search", "phase": "completed", "message": "搜完了"}],
     )
 
     assert metadata["reasoning_content"] == "想了想"
-    assert metadata["tool_activities"][0]["toolName"] == "web_search"
+    assert metadata["tool_activities"][0]["tool_name"] == "web_search"
     # 没有工具的那一轮不该塞一个空数组进去。
     assert "tool_activities" not in assistant_message_metadata("x", tool_activities=[])
 
@@ -903,3 +903,43 @@ def test_collect_tool_activity_rejects_blank_tool_names() -> None:
     collect_tool_activity(activities, {"tool_name": "   ", "phase": "running", "message": "正在调用工具"})
 
     assert activities == []
+
+
+def test_settle_tool_activities_closes_running_rows() -> None:
+    """落库时不能留下"运行中"的行,否则重建的时间线是个转不完的圈。"""
+
+    from app.chat.routes import settle_tool_activities
+
+    settled = settle_tool_activities(
+        [
+            {"tool_name": "sandbox_exec", "phase": "running", "message": "执行中"},
+            {"tool_name": "web_search", "phase": "error", "message": "失败"},
+        ]
+    )
+
+    assert [a["phase"] for a in settled] == ["completed", "error"]
+
+
+def test_persisted_activity_matches_the_tool_status_event_shape() -> None:
+    """落库的每一行必须和 `tool.status` 事件**字段名逐字一致**。
+
+    前端读回时走的是同一个 `parseToolStatus`,它认的是事件的字段名(tool_name / phase /
+    message / command)。2026-08-15 踩到:这里先写成了驼峰 `toolName`,parseToolStatus
+    拿不到 tool_name 直接返回 null——落库看着有数据,界面上时间线永远是空的。
+    这条把两边的口径钉在一起。
+    """
+
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(
+        activities,
+        {
+            "tool_name": "sandbox_exec",
+            "phase": "completed",
+            "message": "正在初始化 Docker 沙箱并执行代码",
+            "command": "python fib.py",
+        },
+    )
+
+    assert set(activities[0]) == {"tool_name", "phase", "message", "command"}

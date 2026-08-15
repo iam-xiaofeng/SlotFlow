@@ -20,10 +20,25 @@ import argparse
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, unquote
+
+
+def _path_slug(value: str) -> str:
+    """和 `export_demo_api.path_slug` 保持一致:`a/b/c.md` → `a__b__c.md`。"""
+
+    return value.strip("/").replace("/", "__")
 
 
 class DemoHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
+        # 产物读取接口是 `?path=a/b/c.md` 形式的 query string,静态文件服务器路由不了。
+        # 导出时已按 slug 建好目录,这里把 query 翻译成同一个 slug。
+        if "?" in path:
+            head, _, query = path.partition("?")
+            params = parse_qs(query)
+            target = (params.get("path") or [""])[0]
+            if target and head.rstrip("/").endswith(("/artifacts/read", "/artifacts/raw")):
+                path = f"{head.rstrip('/')}/{_path_slug(unquote(target))}"
         resolved = Path(super().translate_path(path))
         if resolved.is_dir():
             # API 端点:目录里放的是 index.json;页面:Next 导出的是 index.html。

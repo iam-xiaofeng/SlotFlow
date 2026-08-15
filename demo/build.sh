@@ -30,7 +30,8 @@ restore_config() {
 trap restore_config EXIT
 
 echo "[demo] 1/3 生成静态 API 数据"
-(cd "$ROOT/backend" && uv run python -m evals.export_demo_api)
+THREAD="${SLOTFLOW_DEMO_THREAD:-thread_d130690e7771}"
+(cd "$ROOT/backend" && uv run python -m evals.export_demo_api --thread "$THREAD")
 
 echo "[demo] 2/3 静态导出真前端"
 cp -f "$CONFIG" "$BACKUP"
@@ -61,6 +62,11 @@ rm -rf "$OUT"
 cp -r "$FRONTEND/out" "$OUT"
 cp -r "$ROOT/demo/api" "$OUT/api"
 [[ -f "$ROOT/demo/_redirects" ]] && cp -f "$ROOT/demo/_redirects" "$OUT/_redirects"
+
+# 展示页专用补丁:展开工具时间线 + 自动打开产物面板。
+# 只注入到静态产物里,**不进产品源码**——真实产品那两个默认值是对的,展示页的诉求不一样。
+cp -f "$ROOT/demo/demo-tweaks.js" "$OUT/demo-tweaks.js"
+python3 "$ROOT/demo/inject_tweaks.py" "$OUT"
 
 echo "[demo] 完成 → $OUT ($(du -sh "$OUT" | cut -f1))"
 
