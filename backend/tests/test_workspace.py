@@ -224,3 +224,64 @@ def test_list_thread_workspaces_keeps_legacy_artifacts_visible(tmp_path: Path) -
             "size_bytes": 3,
         }
     ]
+
+
+def test_raw_artifact_path_style_url_lets_relative_assets_resolve(tmp_path: Path) -> None:
+    """带相对引用的 HTML 产物必须能预览。
+
+    2026-08-15 真机:产物面板注入 `<base href="<raw url>">`,而 `?path=` 形式的 URL 做相对
+    解析时**会丢掉 query string** —— `./assets/x.js` 解析成
+    `/api/workspace/artifacts/assets/x.js`,404,整页白屏,一个 Vite 构建产物因此永远
+    预览不了。所以 raw 必须另有路径式入口。
+    """
+
+    from urllib.parse import urljoin
+
+    client, store = _client(tmp_path)
+    _write(
+        store,
+        "thread_abc/artifacts/app/dist/index.html",
+        '<script type="module" crossorigin src="./assets/main.js"></script>',
+    )
+    _write(store, "thread_abc/artifacts/app/dist/assets/main.js", "console.log(1)")
+
+    base = "/api/workspace/artifacts/raw/thread_abc/artifacts/app/dist/index.html"
+    assert client.get(base).status_code == 200
+
+    # 关键断言:浏览器就是这样解析 <base href> 下相对引用的。
+    resolved = urljoin(f"http://testserver{base}", "./assets/main.js")
+    asset = client.get(resolved.removeprefix("http://testserver"))
+    assert asset.status_code == 200
+    assert asset.text == "console.log(1)"
+    # iframe 是不透明源(sandbox 无 allow-same-origin),module script 强制走 CORS。
+    assert asset.headers["access-control-allow-origin"] == "*"
+
+    # 老的 ?path= 形式不能断:已有链接还在用。
+    legacy = client.get(
+        "/api/workspace/artifacts/raw",
+        params={"path": "thread_abc/artifacts/app/dist/index.html"},
+    )
+    assert legacy.status_code == 200
+
+    # 路径式入口不能成为绕过读权限的后门。
+    assert client.get("/api/workspace/artifacts/raw/thread_abc/work/scratch.py").status_code == 400
+    assert client.get("/api/workspace/artifacts/raw/.uploads/file_x/orig.txt").status_code == 400
+
+
+def test_artifact_listing_hides_dependency_directories(tmp_path: Path) -> None:
+    """node_modules 不该出现在产物面板里。
+
+    真机上一次 React 重构在 artifacts/ 下装出 2660 个依赖文件,列表接口返回 2814 条、
+    394 KB JSON,真正的交付物被彻底淹没。
+    """
+
+    client, store = _client(tmp_path)
+    _write(store, "thread_abc/artifacts/node_modules/react/index.js")
+    _write(store, "thread_abc/artifacts/dist/assets/app.js")  # 构建产物本身要留着
+    _write(store, "thread_abc/artifacts/report.md", "# 交付物")
+
+    paths = [item["path"] for item in client.get("/api/workspace/artifacts").json()]
+    assert paths == [
+        "thread_abc/artifacts/dist/assets/app.js",
+        "thread_abc/artifacts/report.md",
+    ]

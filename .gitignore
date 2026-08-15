@@ -22,3 +22,12 @@ scratch/
 # local analysis notes that name the specific relay providers in use — local only
 工具架构总览.md
 模型调用链路详解.md
+
+# 展示站点的构建产物(由 demo/build.sh 生成,不进仓库)
+demo/site/
+demo/api/
+demo/artifact-assets/
+frontend/out/
+
+# wrangler 的本地状态与缓存(部署凭据不在这里,但也没有进仓库的理由)
+.wrangler/

@@ -833,3 +833,113 @@ def test_stream_run_persists_clarification_request() -> None:
     # 看起来像"模型重新思考了",实际是这段文本从来没被持久化。
     assert messages[1].metadata["reasoning_content"] == "先看看用户昨天提到过哪些币种…"
     assert runs[0].status == "completed"
+
+
+def test_collect_tool_activity_merges_like_the_frontend() -> None:
+    """落库的工具时间线必须和流式当时看到的是同一条。
+
+    合并规则与前端 `upsertToolActivity` 对齐:同名工具还在 starting/running 就就地更新,
+    否则新增一行。不对齐的话,刷新后重建出来的时间线和用户当时看到的会不一样。
+    """
+
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "starting", "message": "启动"})
+    collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "running", "message": "执行中"})
+    collect_tool_activity(activities, {"tool_name": "sandbox_exec", "phase": "completed", "message": "完成"})
+    collect_tool_activity(activities, {"tool_name": "workspace_read", "phase": "completed", "message": "读完"})
+
+    assert [(a["tool_name"], a["phase"]) for a in activities] == [
+        ("sandbox_exec", "completed"),
+        ("workspace_read", "completed"),
+    ]
+
+
+def test_collect_tool_activity_ignores_malformed_events() -> None:
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(activities, {"tool_name": "x", "phase": "bogus", "message": "m"})
+    collect_tool_activity(activities, {"phase": "completed", "message": "缺工具名"})
+    collect_tool_activity(activities, {"tool_name": "y", "phase": "completed"})
+
+    assert activities == []
+
+
+def test_assistant_metadata_carries_the_tool_timeline() -> None:
+    """工具时间线跟着 assistant 消息落库,前端 messageRecordToUiMessage 据此恢复。
+
+    工具**消息**本身仍然不进聊天库(那属于模型侧,在 checkpoint 里);
+    存的只是「用户当时看到的那条时间线」。
+    """
+
+    from app.chat.routes import assistant_message_metadata
+
+    metadata = assistant_message_metadata(
+        "想了想",
+        thinking_enabled=True,
+        tool_activities=[{"tool_name": "web_search", "phase": "completed", "message": "搜完了"}],
+    )
+
+    assert metadata["reasoning_content"] == "想了想"
+    assert metadata["tool_activities"][0]["tool_name"] == "web_search"
+    # 没有工具的那一轮不该塞一个空数组进去。
+    assert "tool_activities" not in assistant_message_metadata("x", tool_activities=[])
+
+
+def test_collect_tool_activity_rejects_blank_tool_names() -> None:
+    """空工具名不能进时间线。
+
+    2026-08-15 真机:走中转的流式 tool_call 初期 `name` 是空字符串,一路漏到 tool.status,
+    界面上出现一个没有名字的「正在调用工具」芯片;更糟的是空名字匹配不上
+    `_TOOL_STATUS_SKIP`,本该被跳过的 write_todos / ask_clarification 反而漏出通用芯片。
+    """
+
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(activities, {"tool_name": "", "phase": "running", "message": "正在调用工具"})
+    collect_tool_activity(activities, {"tool_name": "   ", "phase": "running", "message": "正在调用工具"})
+
+    assert activities == []
+
+
+def test_settle_tool_activities_closes_running_rows() -> None:
+    """落库时不能留下"运行中"的行,否则重建的时间线是个转不完的圈。"""
+
+    from app.chat.routes import settle_tool_activities
+
+    settled = settle_tool_activities(
+        [
+            {"tool_name": "sandbox_exec", "phase": "running", "message": "执行中"},
+            {"tool_name": "web_search", "phase": "error", "message": "失败"},
+        ]
+    )
+
+    assert [a["phase"] for a in settled] == ["completed", "error"]
+
+
+def test_persisted_activity_matches_the_tool_status_event_shape() -> None:
+    """落库的每一行必须和 `tool.status` 事件**字段名逐字一致**。
+
+    前端读回时走的是同一个 `parseToolStatus`,它认的是事件的字段名(tool_name / phase /
+    message / command)。2026-08-15 踩到:这里先写成了驼峰 `toolName`,parseToolStatus
+    拿不到 tool_name 直接返回 null——落库看着有数据,界面上时间线永远是空的。
+    这条把两边的口径钉在一起。
+    """
+
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(
+        activities,
+        {
+            "tool_name": "sandbox_exec",
+            "phase": "completed",
+            "message": "正在初始化 Docker 沙箱并执行代码",
+            "command": "python fib.py",
+        },
+    )
+
+    assert set(activities[0]) == {"tool_name", "phase", "message", "command"}

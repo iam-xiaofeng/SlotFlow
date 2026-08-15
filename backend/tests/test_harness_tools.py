@@ -24,7 +24,7 @@ from app.harness.tools import ask_clarification_tool
 from app.harness.tools.registry import build_harness_tools
 import app.harness.tools.sandbox as sandbox_tools_module
 import app.harness.tools.workspace as workspace_tools_module
-from app.harness.tools.workspace import build_workspace_tools
+from app.harness.tools.workspace import MAX_WORKSPACE_READ_CHARS, build_workspace_tools
 
 
 class ToolAwareFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -240,7 +240,45 @@ def test_workspace_tools_list_and_read_text_files(tmp_path: Path) -> None:
         "size_bytes": 5,
         "source": "slotflow_workspace",
         "metadata": {"format": "txt"},
+        # 每次读取都带分页信息:没截断时也要说清楚"就这么多",模型才知道不用再翻页。
+        "read": {"truncated": False, "total_chars": 5, "offset": 0},
     }
+
+
+def test_workspace_read_caps_long_files_and_offers_the_next_offset(tmp_path: Path) -> None:
+    """大文件必须截断并给出续读位置。
+
+    2026-08-14 真机:`workspace_read` 是整个工具集里唯一没有任何上限的读口(工具结果卸载
+    还刻意跳过它),一个 446KB 的上传文件被整段内联成 373K 字符的 ToolMessage(≈166k token),
+    之后模型每次都返回空响应,thread 被永久毒化。见 HARNESS_NOTES §63。
+    """
+
+    root = tmp_path / "workspace"
+    (root / "docs").mkdir(parents=True)
+    body = "x" * (MAX_WORKSPACE_READ_CHARS + 500)
+    (root / "docs" / "big.txt").write_text(body, encoding="utf-8")
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=False)
+        )
+    }
+
+    first = json.loads(tools["workspace_read"].invoke({"path": "docs/big.txt"}))
+    assert len(first["content"]) == MAX_WORKSPACE_READ_CHARS
+    assert first["read"]["truncated"] is True
+    assert first["read"]["total_chars"] == len(body)
+    assert first["read"]["next_offset"] == MAX_WORKSPACE_READ_CHARS
+
+    rest = json.loads(
+        tools["workspace_read"].invoke(
+            {"path": "docs/big.txt", "offset": first["read"]["next_offset"]}
+        )
+    )
+    assert len(rest["content"]) == 500
+    assert rest["read"]["truncated"] is False
+    # 两段拼起来必须正好是原文,截断不能丢字符。
+    assert first["content"] + rest["content"] == body
 
 
 def test_workspace_read_extracts_docx_pdf_and_image_metadata(tmp_path: Path) -> None:
@@ -785,3 +823,70 @@ async def test_async_tool_safety_classifies_errors() -> None:
     msg = await _slotflow_async_tool_safety_wrapper(_stub_tool_request(), permanent)
     assert msg.status == "error"
     assert json.loads(msg.content)["error"]["exception_type"] == "FileNotFoundError"
+
+
+def test_workspace_read_resolves_thread_relative_paths(tmp_path: Path) -> None:
+    """读侧要能理解 `artifacts/x`,不能只认宿主侧的完整前缀。
+
+    2026-08-15 真机:`artifact_write("cybervault/index.html")` 落到
+    `<thread>/artifacts/cybervault/index.html`,而 `workspace_read("artifacts/cybervault/index.html")`
+    按 workspace root 解析,撞上旧布局遗留的顶层 `artifacts/`,连报三次
+    "workspace path is not a file"。父代理把这种路径写进子代理任务描述时必踩。
+    """
+
+    root = tmp_path / "workspace"
+    thread = "thread_061a306f5d40"
+    (root / thread / "artifacts" / "cybervault").mkdir(parents=True)
+    (root / thread / "artifacts" / "cybervault" / "index.html").write_text(
+        "<h1>real</h1>", encoding="utf-8"
+    )
+    # 旧布局的顶层 artifacts/:存在,但**不该**盖住本对话刚写的同名产物。
+    (root / "artifacts" / "cybervault").mkdir(parents=True)
+    (root / "artifacts" / "cybervault" / "index.html").write_text(
+        "<h1>stale</h1>", encoding="utf-8"
+    )
+
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=True),
+            thread_id=thread,
+        )
+    }
+
+    result = json.loads(
+        tools["workspace_read"].invoke({"path": "artifacts/cybervault/index.html"})
+    )
+    assert result["content"] == "<h1>real</h1>"
+    # 回显解析后的路径,模型下一次就会直接用对的那个。
+    assert result["path"] == f"{thread}/artifacts/cybervault/index.html"
+
+    listing = json.loads(tools["workspace_list"].invoke({"path": "artifacts/cybervault"}))
+    assert listing["path"] == f"{thread}/artifacts/cybervault"
+
+    # 不带参数时只看本对话,不再把别的对话的目录暴露出去。
+    tree = json.loads(tools["workspace_tree"].invoke({}))
+    assert tree["path"] == thread
+    assert all(entry["path"].startswith(thread) for entry in tree["entries"])
+
+
+def test_workspace_read_still_serves_legacy_toplevel_paths(tmp_path: Path) -> None:
+    """本对话目录里没有的,仍按老路径读得到——旧布局的存量文件不能读不了。"""
+
+    root = tmp_path / "workspace"
+    thread = "thread_legacy0000"
+    (root / thread / "artifacts").mkdir(parents=True)
+    (root / "artifacts").mkdir(parents=True)
+    (root / "artifacts" / "old.md").write_text("legacy", encoding="utf-8")
+
+    tools = {
+        item.name: item
+        for item in build_workspace_tools(
+            SlotFlowSandboxConfig(workspace_root=root, writes_enabled=False),
+            thread_id=thread,
+        )
+    }
+
+    result = json.loads(tools["workspace_read"].invoke({"path": "artifacts/old.md"}))
+    assert result["content"] == "legacy"
+    assert result["path"] == "artifacts/old.md"

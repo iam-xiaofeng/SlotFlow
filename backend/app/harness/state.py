@@ -9,8 +9,6 @@
 - `system_prompt`：`pre_model` 注入长期记忆后的最终 system 段，`agent` 读取。
 - `retrieved_memories`：`prepare` 检索到的长期记忆，供 `pre_model` 注入与 `finalize` 引用。
 - `artifacts_baseline`：`prepare` 的产物基线快照，供 `finalize` 计算新增产物。
-- `todo_enforcement`：`post_model` 的 todo 约束控制通道（`pending` 指令文本 +
-  `attempted` 防循环标记）。
 - `used_skills`：本轮对话里被 `skill_read` 读过正文的 Skill 名台账。压缩时会被写进摘要，
   这样正文被折叠掉之后，模型仍然知道"我用过哪些 Skill"，可以重新 `skill_read` 或用
   `context_archive_*` 回溯原始工具结果。
@@ -61,7 +59,6 @@ class SlotFlowAgentState(AgentState):
     system_prompt: NotRequired[str | None]
     retrieved_memories: NotRequired[list[Any] | None]
     artifacts_baseline: NotRequired[set[str] | None]
-    todo_enforcement: NotRequired[dict[str, Any] | None]
     context_epoch: NotRequired[dict[str, Any] | None]
     used_skills: NotRequired[Annotated[list[str] | None, merge_ordered_unique]]
     model_input_suffix: NotRequired[str | None]

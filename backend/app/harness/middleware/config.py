@@ -28,6 +28,9 @@ class SlotFlowMiddlewareConfig:
     subagent_max_concurrent: int = 3
     context_overflow_max_retries: int = 5
     context_overflow_retry_delay_seconds: int = 2
+    # 空响应(既无正文也无工具调用)重试次数。中转被限流时不返回 429,而是直接回一个
+    # 空补全——真机实测裸调最小 prompt 3 次里空 2 次。重试 1 次远远不够,所以默认 3 次退避重试。
+    empty_response_max_retries: int = 3
     # 超长工具结果卸载：单条工具结果文本超过阈值(字符)时，把全文写入工作区隐藏文件，
     # 上下文只保留"引用句柄 + 预览"，模型按需用 workspace_read/workspace_grep 分块回读
     # (Manus「file system as context」)。0 或关闭开关即完全禁用、工具结果原样内联。

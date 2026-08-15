@@ -237,6 +237,10 @@ def load_middleware_config_from_env() -> SlotFlowMiddlewareConfig:
             "SLOTFLOW_CONTEXT_OVERFLOW_RETRY_DELAY_SECONDS",
             default=defaults.context_overflow_retry_delay_seconds,
         ),
+        empty_response_max_retries=load_positive_int_from_env(
+            "SLOTFLOW_EMPTY_RESPONSE_MAX_RETRIES",
+            default=defaults.empty_response_max_retries,
+        ),
         tool_output_offload_enabled=load_bool_from_env(
             "SLOTFLOW_TOOL_OUTPUT_OFFLOAD",
             default=True,

@@ -240,6 +240,7 @@ type ThreadContextUsageRecord = {
   thread_id: string;
   run_id: string | null;
   context_tokens: number | null;
+  context_cached_tokens: number | null;
   context_window_tokens: number | null;
   context_input_budget_tokens: number | null;
   context_window_source: string | null;
@@ -308,13 +309,19 @@ export function resolveArtifactRawUrl(
   path: string,
   options: { download?: boolean } = {},
 ): string {
-  const params = new URLSearchParams({ path });
-  if (options.download) {
-    params.set("download", "true");
-  }
+  // 路径式而不是 `?path=`。产物面板预览 HTML 时会注入 `<base href="<这个 URL>">`,
+  // 而相对 URL 解析**会丢掉 query string**:`./assets/a.js` 会变成
+  // `/api/workspace/artifacts/assets/a.js` → 404,带外链资源的页面必然白屏。
+  // 路径式则让相对引用自然落回同一棵目录树。后端两种形式都收。
+  const encoded = path
+    .replace(/^\/+/, "")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const suffix = options.download ? "?download=true" : "";
   return joinBaseUrl(
     resolveChatStreamBaseUrl(),
-    `/api/workspace/artifacts/raw?${params.toString()}`,
+    `/api/workspace/artifacts/raw/${encoded}${suffix}`,
   );
 }
 

@@ -17,8 +17,12 @@ from app.chat.run_config import build_run_config
 
 
 def test_sanitize_reasoning_message_collapses_persisted_content() -> None:
-    """Inbound boundary: a streamed reasoning block-list collapses to the answer string and the
-    verbose ``reasoning_content`` carrier is dropped, so nothing but answer text is checkpointed."""
+    """入站边界:流式回来的 reasoning 块列表塌成答案字符串。
+
+    塌 content 是**永远执行**的——块列表对 OpenAI 风格的 Chat Completions 是线路非法
+    (``unknown variant 'reasoning'`` → 400),也是体积大头。而 ``reasoning_content``
+    这个顶层载体 2026-08-14 起**默认保留**(见下面那条用例)。
+    """
 
     message = AIMessage(
         content=["", {"type": "thinking", "thinking": "step 1"}, {"type": "thinking", "thinking": "step 2"}, "final answer"],
@@ -28,7 +32,7 @@ def test_sanitize_reasoning_message_collapses_persisted_content() -> None:
     sanitize_reasoning_message(message)
 
     assert message.content == "final answer"
-    assert "reasoning_content" not in message.additional_kwargs
+    assert message.additional_kwargs["reasoning_content"] == "step 1step 2"
 
 
 def test_sanitize_reasoning_message_preserves_signed_thinking_blocks() -> None:
@@ -48,7 +52,7 @@ def test_sanitize_reasoning_message_preserves_signed_thinking_blocks() -> None:
     sanitize_reasoning_message(message)
 
     assert message.content == "done"
-    assert "reasoning_content" not in message.additional_kwargs
+    assert message.additional_kwargs["reasoning_content"] == "why"
     assert message.additional_kwargs["thinking_blocks"] == [
         {"type": "thinking", "thinking": "why", "signature": "sig-1"}
     ]
@@ -76,9 +80,13 @@ def test_sanitize_reasoning_message_keeps_reasoning_content_for_deepseek() -> No
     assert message.additional_kwargs["reasoning_content"] == "step 1"
 
 
-def test_sanitize_reasoning_message_drops_reasoning_content_for_custom_relay() -> None:
-    """grok/glm ride a custom OpenAI-compatible relay (provider ``custom``): the CoT is not required
-    back, so the carrier is dropped for context economy — same as the default (no provider)."""
+def test_sanitize_reasoning_message_keeps_reasoning_content_for_custom_relay() -> None:
+    """走中转的 provider 是 ``"custom"``,默认同样保留 CoT 载体。
+
+    这正是 2026-08-14 翻转默认值的直接原因:原来的白名单只认 ``provider == "deepseek"``,
+    而一个经 OpenAI 兼容中转访问的 DeepSeek 上报的是 ``"custom"`` —— 唯一硬性要求回传这个
+    字段的 provider,恰恰是被剥掉的那个。
+    """
 
     message = AIMessage(
         content=[{"type": "thinking", "thinking": "step"}, "answer"],
@@ -88,7 +96,30 @@ def test_sanitize_reasoning_message_drops_reasoning_content_for_custom_relay() -
     sanitize_reasoning_message(message, provider="custom")
 
     assert message.content == "answer"
-    assert "reasoning_content" not in message.additional_kwargs
+    assert message.additional_kwargs["reasoning_content"] == "step"
+
+
+def test_strip_reasoning_providers_env_restores_the_old_token_economy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """点名的 provider 仍然可以剥,用于"省 token 优先"的旧行为。"""
+
+    monkeypatch.setenv("SLOTFLOW_STRIP_REASONING_PROVIDERS", "grok, glm")
+
+    stripped = AIMessage(
+        content=[{"type": "thinking", "thinking": "step"}, "answer"],
+        additional_kwargs={"reasoning_content": "step"},
+    )
+    sanitize_reasoning_message(stripped, provider="grok")
+    assert "reasoning_content" not in stripped.additional_kwargs
+
+    # 没被点名的 provider 不受影响。
+    kept = AIMessage(
+        content=[{"type": "thinking", "thinking": "step"}, "answer"],
+        additional_kwargs={"reasoning_content": "step"},
+    )
+    sanitize_reasoning_message(kept, provider="custom")
+    assert kept.additional_kwargs["reasoning_content"] == "step"
 
 
 def _bundle():

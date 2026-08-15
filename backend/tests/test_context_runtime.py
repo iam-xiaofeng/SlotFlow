@@ -10,6 +10,8 @@ from langgraph.types import Send
 
 from app.chat.runtime.models import resolve_model_context_budget
 from app.harness.graph import (
+    EmptyModelResponseError,
+    assert_model_response_not_empty,
     emergency_context_projection,
     is_context_overflow_error,
     make_tools_node,
@@ -193,3 +195,33 @@ def test_context_epoch_resets_when_prefix_signature_changes() -> None:
     projected, used = project_with_context_epoch(canonical, epoch)
     assert used is False  # stale epoch -> caller clears it
     assert projected == canonical  # falls back to full (repaired) canonical, nothing dropped
+
+
+def test_empty_model_response_raises_instead_of_entering_state() -> None:
+    """空响应必须当场失败，不能变成一条空 AIMessage 进 state。
+
+    2026-08-14 真机:446KB 文件被 `workspace_read` 整段内联(≈166k token)后,provider 连着
+    返回 output_tokens=0 的空消息、HTTP 却是 200。当时是**静默死亡**:空消息没有 tool_calls
+    → 路由 finalize → 这一轮"正常结束" → `run.finished` 时 content 为空 → 一条都不落库;
+    而那条空消息进了 checkpoint,thread 被永久毒化(后来发"继续啊"仍然吐空)。见 §63。
+    """
+
+    with pytest.raises(EmptyModelResponseError):
+        assert_model_response_not_empty(AIMessage(content=""))
+
+    with pytest.raises(EmptyModelResponseError):
+        assert_model_response_not_empty(AIMessage(content="   \n  "))
+
+
+def test_non_empty_and_tool_call_responses_pass_the_guard() -> None:
+    """只调工具不给正文是完全正常的一步,不能被这道闸误伤。"""
+
+    assert_model_response_not_empty(AIMessage(content="答案"))
+    assert_model_response_not_empty(
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "workspace_read", "args": {}, "id": "a", "type": "tool_call"}],
+        )
+    )
+    # reasoning 块被 sanitize 剥掉之后 content 会是块列表,正文仍要能被认出来。
+    assert_model_response_not_empty(AIMessage(content=[{"type": "text", "text": "答案"}]))

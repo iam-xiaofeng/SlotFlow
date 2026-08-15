@@ -409,6 +409,7 @@ export function ComposerTools({
 
 export type ComposerContextUsage = {
   usedTokens: number | null;
+  cachedTokens: number | null;
   windowTokens: number | null;
   budgetTokens: number | null;
   source: string | null;
@@ -441,26 +442,66 @@ export function ComposerContextMeter({ usage }: { usage: ComposerContextUsage | 
   const barTone =
     ratio >= 0.9 ? "bg-red-500" : ratio >= 0.75 ? "bg-amber-500" : "bg-primary/60";
   const barWidth = used > 0 ? Math.max(percent, 2) : 0;
+  const cache = describeCacheHit(usage);
   return (
-    <div
-      className="flex items-center gap-2 text-xs"
-      title={`上下文 ${used.toLocaleString()} / ${windowTokens.toLocaleString()} tokens (${percent}%)`}
-    >
-      <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-muted sm:block">
-        <div
-          className={`h-full ${barTone} transition-[width] duration-300`}
-          style={{ width: `${barWidth}%` }}
-        />
-      </div>
-      <span className={`tabular-nums ${textTone}`}>
-        {usage.usedTokens === null ? "—" : formatTokenCount(used)}
-        <span className="text-muted-foreground/60">
-          {" / "}
-          {formatTokenCount(windowTokens)}
+    <div className="flex items-center gap-2 text-xs">
+      <div
+        className="flex items-center gap-2"
+        title={`上下文 ${used.toLocaleString()} / ${windowTokens.toLocaleString()} tokens (${percent}%)`}
+      >
+        <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-muted sm:block">
+          <div
+            className={`h-full ${barTone} transition-[width] duration-300`}
+            style={{ width: `${barWidth}%` }}
+          />
+        </div>
+        <span className={`tabular-nums ${textTone}`}>
+          {usage.usedTokens === null ? "—" : formatTokenCount(used)}
+          <span className="text-muted-foreground/60">
+            {" / "}
+            {formatTokenCount(windowTokens)}
+          </span>
         </span>
-      </span>
+      </div>
+      {cache ? (
+        <span
+          className="tabular-nums text-muted-foreground/60"
+          title={cache.title}
+        >
+          {"· 缓存 "}
+          {cache.label}
+        </span>
+      ) : null}
     </div>
   );
+}
+
+/**
+ * 前缀缓存命中率。分子分母来自**同一次主 agent 调用**（后端 `context_cached_tokens` 和
+ * `context_tokens` 同源），所以这个比例就是「这一刻送进模型的上下文里，有多少是命中缓存的」。
+ *
+ * `cachedTokens === null` 和 `=== 0` 是两回事，必须分开显示：前者是这家 provider 压根不上报
+ * 缓存字段（实测走中转的 `provider: "custom"` 就是这样，`cache_status` 全是 unknown），
+ * 后者是真的一次没命中。混成一个 "0%" 会让人以为缓存策略失效，其实是没有数据。
+ */
+function describeCacheHit(
+  usage: ComposerContextUsage,
+): { label: string; title: string } | null {
+  if (usage.usedTokens === null || usage.usedTokens <= 0) {
+    return null;
+  }
+  if (usage.cachedTokens === null) {
+    return {
+      label: "—",
+      title: "该 provider 未上报缓存用量（走中转时常见），不是未命中",
+    };
+  }
+  const cached = Math.max(0, Math.min(usage.cachedTokens, usage.usedTokens));
+  const percent = Math.round((cached / usage.usedTokens) * 100);
+  return {
+    label: `${percent}%`,
+    title: `提示词缓存命中 ${cached.toLocaleString()} / ${usage.usedTokens.toLocaleString()} tokens（同一次主 agent 调用）`,
+  };
 }
 
 type ComposerActionsProps = {

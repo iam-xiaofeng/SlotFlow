@@ -132,3 +132,61 @@ def test_context_tokens_falls_back_when_no_graph_node_metadata() -> None:
     collector.on_llm_end(_response({"input_tokens": 42, "output_tokens": 1}), run_id="only")
 
     assert collector.summary()["context_tokens"] == 42
+
+
+def test_context_cached_tokens_comes_from_the_same_call_as_context_tokens() -> None:
+    """缓存命中量必须和 context_tokens 同源(同一次主 agent 调用)。
+
+    否则前端拿"整轮缓存总量 / 单次上下文占用"一除,得到的是个没有意义的比例——
+    子代理和压缩节点的缓存量会被算进分子,而分母只有主 agent 那一次。
+    """
+
+    collector = RunUsageCollector(model_name="m", provider="anthropic")
+
+    collector.on_chat_model_start({}, [[]], run_id="main", metadata={"langgraph_node": "agent"})
+    collector.on_llm_end(
+        _response(
+            {
+                "input_tokens": 100000,
+                "output_tokens": 10,
+                "input_token_details": {"cache_read": 90000},
+            }
+        ),
+        run_id="main",
+    )
+    # 工具内部的子代理:缓存量很大,但绝不能算进主 agent 的命中率。
+    collector.on_tool_start({}, "", run_id="tool")
+    collector.on_chat_model_start({}, [[]], run_id="child", metadata={"langgraph_node": "agent"})
+    collector.on_llm_end(
+        _response(
+            {
+                "input_tokens": 5000,
+                "output_tokens": 5,
+                "input_token_details": {"cache_read": 4000},
+            }
+        ),
+        run_id="child",
+    )
+    collector.on_tool_end("done", run_id="tool")
+
+    summary = collector.summary()
+
+    assert summary["context_tokens"] == 100000
+    assert summary["context_cached_tokens"] == 90000
+
+
+def test_context_cached_tokens_is_none_when_provider_reports_nothing() -> None:
+    """provider 不上报缓存字段时保持 None,前端才能把"没数据"和"0% 命中"分开显示。
+
+    实测走中转的 provider("custom")就是这样:cache_status 全是 unknown。
+    显示成 0% 会让人以为缓存策略失效,其实是压根没有数据。
+    """
+
+    collector = RunUsageCollector(model_name="m", provider="custom")
+    collector.on_chat_model_start({}, [[]], run_id="main", metadata={"langgraph_node": "agent"})
+    collector.on_llm_end(_response({"input_tokens": 4173, "output_tokens": 46}), run_id="main")
+
+    summary = collector.summary()
+
+    assert summary["context_tokens"] == 4173
+    assert summary["context_cached_tokens"] is None

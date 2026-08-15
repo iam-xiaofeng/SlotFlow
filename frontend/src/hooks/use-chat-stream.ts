@@ -27,6 +27,7 @@ import {
   messageRecordToUiMessage,
   parseClarificationRequest,
   parseToolStatus,
+  latestStoredTodos,
   parseTodos,
   settleRunningToolActivities,
   upsertToolActivity,
@@ -48,9 +49,13 @@ export type ThreadRunStatus = "streaming" | "attention" | "needs_input" | "error
 
 type ThreadTodoState = { todos: ChatTodo[]; listKey: string | null; signature: string };
 
-/** 线程级上下文占用:used = 最近一次成功调用的 prompt tokens;window = 模型上下文上限。 */
+/**
+ * 线程级上下文占用:used = 最近一次主 agent 调用的 prompt tokens;window = 模型上下文上限;
+ * cached = **同一次调用**里命中前缀缓存的部分(null 表示这家 provider 不上报,不是 0%)。
+ */
 type ThreadContextUsage = {
   usedTokens: number | null;
+  cachedTokens: number | null;
   windowTokens: number | null;
   budgetTokens: number | null;
   source: string | null;
@@ -58,6 +63,7 @@ type ThreadContextUsage = {
 
 const emptyContextUsage: ThreadContextUsage = {
   usedTokens: null,
+  cachedTokens: null,
   windowTokens: null,
   budgetTokens: null,
   source: null,
@@ -382,6 +388,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           ...current,
           [targetThread.id]: storedMessages.map(messageRecordToUiMessage),
         }));
+        // todo 面板和工具时间线一样,原来是纯流式状态:刷新或切走再切回就整个消失。
+        // 后端现在把每轮最后一次 todo 快照跟着 assistant 消息落库,这里取最后一条恢复。
+        replaceTodos(targetThread.id, latestStoredTodos(storedMessages));
         // token 仪表之前只活在内存里：只有"本次页面会话真的跑过一轮"才有数，刷新或切走再切回
         // 就整个消失。后端一直在写 run_metrics，这里把它读回来。失败不影响会话打开。
         void getThreadContextUsage(targetThread.id)
@@ -391,6 +400,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             }
             updateContextUsage(targetThread.id, {
               usedTokens: usage.context_tokens,
+              cachedTokens: usage.context_cached_tokens,
               windowTokens: usage.context_window_tokens,
               budgetTokens: usage.context_input_budget_tokens,
               source: usage.context_window_source,
@@ -404,7 +414,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         return false;
       }
     },
-    [setThreadError, updateContextUsage],
+    [replaceTodos, setThreadError, updateContextUsage],
   );
 
   const sendMessage = useCallback(
@@ -541,7 +551,15 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
             const windowTokens = readNumber(streamEvent.data.context_window_tokens);
             const budgetTokens = readNumber(streamEvent.data.context_input_budget_tokens);
             updateContextUsage(threadId, {
-              ...(usedTokens !== null ? { usedTokens } : {}),
+              // cachedTokens 和 usedTokens **必须一起写**:两个数来自同一次主 agent 调用,
+              // 分开更新会让"上一轮报了缓存、这一轮 provider 不报"时留下陈旧分子,
+              // 除出来一个假的命中率。null 是合法值(这家不上报),不能被跳过。
+              ...(usedTokens !== null
+                ? {
+                    usedTokens,
+                    cachedTokens: readNumber(streamEvent.data.context_cached_tokens),
+                  }
+                : {}),
               ...(windowTokens !== null ? { windowTokens } : {}),
               ...(budgetTokens !== null ? { budgetTokens } : {}),
             });

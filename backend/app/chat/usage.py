@@ -189,6 +189,7 @@ class RunUsageCollector(BaseCallbackHandler):
         # 完整上下文。不能用"最近一次成功调用",因为一轮里最后跑的很可能是压缩节点或 task_tool
         # 子代理(见类注释),它们的 prompt 与会话窗口占用无关,会让前端的进度条突然跌下去。
         context_tokens = _main_agent_context_tokens(calls)
+        context_call = _main_agent_context_call(calls)
         return {
             "llm_requests": len(calls),
             "llm_successes": sum(call["status"] == "success" for call in calls),
@@ -197,6 +198,13 @@ class RunUsageCollector(BaseCallbackHandler):
             "output_tokens": sum(call["output_tokens"] or 0 for call in calls),
             "total_tokens": sum(call["total_tokens"] or 0 for call in calls),
             "context_tokens": context_tokens,
+            # 前缀缓存命中量,取**和 context_tokens 同一次调用**的数字,不是整轮聚合。
+            # 两个数必须同源,否则前端把"整轮缓存总量 / 单次上下文"一除就是个没有意义的比例。
+            # None 有两种含义,前端要能区分:这家 provider 根本不报缓存字段(cache_status
+            # 全是 unknown),还是报了但这次没命中(0)。
+            "context_cached_tokens": (
+                context_call.get("cached_input_tokens") if context_call else None
+            ),
             "cached_input_tokens": sum(call["cached_input_tokens"] or 0 for call in observable) if observable else None,
             "cache_creation_input_tokens": sum(call["cache_creation_input_tokens"] or 0 for call in calls if call["cache_creation_input_tokens"] is not None) or None,
             "cache_observable_requests": len(observable),
@@ -212,6 +220,13 @@ def _main_agent_context_tokens(calls: list[dict[str, Any]]) -> int | None:
     而不是返回 None 让前端的仪表直接消失。
     """
 
+    call = _main_agent_context_call(calls)
+    return call["input_tokens"] if call else None
+
+
+def _main_agent_context_call(calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """定位上面那次调用本身,让 context_tokens 和缓存命中量同源。"""
+
     def _usable(call: dict[str, Any]) -> bool:
         return call["status"] == "success" and call["input_tokens"] is not None
 
@@ -221,8 +236,8 @@ def _main_agent_context_tokens(calls: list[dict[str, Any]]) -> int | None:
             and call.get("node") == RunUsageCollector.MAIN_AGENT_NODE
             and not call.get("nested_in_tool")
         ):
-            return call["input_tokens"]
+            return call
     for call in reversed(calls):
         if _usable(call) and call.get("node") is None and not call.get("nested_in_tool"):
-            return call["input_tokens"]
+            return call
     return None

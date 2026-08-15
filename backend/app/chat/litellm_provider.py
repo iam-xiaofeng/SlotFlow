@@ -246,20 +246,43 @@ def repair_streamed_tool_call_names(message: BaseMessage) -> BaseMessage:
     return message
 
 
-# Providers whose API contract REQUIRES the assistant's ``reasoning_content`` to be echoed back on
-# every turn. Native DeepSeek "thinking mode" is the current example: LiteLLM's DeepSeek transform
-# (``_fill_reasoning_content``) expects it on each prior assistant message and otherwise feeds the model
-# a blank reasoning chain. For every other provider (OpenAI / grok / glm / …) re-feeding the CoT is pure
-# backwash, so the carrier is dropped for context economy. Keyed off the provider, not the model id.
-_REASONING_ROUNDTRIP_PROVIDERS = frozenset({"deepseek"})
+# ``reasoning_content`` 默认**保留**在落库的 assistant 消息上(2026-08-14 改)。
+#
+# 之前是白名单:只有原生 DeepSeek 保留,其余全剥,理由是"OpenAI 系推理模型会自己重新推理,
+# 回喂 CoT 是纯浪费 token"。这个理由在**省 token** 这个维度上仍然成立,但它有两个代价:
+#
+# 1. DeepSeek 的契约是硬性的——LiteLLM 的 DeepSeek transform(``_fill_reasoning_content``)
+#    需要每条历史 assistant 消息都带这个字段,缺了就喂给模型一段空推理链。走中转时
+#    ``provider`` 是 ``"custom"``,白名单认不出它背后其实是 DeepSeek,于是**该保留的被剥了**。
+# 2. 剥掉之后 checkpoint 里没有,``llm_input_messages``(从 checkpoint 投影)自然也没有,
+#    模型连同一轮里自己上一步想过什么都看不到。
+#
+# 现在默认保留,只对明确会因此报错的 provider 走剥离(目前为空:没有实测到这样的 provider)。
+# 想恢复"省 token 优先"的旧行为,设 SLOTFLOW_STRIP_REASONING_PROVIDERS="grok,openai,glm"。
+#
+# 注意这条闸**只管 ``additional_kwargs`` 里的载体**。content 里的 reasoning/thinking 块
+# 仍然一律剥掉——那是线路非法(OpenAI 风格的 Chat Completions 会回
+# ``unknown variant 'reasoning'`` → 400)且是体积大头,与本开关无关。
+_STRIP_REASONING_PROVIDERS_ENV = "SLOTFLOW_STRIP_REASONING_PROVIDERS"
+
+
+def _strip_reasoning_providers() -> frozenset[str]:
+    raw = os.getenv(_STRIP_REASONING_PROVIDERS_ENV, "")
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
 def _provider_requires_reasoning_roundtrip(provider: str | None) -> bool:
-    """True if this provider needs ``reasoning_content`` kept on persisted assistant messages."""
+    """True if ``reasoning_content`` should be kept on persisted assistant messages.
 
+    默认全部保留;只有在 ``SLOTFLOW_STRIP_REASONING_PROVIDERS`` 里点名的 provider 才剥。
+    """
+
+    stripped = _strip_reasoning_providers()
+    if not stripped:
+        return True
     if not provider:
-        return False
-    return provider.split("/", 1)[0].strip().lower() in _REASONING_ROUNDTRIP_PROVIDERS
+        return True
+    return provider.split("/", 1)[0].strip().lower() not in stripped
 
 
 # 可重试的基础设施抖动:限流 / 超时 / 连接 / 5xx。撞上它们不该被 tool_safety 转成模型可见的
@@ -305,13 +328,15 @@ def sanitize_reasoning_message(
     * ``content`` block list → the answer string (via the same collapse used outbound), so nothing but
       answer text is persisted. **Always applied** — the block list is wire-illegal for OpenAI-style Chat
       Completions (``unknown variant 'reasoning'`` → 400) and is the main bloat source.
-    * ``reasoning_content`` (the single top-level carrier) is dropped **unless the provider requires it
-      back**. For OpenAI-style reasoners (grok/glm/openai) re-feeding the CoT is pure backwash — they
-      re-reason — and the UI's reasoning box is captured live from the stream, not from this message. The
-      exception is **native DeepSeek thinking mode** (``provider == "deepseek"``), whose API rejects a
-      missing ``reasoning_content`` on prior assistant turns; for it the carrier is preserved so
-      multi-turn thinking keeps working. (``provider`` comes from ``run_context.model_provider``; custom
-      OpenAI-compatible relays are ``"custom"`` and are dropped as usual.)
+    * ``reasoning_content`` (the single top-level carrier) is **kept by default** (2026-08-14). It used to
+      be dropped for everything except native DeepSeek, on the "OpenAI-style reasoners re-reason anyway,
+      so echoing the CoT is pure backwash" argument. That argument still holds for token economy, but the
+      allowlist keyed off ``run_context.model_provider`` — and a DeepSeek reached through an
+      OpenAI-compatible relay reports ``"custom"``, so the one provider that genuinely requires the field
+      back was the one getting it stripped. Keeping it also means the checkpoint (and therefore
+      ``llm_input_messages``, which is projected from it) carries the reasoning chain, so the model can
+      see what it already worked out. Opt back into stripping per provider with
+      ``SLOTFLOW_STRIP_REASONING_PROVIDERS="grok,openai,glm"``.
 
     Signed ``thinking_blocks`` are deliberately preserved: Anthropic/Bedrock extended-thinking tool loops
     require the signed block on the continuation request. No-op for plain string content without reasoning.
