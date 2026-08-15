@@ -730,6 +730,27 @@ Chinese, conventional-ish prefixes (重构 / 功能 / 修复 / 测试 / 文档 /
 module per commit, footer:
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 
+## 产物预览的 CORS 取舍(2026-08-15,已生效,可回退)
+
+`GET /api/workspace/artifacts/raw*` 会带 `Access-Control-Allow-Origin: *`
+(`app/workspace/routes.py` 的 `RAW_ARTIFACT_HEADERS`)。**这不是图省事,是预览的硬条件**:
+
+产物面板的 iframe 带 `sandbox` 且**刻意不给** `allow-same-origin` —— 产物是模型生成的内容,
+给了同源权限它就能读 localStorage、冒充用户调 API。代价是这个 iframe 成了**不透明源**,
+发出的请求 `Origin: null`;而 `<script type="module">` 无论如何都以 CORS 模式抓取。
+所以少了这个响应头,**任何带 JS 的 HTML 产物都只能白屏**(一个 Vite 构建产物就是这么发现的)。
+
+换来的暴露面:别的网页上的脚本,只要**猜中完整产物路径**、且本机后端正在跑,就能读到该文件。
+判断依据是 SlotFlow 是本地开发工具、产物是用户自己的文件,这个交换划算。
+
+**要收紧**:把 `RAW_ARTIFACT_HEADERS` 的值从 `"*"` 改成 `"null"`,只放行不透明源,
+浏览器一样接受,普通跨站脚本就读不到了。改完跑
+`tests/test_workspace.py::test_raw_artifact_path_style_url_lets_relative_assets_resolve`
+(该用例断言了这个头,需同步改断言)。
+
+**不要**通过给 iframe 加 `allow-same-origin` 来"绕过 CORS" —— 那是把模型生成的内容
+提升到同源,比这里的暴露面严重得多。
+
 <!-- OPENWIKI:START -->
 
 ## OpenWiki

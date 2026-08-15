@@ -18,22 +18,26 @@ the agent should not only answer, but also read files, call tools, remember usef
 context, ask for clarification, and produce durable outputs that can be previewed in the
 workspace panel.
 
-### Live transcripts (read-only demo)
+### Live transcript (read-only demo)
 
-**[▶ Browse real conversation transcripts](#)** — replace this link with your deployed URL.
+**[▶ Open the live demo](https://slotflow-demo.pages.dev)** — no signup, nothing to install.
 
-A static, no-backend page showing 10 real SlotFlow runs: long tool results offloaded and
-retrieved again, context compaction with later recall, sandboxed code execution, HITL
-clarification, Skills two-step loading, plus two long multi-step tasks (a generated landing
-page you can preview inline, and a 19-tool research session). Thinking, tool timelines, todo
-panels, clarification cards and artifacts are all rendered. See [`demo/`](./demo) to
-regenerate or self-host it.
+A static, backend-free site rendered by **the product's own frontend** — not a mockup, not
+a screen recording. It replays one real SlotFlow run: *"build a high-visual marketing page
+using the `frontend-design` + `ui-ux-pro-max` skills"*, which the agent answered by loading
+both skills, planning with a todo list, asking a clarifying question, dispatching **three
+sub-agents in parallel**, executing code in the Docker sandbox, and shipping a Vite + React 19
++ TypeScript build you can preview inline in the artifact panel.
+
+Everything on the page is recorded output: ~284k characters of reasoning, 29 tool
+invocations, the todo panel, the clarification card, and 52 artifacts. It is read-only —
+you can browse, but not chat. See [`demo/`](./demo) to regenerate or self-host it.
 
 ---
 
 ## Contents
 
-- [Live transcripts](#live-transcripts-read-only-demo)
+- [Live transcript](#live-transcript-read-only-demo)
 - [What You Get](#what-you-get)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
