@@ -255,6 +255,8 @@ async def stream_thread_run(
         completed = False
         # 用户在这一轮看到过的工具时间线,跟着 assistant 消息一起落库(见 collect_tool_activity)。
         tool_activities: list[dict] = []
+        # 同理,todo 面板也是纯流式状态:不存的话刷新就没了。存这一轮最后一次快照。
+        todos_snapshot: list[dict] = []
 
         try:
             events = adapter.stream_events(request=body, bundle=bundle)
@@ -280,6 +282,11 @@ async def stream_thread_run(
                 if event.event == "tool.status":
                     collect_tool_activity(tool_activities, dict(event.data))
 
+                if event.event == "todo.updated":
+                    todos = event.data.get("todos")
+                    if isinstance(todos, list):
+                        todos_snapshot = [item for item in todos if isinstance(item, dict)]
+
                 if event.event == "state.snapshot":
                     snapshot_message_content = latest_assistant_content(event)
                     snapshot_reasoning_content = latest_assistant_reasoning_content(event)
@@ -299,6 +306,7 @@ async def stream_thread_run(
                         ),
                         thinking_enabled=bundle.context.thinking_enabled,
                         tool_activities=tool_activities,
+                        todos=todos_snapshot,
                     )
                     clarification_metadata["source"] = "clarification"
                     clarification_metadata["clarification"] = dict(event.data)
@@ -349,6 +357,7 @@ async def stream_thread_run(
                                 reasoning_content,
                                 thinking_enabled=bundle.context.thinking_enabled,
                                 tool_activities=tool_activities,
+                                todos=todos_snapshot,
                             ),
                         )
                         await update_thread_title_after_first_exchange(
@@ -509,6 +518,7 @@ def assistant_message_metadata(
     *,
     thinking_enabled: bool = False,
     tool_activities: list[dict] | None = None,
+    todos: list[dict] | None = None,
 ) -> dict:
     metadata = {"source": "agent"}
     if thinking_enabled:
@@ -517,6 +527,8 @@ def assistant_message_metadata(
         metadata["reasoning_content"] = reasoning_content
     if tool_activities:
         metadata["tool_activities"] = tool_activities
+    if todos:
+        metadata["todos"] = todos
     return metadata
 
 
@@ -535,7 +547,11 @@ def collect_tool_activity(activities: list[dict], payload: dict) -> None:
     tool_name = payload.get("tool_name")
     phase = payload.get("phase")
     message = payload.get("message")
-    if not isinstance(tool_name, str) or not isinstance(message, str):
+    # 空工具名要挡住:流式早期解析不出名字时会出现空串(见 projections.extract_tool_call_name),
+    # 落一条没有名字的时间线纯属噪音。
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return
+    if not isinstance(message, str):
         return
     if phase not in ("starting", "running", "completed", "error"):
         return

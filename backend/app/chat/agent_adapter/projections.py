@@ -111,15 +111,28 @@ def tool_status_event_from_tool_call(
 
 
 def extract_tool_call_name(tool_call: dict[str, Any]) -> str | None:
+    """取工具名;流式早期还没解析出名字时返回 None。
+
+    2026-08-15 真机:走中转的流式 tool_call 初期 `name` 是**空字符串**(最终消息由
+    `repair_streamed_tool_call_names` 修好,但流式那一刻还没有)。原来只判 `is None`,
+    空串一路漏到 `tool.status`,产生两个后果:
+
+    1. 界面上出现一个没有名字的「正在调用工具」芯片,什么信息都不给;
+    2. 空名字**匹配不上 `_TOOL_STATUS_SKIP`**,于是本该被跳过的 `write_todos` /
+       `ask_clarification`(它们有专属的 todo 面板 / 澄清卡片)反而漏出一个通用芯片。
+
+    名字没解析出来就当作「还不知道」,等它出现时自然会有正常的事件。
+    """
+
     name = tool_call.get("name")
     if isinstance(name, str):
-        return name
+        return name.strip() or None
 
     nested = tool_call.get("tool_call")
     if isinstance(nested, dict):
         nested_name = nested.get("name")
         if isinstance(nested_name, str):
-            return nested_name
+            return nested_name.strip() or None
 
     return None
 

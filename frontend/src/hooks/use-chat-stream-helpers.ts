@@ -410,3 +410,23 @@ export function formatClarificationContent(clarification: ClarificationRequestRe
 export function makeId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
+
+/**
+ * 从落库消息里取最后一次 todo 快照。
+ *
+ * 和 `parseToolActivities` 同一类问题:todo 面板原来只由流式 `todo.updated` 事件驱动,
+ * 刷新或切走再切回就整个消失——明明模型列过计划,回头看却什么都没有。后端现在把每轮最后一次
+ * 快照跟着 assistant 消息一起存(`chat/routes.py`),这里取时间上最后的那一份。
+ */
+export function latestStoredTodos(records: MessageRecord[]): ChatTodo[] {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const raw = records[index]?.metadata?.todos;
+    if (Array.isArray(raw)) {
+      const todos = parseTodos(raw);
+      if (todos.length > 0) {
+        return todos;
+      }
+    }
+  }
+  return [];
+}

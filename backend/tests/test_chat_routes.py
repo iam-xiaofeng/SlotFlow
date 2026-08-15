@@ -886,3 +886,20 @@ def test_assistant_metadata_carries_the_tool_timeline() -> None:
     assert metadata["tool_activities"][0]["toolName"] == "web_search"
     # 没有工具的那一轮不该塞一个空数组进去。
     assert "tool_activities" not in assistant_message_metadata("x", tool_activities=[])
+
+
+def test_collect_tool_activity_rejects_blank_tool_names() -> None:
+    """空工具名不能进时间线。
+
+    2026-08-15 真机:走中转的流式 tool_call 初期 `name` 是空字符串,一路漏到 tool.status,
+    界面上出现一个没有名字的「正在调用工具」芯片;更糟的是空名字匹配不上
+    `_TOOL_STATUS_SKIP`,本该被跳过的 write_todos / ask_clarification 反而漏出通用芯片。
+    """
+
+    from app.chat.routes import collect_tool_activity
+
+    activities: list[dict] = []
+    collect_tool_activity(activities, {"tool_name": "", "phase": "running", "message": "正在调用工具"})
+    collect_tool_activity(activities, {"tool_name": "   ", "phase": "running", "message": "正在调用工具"})
+
+    assert activities == []

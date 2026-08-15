@@ -27,6 +27,7 @@ import {
   messageRecordToUiMessage,
   parseClarificationRequest,
   parseToolStatus,
+  latestStoredTodos,
   parseTodos,
   settleRunningToolActivities,
   upsertToolActivity,
@@ -387,6 +388,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
           ...current,
           [targetThread.id]: storedMessages.map(messageRecordToUiMessage),
         }));
+        // todo 面板和工具时间线一样,原来是纯流式状态:刷新或切走再切回就整个消失。
+        // 后端现在把每轮最后一次 todo 快照跟着 assistant 消息落库,这里取最后一条恢复。
+        replaceTodos(targetThread.id, latestStoredTodos(storedMessages));
         // token 仪表之前只活在内存里：只有"本次页面会话真的跑过一轮"才有数，刷新或切走再切回
         // 就整个消失。后端一直在写 run_metrics，这里把它读回来。失败不影响会话打开。
         void getThreadContextUsage(targetThread.id)
@@ -410,7 +414,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         return false;
       }
     },
-    [setThreadError, updateContextUsage],
+    [replaceTodos, setThreadError, updateContextUsage],
   );
 
   const sendMessage = useCallback(
